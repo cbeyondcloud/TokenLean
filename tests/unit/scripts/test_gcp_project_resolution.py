@@ -16,21 +16,43 @@ HOST = (ROOT / "scripts" / "gcp" / "prepare-gcp-deploy-host.sh").read_text(encod
 PLACEHOLDER = "your-gcp-project-id"
 
 
-def _tracked(pattern: str) -> list:
-    out = subprocess.run(["git", "ls-files", pattern], cwd=ROOT, capture_output=True,
+def _tracked(pattern: str, root: Path = ROOT) -> list:
+    if not (root / ".git").exists():
+        # A `git archive` copy has no .git, and every file in it is a tracked one.
+        return list(root.rglob(pattern))
+    out = subprocess.run(["git", "ls-files", pattern], cwd=root, capture_output=True,
                          text=True, check=True).stdout
-    return [ROOT / p for p in out.split()]
+    return [root / p for p in out.split()]
 
 
 def test_no_public_script_or_template_defaults_to_the_maintainers_project():
+    scripts = _tracked("*.sh")
+    assert ROOT / "scripts" / "gcp" / "gcp-deploy.sh" in scripts, "the scan missed the scripts"
     offenders = []
-    for path in _tracked("*.sh") + [ROOT / ".env.template"]:
+    for path in scripts + [ROOT / ".env.template"]:
         text = path.read_text(encoding="utf-8", errors="replace")
         if re.search(r":-token-optimisation\}|^GCP_PROJECT_ID=token-optimisation\s*$", text, re.M):
             offenders.append(path.relative_to(ROOT).as_posix())
     assert offenders == []
     assert re.search(r"^GCP_PROJECT_ID=$", (ROOT / ".env.template").read_text(encoding="utf-8"),
                      re.M)
+
+
+def test_without_a_git_checkout_the_scan_reads_the_files_on_disk(tmp_path):
+    # The suite also runs in a `git archive` copy of the repo, which has no .git.
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "deploy.sh").write_text("", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("", encoding="utf-8")
+    assert _tracked("*.sh", tmp_path) == [tmp_path / "scripts" / "deploy.sh"]
+
+
+def test_in_a_git_checkout_the_scan_reads_only_tracked_files(tmp_path):
+    # A checkout can hold files the repo does not track, and those never ship.
+    for name in ("tracked.sh", "untracked.sh"):
+        (tmp_path / name).write_text("", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tracked.sh"], cwd=tmp_path, check=True)
+    assert _tracked("*.sh", tmp_path) == [tmp_path / "tracked.sh"]
 
 
 def test_the_deploy_refuses_the_placeholder_once_the_project_is_resolved():

@@ -23,9 +23,8 @@ Two invariants, both cheap and both generic:
      provider's prefixes (the shape that actually bit us — routing knows the model,
      provider detection does not).
 
-Only `config/config.yaml.template` ships; `config/config.yaml` and
-`config/config.roi-openai.yaml` are gitignored, so they are checked when present and
-skipped in a clean OSS checkout.
+Only `config/config.yaml.template` ships; `config/config.yaml` is gitignored, so it is
+checked when present and skipped in a clean OSS checkout.
 """
 from pathlib import Path
 
@@ -37,7 +36,6 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIGS = [
     ROOT / "config" / "config.yaml.template",   # tracked — always present
     ROOT / "config" / "config.yaml",            # local dev — gitignored
-    ROOT / "config" / "config.roi-openai.yaml",  # ablation harness — gitignored
 ]
 
 
@@ -104,9 +102,9 @@ class TestTheCodeAndTheTemplateAgreeOnPrefixes:
 
     The two tests above have almost no regression power over what actually ships: the
     template routes `complex` to `gpt-4-5` and names no o-series model at all, so the
-    `o4` prefix could be deleted from it tomorrow and both would still pass. The configs
-    that WOULD have caught the 2026-09-08 defect (`config.yaml`, `config.roi-openai.yaml`)
-    are gitignored, so they skip in a clean checkout — i.e. in `verify-oss-gates.sh` and
+    `o4` prefix could be deleted from it tomorrow and both would still pass. The local
+    config that WOULD have caught the 2026-09-08 defect (`config.yaml`) is gitignored,
+    so it skips in a clean checkout — i.e. in a `git archive` copy and
     in public CI, the only places this guard has to hold.
 
     These two compare the shipped template against the CODE, which is always present:

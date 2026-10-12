@@ -22,8 +22,8 @@ unrestricted (allow). A tenant with its own non-empty list is bound to
 The source IP comes from ``net/client_ip.py``, which counts trusted proxy hops from the
 right of ``X-Forwarded-For`` (its left-most entry is whatever the client wrote).
 
-This module imports only the stdlib — no commercial module, keeping the open-core
-barricade green (``verify-oss-gates.sh`` Gate 7).
+This module imports only the stdlib — no commercial module, so the open-core
+barricade holds.
 """
 
 from __future__ import annotations
