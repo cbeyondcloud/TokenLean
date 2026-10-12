@@ -26,6 +26,7 @@ llm_keys:
   #openrouter: "sk-or-..."       # OpenRouter API key (aggregator; openrouter/<vendor>/<model>)
   #opencode:  "..."             # OpenCode Zen API key (gateway; opencode/<model>)
   #azure:     "..."              # Azure OpenAI key (endpoint/version in config providers.azure)
+  #typesafe:  "..."              # TypeSafe Jev key, only for G06 classifier: jev without the portal
   # AWS Bedrock uses SigV4 creds (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / region), not a key here.
 
 # Langfuse OSS API Keys — generated AFTER first deploy.

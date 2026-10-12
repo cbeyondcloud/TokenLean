@@ -231,6 +231,10 @@ class RequestContext:
     # NOTE this is NOT usage_events.complexity_tier, which carries the caller's
     # X-Complexity-Tier header rather than anything the proxy decided.
     complexity_tier: Optional[str] = None
+    # Why G06's configured classifier could not decide, so its default classifier did (one of
+    # middleware.g06_jev.FALLBACK_REASONS, e.g. "no_key"), or None. G06 stamps it onto
+    # routing_mode as "+fallback:<reason>", which the tenant sees in _token_opt.
+    classifier_fallback: Optional[str] = None
     # What actually happened to reasoning on this request, set by G12:
     #   "off_honoured"    — reasoning was requested off AND the provider can honour it
     #   "off_unsupported" — requested off, but the model reasons intrinsically (o-series)

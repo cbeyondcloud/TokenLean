@@ -260,7 +260,7 @@ resource "google_secret_manager_secret" "llm_key_mistral" {
 # project-level secretmanager.secretAccessor binding (proxy_secret_accessor) already covers
 # them, so no per-secret IAM is required.
 resource "google_secret_manager_secret" "llm_key_extra" {
-  for_each  = toset(["gemini", "cohere", "deepseek", "xai", "groq", "azure", "openrouter", "opencode"])
+  for_each  = toset(["gemini", "cohere", "deepseek", "xai", "groq", "azure", "openrouter", "opencode", "typesafe"])
   secret_id = "llm-key-${each.key}"
   replication {
     auto {}

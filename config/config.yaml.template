@@ -580,6 +580,11 @@ pricing:
   opencode/minimax-m3:
     input: 0.0
     output: 0.0
+  # TypeSafe Jev, G06's optional complexity classifier (classifier: jev): $0.042 per million
+  # input tokens, output free. Its calls are recorded as <key_provider>/<model>.
+  typesafe/jev:
+    input: 0.000042
+    output: 0.0
   default:
     input: 0.005
     output: 0.015
@@ -874,7 +879,7 @@ groups:
     # x_complexity override bypasses the cascade entirely). allow_escalation_above_
     # requested: when false (default), G06 never routes to a model costlier than the one
     # the caller requested — enforced BOTH in the execution cascade AND on the label
-    # paths (heuristic / llm_judge / routellm), where a mis-classified "medium"/"complex"
+    # paths (heuristic / llm_judge / routellm / jev), where a mis-classified "medium"/"complex"
     # tier that outprices the requested model reverts to the requested model. Routing
     # only ever saves cost, never adds it. Explicit x_complexity user overrides are exempt.
     cascade_cap_to_classified_tier: true
@@ -915,6 +920,32 @@ groups:
       model_map:
         weak: simple
         strong: complex
+    # Jev (TypeSafe's decision model; used when classifier: jev) rates each request on these
+    # levels, lowest first (2-10), and each level names the tier whose models answer it. G06
+    # takes the lowest level whose probability, with every level below it, reaches
+    # enough_probability: 0.5 is Jev's middle estimate; raise it to route up when Jev is
+    # unsure. Jev sees the request's own text, never the system prompt, newest
+    # max_state_chars kept. The key is each TENANT's own, stored in the portal under
+    # key_provider (a self-hosted proxy reads LLM_KEY_<KEY_PROVIDER>), which must not be an
+    # LLM provider's name. No key, an error, or an answer that fails the check: the request
+    # uses the default classifier (cascade) and routing_mode says "jev+fallback:<reason>".
+    # Set this block here or under tenants.<id>.groups.G6_routing, never in a params file:
+    # those merge one level deep, so they would drop the rest of G6_routing.
+    jev:
+      url: https://api.typesafe.ai/v1/systemone   # any TypeSafe-compatible endpoint
+      model: jev-1.13.0          # pinned: jev-latest moves without notice
+      key_provider: typesafe
+      timeout_ms: 1000
+      max_state_chars: 4000
+      enough_probability: 0.5
+      key_cache_s: 60            # a key lookup, found or missing, is reused this long
+      warn_every_s: 3600         # one warning per tenant and reason per this many seconds
+      instructions: "How hard is this request for an AI model to answer well?"
+      levels:
+        - {name: low,     tier: simple,  describe: "A quick fact, definition, greeting, or short rewrite"}
+        - {name: medium,  tier: medium,  describe: "Explaining, comparing or summarising, with some reasoning"}
+        - {name: high,    tier: complex, describe: "Multi-step analysis, writing or fixing code, careful reasoning"}
+        - {name: complex, tier: complex, describe: "Deep design, research, proofs, or long multi-part work"}
     # ── Declarative routing rules (default off) ────────────────────────────────
     # Deterministic, in-proxy per-tenant policy evaluated BELOW the caller's
     # x_complexity override and ABOVE the classifier. First matching rule (by

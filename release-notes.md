@@ -21,6 +21,22 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-12
+
+### G6 routing can ask Jev how hard a request is — Enhancement (OSS + Enterprise)
+
+Set `classifier: jev` and G6 asks TypeSafe's Jev, a decision model that answers with
+probabilities rather than text, to rate each request on your own ordered levels (low, medium,
+high, complex, or 2–10 of your choosing); each level names the tier whose models answer it.
+`jev.enough_probability` sets how sure Jev must be before a cheaper level wins. Jev sees the
+request's own text, never the system prompt, and is called with each tenant's own TypeSafe key.
+No key, an outage, a timeout or an answer that fails its check: the default classifier decides,
+and `routing_mode` says `jev+fallback:<reason>`. Nothing changes unless you select it.
+- **OSS:** the classifier, its config and pricing row, a fallback metric, and
+  `LLM_KEY_TYPESAFE` for a self-hosted proxy.
+- **[Enterprise]:** tenants routed by Jev store their TypeSafe key under Models & Keys, and the
+  readiness check verifies that Jev decides — <https://tokenlean.cbeyond.cloud/>
+
 ## 2026-10-07
 
 ### The key-sync job can read its keys file on any host — Bug fix

@@ -50,13 +50,17 @@ class SavingsRecord:
     cost_cache_read_usd: Optional[float] = None
     cost_cache_write_usd: Optional[float] = None
     # G6 routing-specific fields
-    # "heuristic" | "routellm" | "cascade" | "llm_judge" | "user_override" |
+    # "heuristic" | "routellm" | "cascade" | "llm_judge" | "jev" | "user_override" |
     # "cascade_execution" | "<classifier>_fallback" | "rules:<rule_id>" (tenant routing
-    # rule hit; may carry "+cost_floor"/"+tier_unreachable_fallback" suffixes)
+    # rule hit). Any may carry "+cost_floor"/"+tier_unreachable_fallback" suffixes, and a
+    # classifier that could not decide carries "+fallback:<reason>" (e.g. "jev+fallback:no_key").
     routing_mode: Optional[str] = None
     routellm_router_used: Optional[str] = None  # e.g., "mf"
     routellm_threshold: Optional[float] = None
     routellm_confidence: Optional[float] = None
+    # The level a level-rating classifier (Jev) chose, e.g. "high". Set only when it decided,
+    # so its presence is the proof that the classifier itself made the call.
+    routing_level: Optional[str] = None
     # Multi-call disclosure. A G06 cascade that escalates, or an llm_judge classifier,
     # makes more than one provider call for one request; cost_actual_usd sums them all,
     # while final_tokens_sent (y) stays the FINAL call's prompt so it remains comparable
@@ -206,4 +210,6 @@ class SavingsRecord:
             metadata["routellm_threshold"] = self.routellm_threshold
         if self.routellm_confidence is not None:
             metadata["routellm_confidence"] = self.routellm_confidence
+        if self.routing_level:
+            metadata["routing_level"] = self.routing_level
         return metadata

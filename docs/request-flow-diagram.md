@@ -203,7 +203,7 @@ Developer application sends `POST /v1/chat/completions` with `Authorization: Bea
 - If hit: set `ctx.cache_hit=True`, return cached response
 
 **G06: Routing** (`g06_routing.py`)
-- Classifier modes: `heuristic`, `llm_judge`, `cascade`, `routellm`
+- Classifier modes: `heuristic`, `llm_judge`, `cascade`, `routellm`, `jev` (TypeSafe's Jev, with each tenant's own key; any failure falls back to `cascade`)
 - Optional true 3-tier cascade (cheap → confidence check → escalate) with cost-bounded escalation
 - Sets `ctx.routed_model` (may differ from the requested model, including its provider on the
   opt-in cross-provider routing paths) — `ctx.provider_adapter` is re-resolved immediately after
@@ -677,6 +677,7 @@ class InterAgentState(BaseModel):
 | **LLMLingua-2 sidecar** | Runtime prompt compression | G01 |
 | **Tika sidecar** | Document text extraction | G03 |
 | **RouteLLM sidecar** | Model routing classifier | G06 |
+| **TypeSafe Jev (optional, hosted)** | Complexity classifier (`classifier: jev`) | G06 |
 | **LiteLLM** | LLM provider abstraction | `main.py` |
 | **Langfuse / Prometheus / OTLP** | Observability & tracing | G18, `langfuse_tracing.py`, `tracing/otel.py` |
 | **Mem0 / Instructor (optional)** | Long-term memory / typed output | G10, G09 |

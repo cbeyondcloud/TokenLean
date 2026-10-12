@@ -168,6 +168,7 @@ services:
       LLM_KEY_OPENROUTER: ${LLM_KEY_OPENROUTER:-}
       LLM_KEY_OPENCODE: ${LLM_KEY_OPENCODE:-}
       LLM_KEY_AZURE: ${LLM_KEY_AZURE:-}
+      LLM_KEY_TYPESAFE: ${LLM_KEY_TYPESAFE:-}
       # WS22 env invariant: the proxy container carries ONLY LLM_KEY_<PROVIDER>
       # variables — never litellm-native ones (OPENAI_API_KEY, ANTHROPIC_API_KEY,
       # AWS_ACCESS_KEY_ID, ...). Litellm-native vars bypass the BYOK key resolver,

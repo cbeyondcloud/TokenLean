@@ -59,6 +59,24 @@ class TestEveryClassifyingPathPublishesIt:
             "Design an algorithm and analyse its time complexity in detail.",
             classifier="cascade", cascade_execution=True) == "complex"
 
+    async def test_the_jev_path_publishes_jevs_tier(self, make_ctx, minimal_config,
+                                                    monkeypatch):
+        from middleware import g06_jev
+
+        async def decided(ctx, cfg, tier_order):
+            return g06_jev.JevDecision(tier="complex", level="high")
+        monkeypatch.setattr(g06_jev, "classify", decided)
+        assert await _tier(make_ctx, minimal_config, classifier="jev") == "complex"
+
+    async def test_a_jev_fallback_publishes_the_default_classifiers_tier(
+            self, make_ctx, minimal_config, monkeypatch):
+        from middleware import g06_jev
+
+        async def fell_back(ctx, cfg, tier_order):
+            return g06_jev.JevDecision(fallback="no_key")
+        monkeypatch.setattr(g06_jev, "classify", fell_back)
+        assert await _tier(make_ctx, minimal_config, classifier="jev") == "simple"
+
 
 @pytest.mark.asyncio
 class TestPathsThatDecideNothingPublishNothing:

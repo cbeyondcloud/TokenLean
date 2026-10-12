@@ -462,7 +462,7 @@ tests/                      # Unit and integration tests (pytest)
 | **G3** | Knowledge Strategy | 15-40% | RAG with OOD detection, fine-tuning pipeline with break-even detection. Opt-in **PII/PHI redaction at ingest** (`INGEST_PII_MODE`) so the vector store never holds raw personal data; **freshness metadata** (`ingested_at`/`source_date`) with a `max_age_days` stale-context filter |
 | **G4** | Rules-Based Bypass | 100% | PostgreSQL cache with exact/fuzzy matching (pg_trgm) |
 | **G5** | Response Caching | 30-80% | L1 Redis exact-match + L2 pgvector semantic. `cache_scope`: `tenant` (default — reuse across providers), `tenant+model` (isolate per requested model), `tenant+system` (isolate per system-prompt fingerprint, so personas/apps sharing one key never get each other's cached answers), or `tenant+model+system` |
-| **G6** | Model Routing | 40-70% | Three-tier cascade (fast→confidence check→escalation→rollback) + opt-in strategies (canary / weighted / round-robin / least-latency) |
+| **G6** | Model Routing | 40-70% | Three-tier cascade (fast→confidence check→escalation→rollback) + opt-in strategies (canary / weighted / round-robin / least-latency) + an opt-in Jev classifier (TypeSafe's decision model rates each request on your own complexity levels; each tenant's own key) |
 | **G7** | Retrieval Optimisation | 20-35% | Hybrid RAG (dense + sparse) with reranking |
 | **G8** | Tool Loading | varies — see note | MCP lazy-load manifest protocol, and a daily, per-tenant check for registry tools the model has stopped calling (it reports them until you let it drop them: `pruning.dry_run_first`). **Intent-based pruning only acts on tools you have listed in your own `registry_path`** — a tool with no registry entry is always kept, so on a fresh install this part of G8 is a no-op until you register your tools. **Tool-description compression** (`compress_descriptions`, on by default) trims the prose in tool schemas that ride every agentic request — code/paths/identifiers preserved byte-for-byte, no tool ever dropped — and is what G8 contributes out of the box |
 | **G9** | Context Schema | 15-25% | Instructor library with timeout fallback to heuristic |
@@ -513,7 +513,7 @@ On the [Enterprise](#free-self-host-vs-enterprise-managed) managed portal, **eve
 | **G3** Knowledge Strategy | `chunk_size_tokens` 400; `rag_fallback.top_k` 5; `rag_fallback.similarity_threshold` 0.85 | fewer/smaller chunks, higher threshold | more chunks, lower threshold for recall |
 | **G4** Rules Bypass | `default_confidence_threshold` 0.7; `keyword_weight` 0.4 / `pattern_weight` 0.6 | lower threshold → bypass more | raise threshold → only high-confidence bypass |
 | **G5** Response Caching | `l2_similarity_threshold` 0.9; `semantic_skip_multiturn` true; `cache_scope` tenant | lower thresholds → more cache hits | raise thresholds; keep multi-turn skip on; `tenant+model` / `tenant+system` scope |
-| **G6** Model Routing | `tiers.{simple,medium,complex}`; `cascade_confidence_threshold` 0.7; `routellm.threshold`; `strategy` priority (+ `strategy_weights`, `canary_pct`) | route more to cheap tier (lower threshold); split within a tier via canary/weighted/round-robin/least-latency | raise threshold → escalate sooner; default `strategy: priority` keeps the measured baseline byte-identical |
+| **G6** Model Routing | `tiers.{simple,medium,complex}`; `cascade_confidence_threshold` 0.7; `routellm.threshold`; `strategy` priority (+ `strategy_weights`, `canary_pct`); with `classifier: jev`, `jev.enough_probability` 0.5 | route more to cheap tier (lower threshold); split within a tier via canary/weighted/round-robin/least-latency; with Jev, lower `jev.enough_probability` | raise threshold → escalate sooner; default `strategy: priority` keeps the measured baseline byte-identical; with Jev, raise `jev.enough_probability` → route up when Jev is unsure |
 | **G7** Retrieval | `top_k` 3; `top_k_after_rerank` 1; `similarity_threshold` 0.85; `max_total_context_tokens` 4000 | fewer chunks, higher threshold, smaller context | more chunks / larger context for completeness |
 | **G8** Tool Loading | `max_tools_per_agent` 20 | fewer tools injected | raise cap so no needed tool is pruned |
 | **G9** Context Schema | `enabled` false; `prose_min_length_chars` 80 | enable prose→schema compaction | keep off, or raise min length |
@@ -650,6 +650,7 @@ main._record_outcome ───────────────────�
 | **Caching** | Redis 7 + pgvector | L1 exact-match + L2 semantic cache |
 | **RAG** | Qdrant + sentence-transformers | Vector search (G7) |
 | **Routing** | RouteLLM | Model selection (G6) |
+| **Routing (optional)** | TypeSafe Jev (hosted; each tenant's own key) | Complexity levels for G6 (`classifier: jev`) |
 | **Memory** | Redis + Qdrant | Session summaries and agent skills (G10) |
 | **Orchestration** | LangGraph | Role-decomposition templates in `templates/` (G16 guidance; the proxy does not run them) |
 | **Observability** | Langfuse + Grafana + Prometheus | Tracing and dashboards (G18) |

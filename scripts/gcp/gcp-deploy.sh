@@ -314,6 +314,8 @@ provision_llm_keys() {
     store_key "llm-key-azure"       "azure"     || true
     store_key "llm-key-openrouter"  "openrouter" || true
     store_key "llm-key-opencode"    "opencode"  || true
+    # TypeSafe Jev (G06 classifier: jev) on a deployment without the portal's per-tenant keys.
+    store_key "llm-key-typesafe"    "typesafe"  || true
   fi
 
   # RouteLLM embeddings key — INFRA credential for the routellm-sidecar (G06 mf/sw_ranking

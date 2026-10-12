@@ -3,7 +3,7 @@ G06 · Model Routing & Cascading
 Stage: At the Gate
 Saving: 60–80% average per-query cost
 Technique: Classify request complexity → route to cheapest capable model tier.
-           Pluggable classifiers: heuristic | llm_judge | cascade (default) | routellm.
+           Pluggable classifiers: heuristic | llm_judge | cascade (default) | routellm | jev.
            User can override complexity tier per-request via params.
 """
 import asyncio
@@ -1251,6 +1251,19 @@ async def _classify_routellm(
     return tier
 
 
+async def _classify_jev(ctx: RequestContext, cfg: Dict[str, Any]) -> str:
+    """Ask TypeSafe's Jev (``middleware.g06_jev``) which of the operator's levels the request
+    is, and return that level's tier. When Jev cannot decide, the DEFAULT classifier does, and
+    ``ctx.classifier_fallback`` says why: it becomes routing_mode's ``+fallback:<reason>``."""
+    from middleware import g06_jev
+    decision = await g06_jev.classify(ctx, cfg.get("jev"), _TIER_ORDER)
+    if decision.tier is not None:
+        ctx.savings.routing_level = decision.level
+        return decision.tier
+    ctx.classifier_fallback = decision.fallback
+    return await _classify_cascade(ctx.messages, ctx.params, cfg, ctx=ctx)
+
+
 async def _dispatch_classifier(
     ctx: RequestContext, cfg: Dict[str, Any]
 ) -> str:
@@ -1265,6 +1278,8 @@ async def _dispatch_classifier(
         return await _classify_cascade(ctx.messages, ctx.params, cfg, ctx=ctx)
     if classifier == "routellm":
         return await _classify_routellm(ctx.messages, ctx.params, cfg)
+    if classifier == "jev":
+        return await _classify_jev(ctx, cfg)
     # Unknown classifier → default to cascade
     logger.warning("G06 unknown classifier %s, defaulting to cascade", classifier)
     return await _classify_cascade(ctx.messages, ctx.params, cfg)
@@ -1448,7 +1463,9 @@ class G06Routing:
                 candidates = tiers.get(complexity, tiers.get("medium", []))
                 if candidates:
                     selected_model = _select_from_tier(candidates, eff_cfg, ctx, complexity)
-                ctx.savings.routing_mode = classifier
+                # A classifier that could not decide says so: the default one decided instead.
+                ctx.savings.routing_mode = classifier + (
+                    f"+fallback:{ctx.classifier_fallback}" if ctx.classifier_fallback else "")
 
         # 2a-bis. Publish the tier the classifier chose, for stages that run later.
         # G25 reuses it rather than running a second, differently tuned keyword classifier
@@ -1569,6 +1586,11 @@ class G06Routing:
                 routing_detail = f"rule={matched_rule_id}"
             else:
                 routing_detail = f"classifier={cfg.get('classifier', 'cascade')}, complexity={complexity}"
+                if ctx.savings.routing_level:
+                    routing_detail += f", level={ctx.savings.routing_level}"
+                if ctx.classifier_fallback:
+                    routing_detail += (
+                        f", fell back to the default classifier ({ctx.classifier_fallback})")
             ctx.routing_detail = routing_detail
 
             logger.debug(
@@ -1590,6 +1612,11 @@ class G06Routing:
                 "user_override": user_override,
                 "matched_rule": matched_rule_id or None,
                 "routellm_confidence": ctx.savings.routellm_confidence,
+                "routing_level": ctx.savings.routing_level,
+                "classifier_fallback": ctx.classifier_fallback,
+                "jev_model": ((eff_cfg.get("jev") or {}).get("model")
+                              if isinstance(eff_cfg.get("jev"), dict)
+                              and (ctx.savings.routing_mode or "").startswith("jev") else None),
             },
         )
 

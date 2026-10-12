@@ -440,7 +440,7 @@ entries are rebuilt once.
 | Parameter | Default | Description |
 |---|---|---|
 | `enabled` | `true` | Enable model routing |
-| `classifier` | `cascade` | Complexity classifier: `cascade` (default), `heuristic`, `llm_judge`, or `routellm` |
+| `classifier` | `cascade` | Complexity classifier: `cascade` (default), `heuristic`, `llm_judge`, `routellm`, or `jev` (TypeSafe's Jev rates each request on your own levels; see *Jev configuration notes* below) |
 | `cascade_execution` | `false` | When `classifier: cascade`, run the true tier1→tier2→tier3 execution cascade (call cheap model, escalate only if its answer is inadequate) instead of classify-then-route |
 | `strategy` | `priority` | Which model of a chosen tier's list to use (the classifier picks the tier; this picks *within* it). `priority` = the tier's first model (**default — byte-identical to historical behaviour; the savings baseline is unchanged**). `round_robin` = rotate across the tier's models (per worker). `weighted` = deterministic split by `strategy_weights`. `least_latency` = the tier model with the lowest observed served-latency EWMA (fed from real calls; falls back to the first model until measured; a model whose call failed on the provider's side — 5xx, timeout, connection — is passed over for 5 minutes, then tried again). `canary` = `canary_pct`% to the tier's **second** model, the rest to the first. All strategies are deterministic (request-id hash / counter / EWMA), never random |
 | `strategy_weights` | `{}` | For `strategy: weighted` — `{model: weight}` map; models absent from the map default to weight 1 |
@@ -463,6 +463,16 @@ entries are rebuilt once.
 | `routellm.strong_model` | `gpt-4o` | Strong/expensive model for RouteLLM |
 | `routellm.weak_model` | `gpt-4o-mini` | Weak/cheap model for RouteLLM |
 | `routellm.timeout_ms` | `500` | Max wait for routing decision before fallback |
+| `jev.url` | `https://api.typesafe.ai/v1/systemone` | Jev endpoint (any TypeSafe-compatible one) |
+| `jev.model` | `jev-1.13.0` | Jev model, pinned: `jev-latest` moves without notice |
+| `jev.key_provider` | `typesafe` | The name each tenant stores its TypeSafe key under in the portal; a self-hosted proxy reads `LLM_KEY_<KEY_PROVIDER>`. 2–40 lowercase letters, digits or underscores, and never a configured LLM provider's name (that provider's keys would be sent to Jev) |
+| `jev.levels` | `low`, `medium`, `high`, `complex` | Ordered levels, lowest first (2–10), each `{name, tier, describe}`. Jev rates the request against the `describe` texts; the chosen level's `tier` (`simple`/`medium`/`complex`) picks the models. Several levels may share a tier; tiers never step down |
+| `jev.instructions` | `How hard is this request for an AI model to answer well?` | The question Jev is asked |
+| `jev.enough_probability` | `0.5` | G6 takes the lowest level whose probability, plus that of every level below it, reaches this. `0.5` is Jev's middle estimate; raising it only ever routes up, for when Jev is unsure. Uncalibrated until measured on your traffic |
+| `jev.timeout_ms` | `1000` | Max wait for Jev before the default classifier decides |
+| `jev.max_state_chars` | `4000` | How much of the request's text Jev sees: the newest part, never the system prompt |
+| `jev.key_cache_s` | `60` | A tenant's key lookup, found or missing, is reused this long |
+| `jev.warn_every_s` | `3600` | One fallback warning per tenant and reason per this many seconds |
 | `tiers.simple` | `[gemini-flash-lite, ...]` | Simple task models (heuristic mode). The flat, single-provider ladder — used when `tiers_by_provider` is absent |
 | `tiers.medium` | `[gemini-flash, ...]` | Medium task models (heuristic mode) |
 | `tiers.complex` | `[gemini-pro, ...]` | Complex task models (heuristic mode) |
@@ -563,7 +573,19 @@ routing rules are skipped with it.)
 - The sidecar only *decides*: RouteLLM's `route()` scores the last turn and the answer is `weak_model` or `strong_model` as configured here. No model is called, so nothing is billed (`mf` and `sw_ranking` still embed that turn with OpenAI). Each router loads on first use; `causal_llm` is a large local model (an 8B-parameter checkpoint in RouteLLM's release), so give the sidecar the memory it needs before choosing it (`bert`'s 1.1 GB fits the default 2 GB)
 - Calibrate the threshold using: `python -m routellm.calibrate_threshold --routers bert --strong-model-pct 0.5`
 - If the RouteLLM sidecar is unavailable, the proxy automatically falls back to heuristic routing
-- Switch between classifiers by changing `classifier` in config and re-uploading to GCS (no code deploy needed)
+- Switch between classifiers by changing `classifier` in config and re-uploading to GCS (no code deploy needed, once the running build knows the classifier: a build without `jev` runs the cascade and labels it `jev`)
+
+**Jev configuration notes:**
+- **What it is.** TypeSafe's Jev answers typed questions with probabilities, not text, at about $0.042 per million input tokens (output free). G6 asks it one `score` question per request.
+- **What Jev sees.** The request's own text: every turn except system and developer messages, the text parts of multi-part content, the newest `jev.max_state_chars`. It goes to TypeSafe under the tenant's own account. G29 masking (`mode: mask`), if on, runs before G6.
+- **Keys.** Each tenant's own, stored in the portal under `jev.key_provider`; where own-key enforcement is on, never a platform key. A self-hosted proxy without the portal reads `LLM_KEY_TYPESAFE` (`.env`; on GCP the `llm-key-typesafe` secret, filled from the `typesafe` slot in `config/keys.yaml`).
+- **Fallbacks.** No key, no text, a bad `jev` block, an open breaker, a timeout, an HTTP error, or an answer that fails the check (not a score over exactly the levels sent, probabilities out of range or not summing to 1, a legend that doesn't match): the default classifier (`cascade`: the keyword rules, plus `judge_model` when set) decides. `routing_mode` then reads `jev+fallback:<reason>`, `token_opt_g06_jev_fallbacks_total{tenant_id,reason}` counts it, and a warning is logged once per tenant and reason per `jev.warn_every_s` (a bad block once per distinct config). When Jev decides, `_token_opt.routing_level` names the level.
+- **Breaker.** The shared `resilience` breaker, under the `jev.key_provider` name: timeouts, connection failures and 5xx count; a tenant's 401, 403 or 429 never do, so one tenant's key can't switch Jev off for everyone.
+- **Cost.** Each call is a side call recorded as `<key_provider>/<model>` and priced by the `typesafe/jev` pricing row. Without that row it is priced at `default`, about 119 times too high, and the pricing warning names the label.
+- **Where to set it.** In config.yaml, or under `tenants.<id>.groups.G6_routing` (a partial per-tenant `jev:` keeps the rest of the block). Never in a params file: those merge one level deep and would drop the rest of `G6_routing`.
+- **Interactions.** `cascade_execution` applies only to `classifier: cascade`, so it does nothing under `jev`. The worst-case added latency is `jev.timeout_ms`, plus `judge_timeout_ms` when the fallback asks the judge. Streamed responses carry no `_token_opt`, so there the decision shows only in traces. Calls made for batched (G13) requests are not priced, as for the judge.
+- **Limits.** TypeSafe's published limit is 1,200 requests a minute per account; above it calls fail and fall back, counted as `http_error`.
+- **Calibration.** Jev's probabilities are relative, not calibrated: measure `jev.enough_probability` on your own traffic before relying on the savings.
 
 > **Over-escalation guards (execution cascade).** With `cascade_execution: true` and no `judge_model`, the cascade judges each tier's *response* (via `response_confidence.*`) — not the request text — so an adequately-answered cheap-tier query is no longer escalated. Two guards bound the blast radius: `cascade_cap_to_classified_tier` (never climb past the request's own complexity tier) and `allow_escalation_above_requested` (never route costlier than the caller's model). These ship safe (`cascade_execution: false`) so default OSS deployments are unaffected; turning the cascade on inherits the guards.
 
