@@ -140,10 +140,12 @@ def test_the_proxy_may_read_its_key_stores_version_names_and_no_more_of_it():
     assert not re.search(r"^\s*(count|for_each)\s*=", grants[0], re.M)
 
 
-def test_the_routellm_account_only_reads_its_key_and_the_proxy_cannot_act_as_it():
+def test_the_routellm_account_holds_no_grant_and_the_proxy_cannot_act_as_it():
+    # Its one grant was on the platform OpenAI key, which nothing reads since the sidecar
+    # embeds with each tenant's own key (backlog #99): the grant went with the secret.
     using = [(kind, name) for kind, name, body in _all_resources()
              if _email("routellm_sa") in body or "google_service_account.routellm_sa.name" in body]
-    assert using == [("google_secret_manager_secret_iam_member", "routellm_secret_accessor")]
+    assert using == []
 
 
 @pytest.mark.parametrize("service", ["grafana", "langfuse"])

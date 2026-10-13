@@ -32,7 +32,8 @@ embedding is now priced into the request's cost ($0.02 per million tokens), so t
 savings on mf/sw_ranking traffic go down slightly: that is the honest figure.
 - **OSS:** the sidecar needs no `OPENAI_API_KEY` (the proxy's `LLM_KEY_OPENAI` is the key), so
   `.env.template` and the local checks no longer ask for it, and the deploys no longer seed or
-  mount `routellm-openai-key`.
+  mount `routellm-openai-key`. Terraform no longer declares that secret either, so the next
+  apply on GCP deletes it and the key in it: copy the key first if you still want it.
 - **[Enterprise]:** each tenant's own key from Models & Keys is used, and the portal tells a
   tenant routed by mf/sw_ranking that has none — <https://tokenlean.cbeyond.cloud/>
 

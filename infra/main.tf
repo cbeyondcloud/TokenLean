@@ -287,18 +287,6 @@ resource "google_secret_manager_secret" "aws_secret_access_key" {
   depends_on = [google_project_service.apis]
 }
 
-# RouteLLM's old platform OpenAI key. Nothing reads it any more: mf/sw_ranking embed with each
-# tenant's own key, which G06 sends per request (backlog #99). It is kept so that no apply
-# deletes it; to delete it, remove this resource, `routellm_secret_accessor` below and its
-# entry in `proxy_secret_ids`, then apply.
-resource "google_secret_manager_secret" "routellm_openai_key" {
-  secret_id = "routellm-openai-key"
-  replication {
-    auto {}
-  }
-  depends_on = [google_project_service.apis]
-}
-
 # Langfuse API keys (populated by gcp-deploy.sh after first deploy)
 resource "google_secret_manager_secret" "langfuse_public_key" {
   secret_id = "langfuse-public-key"
@@ -620,7 +608,6 @@ locals {
     google_secret_manager_secret.llm_key_mistral.secret_id,
     google_secret_manager_secret.aws_access_key_id.secret_id,
     google_secret_manager_secret.aws_secret_access_key.secret_id,
-    google_secret_manager_secret.routellm_openai_key.secret_id,
     google_secret_manager_secret.langfuse_public_key.secret_id,
     google_secret_manager_secret.langfuse_secret_key.secret_id,
     # token-proxy mounts the /metrics scrape token (METRICS_SCRAPE_TOKEN) — without it the
@@ -1330,19 +1317,14 @@ resource "google_secret_manager_secret_iam_member" "qdrant_api_key_accessor" {
 }
 
 # ─── RouteLLM Sidecar Service Account ───────────────────────────────────────
+# The sidecar's identity, with no grant: it reads no secret (mf/sw_ranking embed with each
+# tenant's own key, which G06 sends per request; backlog #99) and calls no Cloud Run
+# service, so it holds no run.invoker. The proxy SA needs no right to act as it:
+# `gcloud run deploy --service-account=...` is run by the operator's identity, which needs
+# iam.serviceAccountUser here (DEPLOYMENT.md).
 resource "google_service_account" "routellm_sa" {
   account_id   = "routellm-sidecar-sa"
   display_name = "RouteLLM Sidecar"
-}
-
-# The sidecar's only grant, on the key it no longer reads (see `routellm_openai_key` above:
-# remove both together). It calls no Cloud Run service, so it holds no run.invoker, and
-# the proxy SA needs no right to act as it: `gcloud run deploy --service-account=...` is
-# run by the operator's identity, which needs iam.serviceAccountUser here (DEPLOYMENT.md).
-resource "google_secret_manager_secret_iam_member" "routellm_secret_accessor" {
-  secret_id = google_secret_manager_secret.routellm_openai_key.secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.routellm_sa.email}"
 }
 
 # ─── Prometheus OSS (Cloud Run v2) ─────────────────────────────────────────

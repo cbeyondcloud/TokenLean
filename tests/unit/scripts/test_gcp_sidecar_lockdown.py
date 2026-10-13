@@ -70,11 +70,14 @@ def test_routellm_deploys_private_and_reachable_from_the_proxy():
 
 def test_no_deploy_gives_routellm_a_platform_openai_key():
     """#99: mf and sw_ranking embed with each tenant's own OpenAI key, which G06 sends per
-    request, so nothing seeds, mounts or asks for a platform one any more."""
+    request, so nothing seeds, mounts or asks for a platform one any more, and Terraform no
+    longer declares the old secret (the next apply deletes it)."""
     import yaml
     cmd = _deploy_command("routellm-svc")
     assert "OPENAI_API_KEY" not in cmd and "--set-secrets" not in cmd
     assert "routellm-openai-key" not in DEPLOY
+    main_tf = (_ROOT / "infra" / "main.tf").read_text(encoding="utf-8")
+    assert "routellm-openai-key" not in main_tf and "routellm_openai_key" not in main_tf
     precheck = (_ROOT / "scripts" / "gcp" / "pre-deploy-check.sh").read_text(encoding="utf-8")
     required = re.search(r"^\s*REQUIRED_KEYS=\((.*)\)", precheck, re.M).group(1)
     assert '"routellm"' not in required
