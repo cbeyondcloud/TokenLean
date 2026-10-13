@@ -440,7 +440,7 @@ entries are rebuilt once.
 | Parameter | Default | Description |
 |---|---|---|
 | `enabled` | `true` | Enable model routing |
-| `classifier` | `cascade` | Complexity classifier: `cascade` (default), `heuristic`, `llm_judge`, `routellm`, or `jev` (TypeSafe's Jev rates each request on your own levels; see *Jev configuration notes* below) |
+| `classifier` | `cascade` | Complexity classifier: `cascade` (default), `heuristic`, `llm_judge`, `routellm`, or `jev` (TypeSafe's Jev rates each request on your own levels; see *Jev configuration notes* below). Any other name falls back to `cascade`, and `routing_mode` says `<name>+fallback:unknown_classifier` |
 | `cascade_execution` | `false` | When `classifier: cascade`, run the true tier1→tier2→tier3 execution cascade (call cheap model, escalate only if its answer is inadequate) instead of classify-then-route |
 | `strategy` | `priority` | Which model of a chosen tier's list to use (the classifier picks the tier; this picks *within* it). `priority` = the tier's first model (**default — byte-identical to historical behaviour; the savings baseline is unchanged**). `round_robin` = rotate across the tier's models (per worker). `weighted` = deterministic split by `strategy_weights`. `least_latency` = the tier model with the lowest observed served-latency EWMA (fed from real calls; falls back to the first model until measured; a model whose call failed on the provider's side — 5xx, timeout, connection — is passed over for 5 minutes, then tried again). `canary` = `canary_pct`% to the tier's **second** model, the rest to the first. All strategies are deterministic (request-id hash / counter / EWMA), never random |
 | `strategy_weights` | `{}` | For `strategy: weighted` — `{model: weight}` map; models absent from the map default to weight 1 |
@@ -572,7 +572,7 @@ routing rules are skipped with it.)
 - `bert` is the default because its checkpoint is Apache-2.0 (on MIT `xlm-roberta-base`); `mf`'s checkpoint carries no licence and `causal_llm`'s is a Meta Llama 3 derivative, so read [THIRD_PARTY_LICENSES.md](../THIRD_PARTY_LICENSES.md) before choosing either
 - The sidecar only *decides*: RouteLLM's `route()` scores the last turn and the answer is `weak_model` or `strong_model` as configured here. No model is called, so nothing is billed (`mf` and `sw_ranking` still embed that turn with OpenAI). Each router loads on first use; `causal_llm` is a large local model (an 8B-parameter checkpoint in RouteLLM's release), so give the sidecar the memory it needs before choosing it (`bert`'s 1.1 GB fits the default 2 GB)
 - Calibrate the threshold using: `python -m routellm.calibrate_threshold --routers bert --strong-model-pct 0.5`
-- If the RouteLLM sidecar is unavailable, the proxy automatically falls back to heuristic routing
+- If RouteLLM cannot decide, the keyword rules (the heuristic) route the request and `routing_mode` says `routellm+fallback:<reason>`: `no_config` (no `url`, `weak_model` or `strong_model`), `timeout`, `http_error`, `bad_answer` (the sidecar named neither model) or `error`. When RouteLLM decides, `_token_opt` carries `routellm_router_used` (after any switch to `bert`) and `routellm_threshold`; readiness checks it when a tenant is routed by RouteLLM
 - Switch between classifiers by changing `classifier` in config and re-uploading to GCS (no code deploy needed, once the running build knows the classifier: a build without `jev` runs the cascade and labels it `jev`)
 
 **Jev configuration notes:**

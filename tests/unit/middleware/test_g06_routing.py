@@ -451,7 +451,26 @@ class TestG06Routing:
         ctx = await _drive_deferred_cascade(ctx)
         # Unknown classifier → defaults to cascade → heuristic (no judge) → simple
         assert ctx.routed_model == "gpt-4o-mini"
-        assert ctx.savings.routing_mode == "nonexistent"
+        # It says so: the unknown name is not reported as the classifier that decided.
+        assert ctx.savings.routing_mode == "nonexistent+fallback:unknown_classifier"
+        assert "fell back" in ctx.routing_detail and "unknown_classifier" in ctx.routing_detail
+
+    async def test_unknown_classifier_prices_the_judge_it_asks(self, make_ctx, monkeypatch):
+        """Cascade books its judge call on the request (record_provider_call needs ctx), so the
+        fallback must pass ctx: without it the judge's cost went unpriced."""
+        ctx = make_ctx([{"role": "user", "content": "What is 2+2?"}], model="gpt-4o")
+        g6 = ctx.config["groups"]["G6_routing"]
+        g6.update(classifier="nonexistent", judge_model="the-judge",
+                  cascade_confidence_threshold=1.01)   # the keyword rules are never sure enough
+        seen = []
+
+        async def judge(messages, params, cfg, ctx=None):
+            seen.append(ctx)
+            return "simple"
+        monkeypatch.setattr("middleware.g06_routing._classify_llm_judge", judge)
+        from middleware.g06_routing import G06Routing
+        await G06Routing().process_request(ctx)
+        assert seen == [ctx]
 
     async def test_routellm_calls_sidecar(self, make_ctx):
         ctx = make_ctx(
@@ -468,14 +487,23 @@ class TestG06Routing:
             "model_map": {"weak": "simple", "strong": "complex"},
         }
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"routed_model": "gpt-4o-mini", "confidence": 0.85, "reason": "below_threshold"}
+        mock_resp.json.return_value = {"routed_model": "gpt-4o-mini", "reason": "below_threshold"}
         mock_resp.raise_for_status = MagicMock()
-        with patch("middleware.g06_routing.httpx.AsyncClient", return_value=FakeClient(mock_resp)):
+        spans = []
+        with patch("middleware.g06_routing.httpx.AsyncClient", return_value=FakeClient(mock_resp)), \
+             patch("middleware.g06_routing._openai_key_available", return_value=True), \
+             patch("middleware.g06_routing.langfuse_tracing.add_span",
+                   lambda ctx, **kw: spans.append(kw["metadata"])):
             from middleware.g06_routing import G06Routing
             ctx = await G06Routing().process_request(ctx)
             ctx = await _drive_deferred_cascade(ctx)
         assert ctx.routed_model == "gpt-4o-mini"
         assert ctx.savings.routing_mode == "routellm"
+        # _token_opt documents both; the trace span carries them too.
+        meta = ctx.savings.to_langfuse_metadata()
+        assert (meta["routellm_router_used"], meta["routellm_threshold"]) == ("mf", 0.11593)
+        assert (spans[-1]["routellm_router_used"], spans[-1]["routellm_threshold"]) == ("mf", 0.11593)
+        assert "routellm_confidence" not in spans[-1]
 
     async def test_routellm_fallback_on_error(self, make_ctx):
         ctx = make_ctx(
@@ -495,9 +523,11 @@ class TestG06Routing:
             from middleware.g06_routing import G06Routing
             ctx = await G06Routing().process_request(ctx)
             ctx = await _drive_deferred_cascade(ctx)
-        # Falls back to heuristic → simple tier
+        # Falls back to heuristic → simple tier, and says so: RouteLLM did not decide.
         assert ctx.routed_model == "gpt-4o-mini"
-        assert ctx.savings.routing_mode == "routellm"
+        assert ctx.savings.routing_mode == "routellm+fallback:error"
+        assert "fell back to the keyword rules (error)" in ctx.routing_detail
+        assert "routellm_router_used" not in ctx.savings.to_langfuse_metadata()
 
     async def test_routellm_mapping_configurable(self, make_ctx):
         ctx = make_ctx(

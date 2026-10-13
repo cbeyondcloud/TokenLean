@@ -4,7 +4,7 @@ RouteLLM HTTP Sidecar — G06 routing service.
 POST /route
   Request:  { "messages": [...], "router": "bert", "threshold": 0.4066,
               "strong_model": "gpt-4-1106-preview", "weak_model": "gpt-4o-mini" }
-  Response: { "routed_model": "gpt-4o-mini", "confidence": 0.85, "reason": "below_threshold" }
+  Response: { "routed_model": "gpt-4o-mini", "reason": "below_threshold", "router_used": "bert" }
 
 The answer is always one of the two model names in the request (G06 maps it by exact name).
 The sidecar only DECIDES: `Controller.route()` scores the last turn and makes no completion
@@ -73,7 +73,6 @@ class RouteRequest(BaseModel):
 
 class RouteResponse(BaseModel):
     routed_model: str
-    confidence: float
     reason: str
     router_used: str
 
@@ -102,16 +101,16 @@ async def route(req: RouteRequest):
         logger.error("Routing failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Routing error: {str(exc)}") from exc
 
-    # RouteLLM doesn't expose confidence directly, so it is inferred from the decision.
+    # RouteLLM exposes no confidence, so none is reported: the threshold (or one minus it) was
+    # sent under that name once, and it looked like a score without being one.
     if side == _WEAK:
-        routed_model, confidence, reason = weak_model, 1.0 - threshold, "below_threshold"
+        routed_model, reason = weak_model, "below_threshold"
     elif side == _STRONG:
-        routed_model, confidence, reason = strong_model, threshold, "above_threshold"
+        routed_model, reason = strong_model, "above_threshold"
     else:
         raise HTTPException(status_code=500, detail=f"Router returned an unknown model {side!r}")
     return RouteResponse(
         routed_model=routed_model,
-        confidence=confidence,
         reason=reason,
         router_used=req.router,
     )

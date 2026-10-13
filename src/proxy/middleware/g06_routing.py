@@ -1168,12 +1168,21 @@ _ROUTELLM_DEFAULT_ROUTER = "bert"
 
 
 async def _classify_routellm(
-    messages: List[Dict], params: Dict, cfg: Dict[str, Any]
+    messages: List[Dict], params: Dict, cfg: Dict[str, Any],
+    ctx: Optional[RequestContext] = None,
 ) -> str:
     """
     Call RouteLLM sidecar to get routing decision, then map to tier.
-    Returns tier string; falls back to heuristic on any error/timeout.
+    Returns tier string; falls back to heuristic on any error/timeout. With ``ctx``, a decision
+    records the router and threshold it was made with (``_token_opt``), and a fallback says
+    why: ``ctx.classifier_fallback`` becomes routing_mode's ``+fallback:<reason>``.
     """
+    def _fall_back(reason: str) -> str:
+        if ctx is not None:
+            ctx.classifier_fallback = reason
+        tier, _ = _classify_heuristic(messages, params)
+        return tier
+
     routellm_cfg = cfg.get("routellm", {})
     sidecar_url = routellm_cfg.get("url", "")
     timeout_ms = routellm_cfg.get("timeout_ms", 500)
@@ -1189,8 +1198,7 @@ async def _classify_routellm(
             "G06 RouteLLM missing config: url=%r, weak_model=%r, strong_model=%r — falling back to heuristic",
             sidecar_url, weak_model, strong_model,
         )
-        tier, _ = _classify_heuristic(messages, params)
-        return tier
+        return _fall_back("no_config")
 
     # P8: the mf/sw_ranking routers compute OpenAI embeddings in the sidecar. If no OpenAI
     # key is configured (e.g. an Anthropic/Gemini-only deployment), use the bert router (a
@@ -1222,33 +1230,37 @@ async def _classify_routellm(
             response.raise_for_status()
             result = response.json()
             routed_model = result.get("routed_model")
-            confidence = result.get("confidence", 0.0)
             reason = result.get("reason", "")
 
             logger.debug(
-                "G06 RouteLLM routed to %s (confidence=%.2f, reason=%s)",
+                "G06 RouteLLM routed to %s (router=%s, reason=%s)",
                 routed_model,
-                confidence,
+                router,
                 reason,
             )
 
             # Map binary output to tier
             if routed_model == weak_model:
-                return model_map.get("weak", "simple")
+                tier = model_map.get("weak", "simple")
             elif routed_model == strong_model:
-                return model_map.get("strong", "complex")
+                tier = model_map.get("strong", "complex")
             else:
                 logger.warning("G06 RouteLLM returned unknown model %s, falling back to heuristic", routed_model)
+                return _fall_back("bad_answer")
+            if ctx is not None:
+                ctx.savings.routellm_router_used = router
+                ctx.savings.routellm_threshold = threshold
+            return tier
 
     except httpx.TimeoutException:
         logger.warning("G06 RouteLLM sidecar timeout after %dms, falling back to heuristic", timeout_ms)
+        return _fall_back("timeout")
     except httpx.HTTPError as exc:
         logger.warning("G06 RouteLLM sidecar HTTP error: %s, falling back to heuristic", exc)
+        return _fall_back("http_error")
     except Exception as exc:
         logger.warning("G06 RouteLLM sidecar error: %s, falling back to heuristic", exc)
-
-    tier, _ = _classify_heuristic(messages, params)
-    return tier
+        return _fall_back("error")
 
 
 async def _classify_jev(ctx: RequestContext, cfg: Dict[str, Any]) -> str:
@@ -1264,6 +1276,11 @@ async def _classify_jev(ctx: RequestContext, cfg: Dict[str, Any]) -> str:
     return await _classify_cascade(ctx.messages, ctx.params, cfg, ctx=ctx)
 
 
+# What decides when a classifier cannot: Jev and an unknown classifier name fall back to the
+# default classifier (cascade), RouteLLM to the keyword rules. routing_detail names it.
+_FALLBACK_DECIDER = {"routellm": "the keyword rules"}
+
+
 async def _dispatch_classifier(
     ctx: RequestContext, cfg: Dict[str, Any]
 ) -> str:
@@ -1277,12 +1294,13 @@ async def _dispatch_classifier(
     if classifier == "cascade":
         return await _classify_cascade(ctx.messages, ctx.params, cfg, ctx=ctx)
     if classifier == "routellm":
-        return await _classify_routellm(ctx.messages, ctx.params, cfg)
+        return await _classify_routellm(ctx.messages, ctx.params, cfg, ctx=ctx)
     if classifier == "jev":
         return await _classify_jev(ctx, cfg)
-    # Unknown classifier → default to cascade
+    # Unknown classifier → default to cascade, saying so in routing_mode
     logger.warning("G06 unknown classifier %s, defaulting to cascade", classifier)
-    return await _classify_cascade(ctx.messages, ctx.params, cfg)
+    ctx.classifier_fallback = "unknown_classifier"
+    return await _classify_cascade(ctx.messages, ctx.params, cfg, ctx=ctx)
 
 
 
@@ -1589,8 +1607,9 @@ class G06Routing:
                 if ctx.savings.routing_level:
                     routing_detail += f", level={ctx.savings.routing_level}"
                 if ctx.classifier_fallback:
-                    routing_detail += (
-                        f", fell back to the default classifier ({ctx.classifier_fallback})")
+                    decider = _FALLBACK_DECIDER.get(
+                        cfg.get("classifier", "cascade"), "the default classifier")
+                    routing_detail += f", fell back to {decider} ({ctx.classifier_fallback})"
             ctx.routing_detail = routing_detail
 
             logger.debug(
@@ -1611,7 +1630,8 @@ class G06Routing:
                 "complexity": complexity if not user_override else "user_override",
                 "user_override": user_override,
                 "matched_rule": matched_rule_id or None,
-                "routellm_confidence": ctx.savings.routellm_confidence,
+                "routellm_router_used": ctx.savings.routellm_router_used,
+                "routellm_threshold": ctx.savings.routellm_threshold,
                 "routing_level": ctx.savings.routing_level,
                 "classifier_fallback": ctx.classifier_fallback,
                 "jev_model": ((eff_cfg.get("jev") or {}).get("model")

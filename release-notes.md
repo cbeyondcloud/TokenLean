@@ -21,6 +21,18 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-13
+
+### G6 routing says which classifier decided, and prices every judge call — Bug fix
+
+RouteLLM's routing fields were documented but never filled: when RouteLLM decides, `_token_opt`
+now carries `routellm_router_used` and `routellm_threshold`. When it cannot (no URL or model pair,
+a timeout, an HTTP error, an answer naming neither model), the keyword rules decide and
+`routing_mode` says `routellm+fallback:<reason>` rather than `routellm`. An unrecognised
+`classifier` name says `<name>+fallback:unknown_classifier`, and the judge calls its cascade makes
+are now priced. `routellm_confidence` is gone: nothing set it, and the sidecar's value was the
+threshold, not a score.
+
 ## 2026-10-12
 
 ### G6 routing can ask Jev how hard a request is — Enhancement (OSS + Enterprise)

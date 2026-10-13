@@ -11,6 +11,7 @@ is RouteLLM's calibration for ~50% strong-model calls on its published Chatbot A
 """
 import logging
 
+import httpx
 import pytest
 
 import middleware.g06_routing as g06
@@ -98,3 +99,68 @@ async def test_a_local_router_needs_no_key_and_is_used_as_configured(sent, monke
     _openai_key(monkeypatch, False)
     await _route({"router": router})
     assert sent[0]["router"] == router
+
+
+# `_token_opt` documents routellm_router_used and routellm_threshold; nothing set them.
+@pytest.mark.parametrize("key, router, threshold", [(True, "mf", 0.2), (False, "bert", 0.4066)])
+async def test_a_decision_records_the_router_and_threshold_it_was_made_with(
+        sent, monkeypatch, make_ctx, key, router, threshold):
+    """Without an OpenAI key mf runs as bert at bert's threshold, and the fields say so."""
+    _openai_key(monkeypatch, key)
+    ctx = make_ctx(MESSAGES)
+    tier = await g06._classify_routellm(
+        MESSAGES, {}, {"routellm": {**BASE, "router": "mf", "threshold": 0.2}}, ctx=ctx)
+    assert tier == "simple"
+    assert (ctx.savings.routellm_router_used, ctx.savings.routellm_threshold) == (router, threshold)
+    assert ctx.classifier_fallback is None
+
+
+class _Answer:
+    def __init__(self, model):
+        self._model = model
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"routed_model": self._model, "reason": "below_threshold"}
+
+
+def _sidecar(monkeypatch, *, raises=None, answers="weak-m"):
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, json=None, headers=None):
+            if raises is not None:
+                raise raises
+            return _Answer(answers)
+
+    monkeypatch.setattr(g06.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr("ml_models.cloud_run_auth_headers", lambda url: {})
+
+
+@pytest.mark.parametrize("cfg, raises, answers, reason", [
+    ({"url": ""}, None, "weak-m", "no_config"),
+    ({"weak_model": ""}, None, "weak-m", "no_config"),
+    ({}, httpx.ReadTimeout("slow"), "weak-m", "timeout"),
+    ({}, httpx.ConnectError("refused"), "weak-m", "http_error"),
+    ({}, None, "a-model-nobody-named", "bad_answer"),
+    ({}, RuntimeError("boom"), "weak-m", "error"),
+])
+async def test_a_fallback_says_why_and_records_no_decision(
+        monkeypatch, make_ctx, cfg, raises, answers, reason):
+    """The keyword rules decide, and routing_mode will say routellm+fallback:<reason>."""
+    _openai_key(monkeypatch, True)
+    _sidecar(monkeypatch, raises=raises, answers=answers)
+    ctx = make_ctx(MESSAGES)
+    tier = await g06._classify_routellm(MESSAGES, {}, {"routellm": {**BASE, **cfg}}, ctx=ctx)
+    assert tier == g06._classify_heuristic(MESSAGES, {})[0]
+    assert ctx.classifier_fallback == reason
+    assert (ctx.savings.routellm_router_used, ctx.savings.routellm_threshold) == (None, None)

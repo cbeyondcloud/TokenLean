@@ -75,6 +75,14 @@ class TestRoute:
         assert r.json()["routed_model"] == "tenant-strong"
         assert r.json()["reason"] == "above_threshold"
 
+    @pytest.mark.parametrize("text", ["hi there", "prove the theorem"])
+    def test_the_answer_carries_no_made_up_confidence(self, client, text):
+        """RouteLLM exposes no confidence; the sidecar used to send the threshold (or one minus
+        it) under that name, which looked like a score and was not one."""
+        r = _route(client, text)
+        assert r.status_code == 200, r.text
+        assert set(r.json()) == {"routed_model", "reason", "router_used"}
+
     def test_the_last_turn_and_the_threshold_are_what_is_routed(self, client):
         _route(client, [{"type": "text", "text": "prove it"}, {"type": "image_url"}])
         assert _FakeController.built[0].routed == [("prove it", "mf", 0.2)]

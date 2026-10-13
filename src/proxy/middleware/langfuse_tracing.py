@@ -298,13 +298,6 @@ def _add_scores(ctx: "RequestContext", trace: Any) -> None:
     except Exception as exc:
         logger.debug("Langfuse score cache_hit_rate failed: %s", exc)
 
-    # Routing confidence (when RouteLLM or cascade is used)
-    if ctx.savings.routellm_confidence is not None:
-        try:
-            trace.score(name="routing_confidence", value=float(ctx.savings.routellm_confidence))
-        except Exception as exc:
-            logger.debug("Langfuse score routing_confidence failed: %s", exc)
-
     # Turn efficiency (higher turn count = lower score)
     workflow_id = ctx.params.get("workflow_id") or ctx.params.get("x_workflow_id")
     if workflow_id:
