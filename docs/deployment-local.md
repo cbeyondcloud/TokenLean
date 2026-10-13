@@ -18,7 +18,7 @@ The local deployment runs the entire optimisation stack (G0–G28, G27 reserved 
 | **G6 Routing** | Built from `src/routellm-sidecar/Dockerfile` | 8081 | RouteLLM cascade |
 | **G7 Retrieval** | `qdrant/qdrant:v1.12.6` | 6333 | Vector search |
 | **G10 Memory** | Redis + Qdrant | - | Session summaries + agent skills |
-| **G18 Observability** | `langfuse/langfuse:2` | 3100 | Tracing UI |
+| **G18 Observability** | `langfuse/langfuse:2` | 3100 | Tracing UI (optional `tracing` profile) |
 | **G18 Dashboards** | `grafana/grafana-oss:10.4.0` | 3000 | Grafana dashboards (optional profile) |
 | **Config** | Local volume mount | - | `config/config.yaml` |
 
@@ -109,7 +109,8 @@ source .env
 This will:
 1. Build all images locally (proxy, llmlingua, routellm, tika)
 2. Start infrastructure containers (redis, postgres, qdrant)
-3. Start application containers (proxy, sidecars, langfuse)
+3. Start application containers (proxy, sidecars; Langfuse when tracing is on, Grafana with
+   `--with-grafana`: see [Optional profiles](#optional-profiles))
 4. Wait for health checks
 5. Seed Qdrant with rag_docs
 
@@ -128,7 +129,7 @@ curl http://localhost:8080/health
 curl http://localhost:8081/health
 curl http://localhost:6333/healthz
 curl http://localhost:9998/tika
-curl http://localhost:3100/api/public/health
+curl http://localhost:3100/api/public/health   # only with tracing on (the `tracing` profile)
 ```
 
 ### Step 4: Test the Proxy
@@ -181,7 +182,7 @@ See **Build-Time Quality Gates & Optional Evals** in [DEPLOYMENT.md](../DEPLOYME
 ### Complete Reset
 
 ```bash
-docker-compose down -v  # Removes volumes (deletes all data)
+docker compose --profile '*' down -v  # Removes volumes (deletes all data), every profile's too
 ./scripts/local/deploy-local.sh --seed
 ```
 
@@ -196,22 +197,34 @@ docker-compose down -v  # Removes volumes (deletes all data)
 | RouteLLM | http://localhost:8081 |
 | Qdrant | http://localhost:6333 |
 | Tika | http://localhost:9998 |
-| Langfuse | http://localhost:3100 |
-| Grafana | http://localhost:3000 (with `--profile observability`) |
+| Langfuse | http://localhost:3100 (with tracing on: the `tracing` profile) |
+| Grafana | http://localhost:3000 (with `--with-grafana`: the `observability` profile) |
 | PostgreSQL | localhost:5432 |
 | Redis | localhost:6379 |
 
 ---
 
-## Optional: Observability Profile
+## Optional profiles
 
-Start Grafana alongside the core stack:
+Optional services start only when their compose profile is on:
 
-```bash
-docker-compose --profile observability up -d
-```
+| Profile | Services | Started by |
+|---|---|---|
+| `observability` | Prometheus, Grafana, Jaeger | `--with-grafana` (`deploy-local.sh`, `start-local.sh`) |
+| `tracing` | Langfuse | automatically when `config/config.yaml` sets `G18_observability.langfuse_enabled: true` (base, a params file or one tenant), or `--with-tracing` |
 
-Access Grafana at http://localhost:3000 (default login: admin / the password from `.env`)
+By hand: `docker compose --profile observability --profile tracing up -d`, or list them in
+`.env` as `COMPOSE_PROFILES=observability,tracing` so every compose command uses them. A plain
+`docker compose down` stops only the active profiles' services; `./scripts/local/stop-local.sh`
+stops them all (`--profile '*' down`).
+
+Access Grafana at http://localhost:3000 (default login: admin / the password from `.env`) and
+Langfuse at http://localhost:3100 (`admin@local.dev` / `LANGFUSE_INIT_USER_PASSWORD` from
+`.env`). Grafana's savings dashboards read `usage_events`; only the per-call dashboard's collapsed
+"Langfuse detail" row needs Langfuse.
+
+**A stack that ran Langfuse before it became a profile** keeps that container running until it is
+stopped. With tracing off: `docker stop token-opt-langfuse` (its data stays in Postgres).
 
 ---
 
@@ -224,6 +237,7 @@ Access Grafana at http://localhost:3000 (default login: admin / the password fro
 | `proxy unhealthy` | Check logs: `docker-compose logs proxy` |
 | `RouteLLM routing fails` (`routing_mode` says `routellm+fallback:<reason>`) | Check `docker-compose logs routellm`. No key is needed: `bert` runs locally, and `mf`/`sw_ranking` embed with each tenant's own OpenAI key |
 | `Langfuse shows database error` | Wait for postgres to be healthy: `docker-compose logs postgres` |
+| `localhost:3100` unreachable | Langfuse runs only with tracing on: set `G18_observability.langfuse_enabled: true` (or pass `--with-tracing`) and redeploy |
 | `Qdrant empty after restart` | Re-seed: `./scripts/seed-data.sh --qdrant-url http://localhost:6333` |
 | Windows line-ending errors | Run: `git config core.autocrlf false` then re-clone |
 
@@ -239,7 +253,7 @@ Access Grafana at http://localhost:3000 (default login: admin / the password fro
 | postgres | 512M | pgvector enabled |
 | qdrant | 512M | Vector search |
 | redis | 256M | Cache |
-| langfuse | 512M | Tracing UI |
+| langfuse | 512M | Tracing UI (only with the `tracing` profile) |
 | tika | 1G | Document extraction |
 | grafana | 256M | Optional dashboards |
 

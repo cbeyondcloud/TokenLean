@@ -3,12 +3,14 @@
 # deploy-local.sh — Deploy TokenLean — Token Optimisation Framework locally via Docker
 # =============================================================================
 # Usage:
-#   ./scripts/local/deploy-local.sh [--seed] [--backup-to-gcs] [--with-grafana] [--recreate] [--tenants TENANT_LIST] [--no-check]
+#   ./scripts/local/deploy-local.sh [--seed] [--backup-to-gcs] [--with-grafana] [--with-tracing] [--recreate] [--tenants TENANT_LIST] [--no-check]
 #
 # Options:
 #   --seed              Seed Qdrant with the rag_docs collection
 #   --backup-to-gcs     Backup Redis to GCS
-#   --with-grafana      Start observability stack (Prometheus + Grafana)
+#   --with-grafana      Start Prometheus + Grafana + Jaeger (the `observability` profile)
+#   --with-tracing      Start Langfuse (the `tracing` profile). It starts anyway when
+#                       config.yaml turns G18_observability.langfuse_enabled on.
 #   --recreate          Force rebuild --no-cache (use after code changes)
 #   --tenants LIST      Comma-separated tenant IDs for multi-tenant seeding (e.g., NOVA-STG-01,SHOP-STG-01)
 #   --no-check          Skip the post-deployment health check at the end
@@ -30,6 +32,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SEED=false
 BACKUP_TO_GCS=false
 WITH_GRAFANA=false
+WITH_TRACING=false
 RECREATE=false
 TENANTS=""
 RUN_CHECK=true
@@ -46,11 +49,12 @@ while [[ $# -gt 0 ]]; do
     --seed)        SEED=true; shift ;;
     --backup-to-gcs) BACKUP_TO_GCS=true; shift ;;
     --with-grafana) WITH_GRAFANA=true; shift ;;
+    --with-tracing) WITH_TRACING=true; shift ;;
     --recreate)    RECREATE=true; shift ;;
     --tenants)     TENANTS="$2"; shift 2 ;;
     --no-check)    RUN_CHECK=false; shift ;;
     --help)
-      sed -n '/^# Usage:/,/^# ===/p' "$0" | head -20
+      sed -n '/^# Usage:/,/^# ===/p' "$0"
       exit 0 ;;
     *) error "Unknown option: $1" ;;
   esac
@@ -69,6 +73,8 @@ fi
 # key, the Langfuse and Grafana admin passwords): any .env lacks is generated into it.
 source "${SCRIPT_DIR}/fill-local-env.sh"
 fill_local_env "$ENV_FILE"
+# The optional compose profiles (Grafana's, Langfuse's): see compose-profiles.sh.
+source "${SCRIPT_DIR}/compose-profiles.sh"
 
 # ─── Check Docker ─────────────────────────────────────────────────────────────
 info "Checking Docker..."
@@ -92,11 +98,11 @@ fi
 # ─── Build and start ──────────────────────────────────────────────────────────
 cd "${REPO_ROOT}"
 
-# Set compose profiles via env var (more compatible than --profile flag)
-if [[ "$WITH_GRAFANA" == true ]]; then
-  export COMPOSE_PROFILES="observability"
-  info "Observability profile enabled (Prometheus + Grafana)"
-fi
+# Optional compose profiles, via COMPOSE_PROFILES (merged with any .env sets): `observability`
+# with --with-grafana; `tracing` (Langfuse) with --with-tracing or when config.yaml turns
+# Langfuse tracing on.
+compose_profiles_apply "$REPO_ROOT" "$WITH_GRAFANA" "$WITH_TRACING"
+info "Compose profiles: ${COMPOSE_PROFILES:-none (the core stack only)}"
 
 info "Building all images locally (zero GCP cost)..."
 if [[ "$RECREATE" == true ]]; then
@@ -121,6 +127,7 @@ fi
 
 info "Starting services..."
 $DC up -d
+compose_note_idle_langfuse
 
 # ─── Wait for health checks ─────────────────────────────────────────────────
 info "Waiting for services to be healthy..."
@@ -210,8 +217,11 @@ echo -e "${GREEN}╠════════════════════
 echo -e "${GREEN}║${NC}  Proxy:     http://localhost:4000                             ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}  LLMLingua: http://localhost:8080                             ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}  Qdrant:    http://localhost:6333                             ${GREEN}║${NC}"
-if [[ "$WITH_GRAFANA" == true ]]; then
+if compose_profiles_has observability; then
   echo -e "${GREEN}║${NC}  Grafana:   http://localhost:3000                          ${GREEN}║${NC}"
+fi
+if compose_profiles_has tracing; then
+  echo -e "${GREEN}║${NC}  Langfuse:  http://localhost:3100                          ${GREEN}║${NC}"
 fi
 echo -e "${GREEN}║${NC}                                                               ${GREEN}║${NC}"
 if [[ -n "$TENANTS" ]]; then

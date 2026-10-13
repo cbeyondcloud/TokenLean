@@ -2,13 +2,13 @@
 
 This document explains how to access the self-hosted [Langfuse](https://langfuse.com) observability UI deployed alongside the Token Optimisation Proxy — for both **local Docker** and **GCP Cloud Run** deployments.
 
-Langfuse ships in the OSS stack (G18 observability). It stores per-request traces, savings metadata, and model/latency breakdowns.
+Langfuse ships in the OSS stack (G18 observability). It stores per-request traces, savings metadata, and model/latency breakdowns. The proxy sends traces only when `config.yaml` sets `groups.G18_observability.langfuse_enabled: true`, which the OSS template leaves off.
 
 ---
 
 ## Local (Docker Compose)
 
-When you start the stack with `scripts/local/deploy-local.sh` (see [deployment-local.md](deployment-local.md)), Langfuse runs as the `langfuse` container.
+Langfuse is the `tracing` compose profile: `scripts/local/deploy-local.sh` and `start-local.sh` (see [deployment-local.md](deployment-local.md)) start it as the `langfuse` container when `config.yaml` turns `langfuse_enabled` on (in the base config, a params file or one tenant's overlay), or with `--with-tracing`. By hand: `docker compose --profile tracing up -d`. With tracing off it does not run.
 
 ### Access the UI
 
@@ -33,12 +33,12 @@ LANGFUSE_PUBLIC_KEY=pk-lf-local
 LANGFUSE_SECRET_KEY=sk-lf-local
 ```
 
-The compose file passes these to Langfuse as `LANGFUSE_INIT_PROJECT_PUBLIC_KEY` / `LANGFUSE_INIT_PROJECT_SECRET_KEY`, and to the proxy as `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`, so traces flow with zero extra setup.
+The compose file passes these to Langfuse as `LANGFUSE_INIT_PROJECT_PUBLIC_KEY` / `LANGFUSE_INIT_PROJECT_SECRET_KEY`, and to the proxy as `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`, so once tracing is on, traces flow with no extra setup.
 
 ### First login
 
 1. Open `http://localhost:3100`.
-2. Sign up for an account — the **first user becomes the admin**.
+2. Log in as `admin@local.dev` (`LANGFUSE_INIT_USER_EMAIL`) with the `LANGFUSE_INIT_USER_PASSWORD` from `.env`: compose creates this admin on Langfuse's first start (the local deploys generate the password).
 3. The project (with the keys above) already exists; traces appear under it once the proxy handles requests.
 
 ### Changing the keys
@@ -46,7 +46,7 @@ The compose file passes these to Langfuse as `LANGFUSE_INIT_PROJECT_PUBLIC_KEY` 
 Edit the three values in `.env`, then recreate the affected containers so the new env is picked up:
 
 ```bash
-docker-compose up -d --force-recreate langfuse proxy
+docker compose --profile tracing up -d --force-recreate langfuse proxy
 ```
 
 > **Note:** the internal `LANGFUSE_HOST` (`http://langfuse:3000`) is the docker-network address the **proxy** uses to send traces. `http://localhost:3100` is the host-mapped port you use in the **browser**.
@@ -121,7 +121,7 @@ For human operators who need UI access:
 
 | Symptom | Environment | Cause | Fix |
 |---|---|---|---|
-| Cannot reach `http://localhost:3100` | Local | Langfuse container not up | `docker-compose ps`; check `docker-compose logs langfuse` |
+| Cannot reach `http://localhost:3100` | Local | Tracing off (Langfuse runs only with the `tracing` profile), or its container not up | Turn `langfuse_enabled` on (or pass `--with-tracing`) and redeploy; else `docker compose --profile tracing ps` and `docker compose logs langfuse` |
 | Traces not appearing | Local | Keys mismatch between proxy and Langfuse | Ensure the same `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` in `.env`; `--force-recreate` both containers |
 | `Langfuse shows database error` | Local | Postgres not healthy yet | Wait for postgres: `docker-compose logs postgres` |
 | `403 Forbidden` on Langfuse URL | GCP | Service is private | Use `gcloud run services proxy` or set `LANGFUSE_UI_PUBLIC=1` |

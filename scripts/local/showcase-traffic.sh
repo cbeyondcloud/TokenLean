@@ -306,7 +306,7 @@ fi
 if [[ "$((LF_AFTER - LF_BEFORE))" -gt 0 ]]; then
   success "Langfuse IS ingesting — the Langfuse-backed dashboards will populate."
 else
-  warn "Langfuse traces did NOT increase — Langfuse-backed dashboards won't update. Check: langfuse_enabled in config.yaml + proxy langfuse keys."
+  warn "Langfuse traces did NOT increase — Langfuse-backed dashboards won't update. Check: langfuse_enabled in config.yaml, Langfuse running (the 'tracing' compose profile), the proxy's Langfuse keys."
 fi
 
 # ─── 6. Capture guidance ──────────────────────────────────────────────────────

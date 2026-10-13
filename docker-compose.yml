@@ -2,10 +2,17 @@
 # Docker Compose — TokenLean — Token Optimisation Framework (Local Deployment)
 # =============================================================================
 # Usage:
-#   docker-compose up -d              # Start all services
-#   docker-compose up -d proxy        # Start only proxy + dependencies
-#   docker-compose --profile observability up -d  # Include Grafana
-#   docker-compose down               # Stop all (zero cost)
+#   docker compose up -d                              # Start the core stack
+#   docker compose up -d proxy                        # Start only proxy + dependencies
+#   docker compose --profile observability up -d      # + Prometheus, Grafana, Jaeger
+#   docker compose --profile tracing up -d            # + Langfuse (G18 traces)
+#   docker compose --profile '*' down                 # Stop all, every profile (zero cost)
+#
+# Optional services are compose profiles, started only when named (--profile, or
+# COMPOSE_PROFILES in the environment or .env). scripts/local/deploy-local.sh adds
+# `observability` with --with-grafana and `tracing` when config/config.yaml turns Langfuse
+# tracing on (or with --with-tracing). A plain `down` stops only the active profiles' services,
+# so scripts/local/stop-local.sh passes --profile '*'.
 #
 # All services support the G0-G28 optimisations via local Docker networking.
 #
@@ -15,7 +22,8 @@
 # bound to TOKEN_OPT_BIND, 127.0.0.1 unless set, because Docker's published ports bypass a
 # host firewall. Redis, Qdrant, Langfuse's and Grafana's admins each require a credential
 # from .env (REDIS_PASSWORD, QDRANT_API_KEY, LANGFUSE_INIT_USER_PASSWORD, GRAFANA_PASSWORD):
-# compose will not start without them, and scripts/local/deploy-local.sh generates any that
+# compose will not start without them (even with Langfuse's or Grafana's profile off: Compose
+# resolves every service's variables), and scripts/local/deploy-local.sh generates any that
 # .env lacks. Widen TOKEN_OPT_BIND only on a private network.
 # =============================================================================
 # (No `version:` key — Compose v2 ignores it and warns that it is obsolete.)
@@ -25,7 +33,7 @@
 #   • scripts/local/deploy-local.sh        (repo root)
 #   • examples/benchmark/run.sh            (repo root)
 #   • pitch-test-plan/scripts/local/*.sh   (invoked with -f "$REPO_ROOT/docker-compose.yml")
-#   • pitch-test-plan/src/run_roi_pitch.py (--live health check via `docker compose ps`)
+#   • pitch-test-plan/src/run_roi_pitch.py (--live health check via `docker compose --profile tracing ps`)
 # Matches COMPOSE_PROJECT_NAME in .env. Do not remove without updating those callers,
 # or they will fragment back into separate <dir>-name image/volume sets.
 name: token-opt
@@ -201,8 +209,12 @@ services:
         condition: service_started
       tika:
         condition: service_healthy
+      # Langfuse is the optional `tracing` profile. required: false (Compose >= 2.20): with the
+      # profile off the proxy starts without it; with it on, Langfuse's container starts first.
+      # The proxy never waits on Langfuse: tracing failures stay off the request path.
       langfuse:
         condition: service_started
+        required: false
     deploy:
       resources:
         limits:
@@ -262,7 +274,12 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # ─── Langfuse (G18 Observability) ────────────────────────────────────────────
+  # ─── Langfuse (G18 Observability) — `tracing` profile ────────────────────────
+  # The proxy sends traces only when config.yaml sets groups.G18_observability.langfuse_enabled
+  # (off in the OSS template), so Langfuse runs only with the `tracing` profile: the local
+  # deploys add it when the config turns tracing on, or with --with-tracing; by hand,
+  # `docker compose --profile tracing up -d`. It keeps everything in Postgres's `langfuse`
+  # database, which it creates on its first start.
   langfuse:
     image: langfuse/langfuse:2
     container_name: token-opt-langfuse
@@ -291,6 +308,8 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    profiles:
+      - tracing
 
   # ─── Observability (Optional Profile) ────────────────────────────────────────
   grafana:

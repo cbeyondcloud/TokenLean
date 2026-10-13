@@ -16,11 +16,12 @@
 #
 # What this validates:
 #   1. Required containers are running (proxy, redis, postgres, tika; qdrant when
-#      the backend is qdrant; portal when the commercial overlay is up)
+#      the backend is qdrant; portal when the commercial overlay is up; langfuse when
+#      tracing is on)
 #   2. Proxy responds to /health
 #   3. Prometheus metrics endpoint is accessible
 #   4. Qdrant has tenant collections (rag_<tenant>, hyphens preserved) — qdrant backend only
-#   5. Grafana accessibility (optional)
+#   5. Grafana accessibility (optional); 5b. Langfuse's health when tracing is on
 #   6. Commercial portal reachable (only when the portal container is up)
 #
 # Exit codes:
@@ -32,6 +33,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
+# Whether Langfuse (the `tracing` profile) should be running: see compose-profiles.sh.
+source "${SCRIPT_DIR}/compose-profiles.sh"
 # The local Qdrant's API key (docker-compose.yml requires one): the environment's, else .env's.
 if [[ -z "${QDRANT_API_KEY:-}" && -f "${REPO_ROOT}/.env" ]]; then
   QDRANT_API_KEY="$(sed -n 's/^QDRANT_API_KEY=//p' "${REPO_ROOT}/.env" | tail -n 1 | tr -d '\r')"
@@ -49,7 +52,7 @@ VECTOR_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --vector) VECTOR_OVERRIDE="$2"; shift 2 ;;
-    --help)   sed -n '/^# Usage:/,/^# ===/p' "$0" | head -20; exit 0 ;;
+    --help)   sed -n '/^# Usage:/,/^# ===/p' "$0"; exit 0 ;;
     *) shift ;;
   esac
 done
@@ -96,10 +99,16 @@ container_up() {
 # ─── Test 1: Container Health ─────────────────────────────────────────────────
 info "Test 1: Checking container health..."
 
+# Langfuse is the `tracing` profile: required when the deploy started it (COMPOSE_PROFILES, which
+# the deploys export) or when config.yaml turns tracing on (its traces are lost without it).
+TRACING=false
+if compose_profiles_has tracing || compose_tracing_wanted "$REPO_ROOT"; then TRACING=true; fi
+
 # name:required — qdrant required only under the qdrant backend; portal only when commercial
 CHECKS=("proxy:true" "redis:true" "postgres:true" "tika:true")
 [[ "$BACKEND" == "qdrant" ]] && CHECKS+=("qdrant:true") || CHECKS+=("qdrant:false")
 [[ "$COMMERCIAL" == true ]]  && CHECKS+=("portal:true")
+[[ "$TRACING" == true ]]     && CHECKS+=("langfuse:true")
 
 for entry in "${CHECKS[@]}"; do
   name="${entry%%:*}"; required="${entry##*:}"
@@ -184,6 +193,18 @@ else
   warn "Grafana health check returned HTTP $GRAFANA_RESPONSE (not started, or observability profile off)"
 fi
 echo ""
+
+# ─── Test 5b: Langfuse (only when tracing is on) ──────────────────────────────
+if [[ "$TRACING" == true ]]; then
+  info "Test 5b: Checking Langfuse..."
+  LANGFUSE_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3100/api/public/health 2>/dev/null || echo "000")
+  if [[ "$LANGFUSE_RESPONSE" == "200" ]]; then
+    success "Langfuse accessible at http://localhost:3100"
+  else
+    warn "Langfuse health returned HTTP $LANGFUSE_RESPONSE (on its first start it sets up its database first)"
+  fi
+  echo ""
+fi
 
 # ─── Test 6: Commercial Portal (only when overlay is up) ──────────────────────
 if [[ "$COMMERCIAL" == true ]]; then

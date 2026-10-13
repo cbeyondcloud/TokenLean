@@ -1308,6 +1308,7 @@ groups:
     # Langfuse trace emission is OFF by default (OSS). Prometheus + savings metrics
     # run regardless — this flag gates only Langfuse traces. The commercial deploy
     # sets it true; Langfuse keys are still required for traces to actually emit.
+    # Locally, true also starts Langfuse: the deploys add compose's `tracing` profile.
     langfuse_enabled: false
     # Not read by the proxy: the Langfuse endpoint is the LANGFUSE_HOST env var (local compose:
     # http://langfuse:3000). Kept only so existing configs still parse the same.

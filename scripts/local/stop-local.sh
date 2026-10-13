@@ -6,7 +6,7 @@
 #   ./scripts/local/stop-local.sh [--backup]
 #
 # What this does:
-#   1. Stops all Docker containers
+#   1. Stops all Docker containers, every compose profile's too (Grafana, Langfuse, ...)
 #   2. Optionally backs up data to GCS (with --backup)
 #   3. Confirms zero GCP cost
 # =============================================================================
@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --backup) BACKUP=true; shift ;;
     --help)
-      sed -n '/^# Usage:/,/^# ===/p' "$0" | head -20
+      sed -n '/^# Usage:/,/^# ===/p' "$0"
       exit 0 ;;
     *) error "Unknown option: $1" ;;
   esac
@@ -61,7 +61,9 @@ fi
 
 # ─── Stop ─────────────────────────────────────────────────────────────────────
 info "Stopping local Docker stack..."
-$DC down
+# Every profile's services: a plain `down` stops only the active profiles', so it left Grafana,
+# Prometheus, Jaeger and Langfuse running (and the network in use). Volumes stay.
+$DC --profile '*' down
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""

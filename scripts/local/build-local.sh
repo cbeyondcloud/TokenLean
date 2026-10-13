@@ -32,6 +32,11 @@ if [ -f ".env" ]; then
     set +a
     echo "[build-local] Loaded .env"
 fi
+# The optional compose profiles: any .env sets, plus `tracing` (Langfuse) when config.yaml turns
+# Langfuse tracing on (see compose-profiles.sh).
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/compose-profiles.sh"
+compose_profiles_apply "$PROJECT_ROOT" false false
 
 # Parse flags out of the args; everything else is treated as a service name.
 RUN_PROMPTFOO=false
@@ -74,9 +79,13 @@ fi
 echo ""
 echo "[build-local] Done. Key URLs:"
 echo "  Proxy:      http://localhost:4000"
-echo "  Jaeger:     http://localhost:16686"
-echo "  Grafana:    http://localhost:3000  (admin / see .env)"
-echo "  Langfuse:   http://localhost:3001"
+if compose_profiles_has observability; then
+    echo "  Jaeger:     http://localhost:16686"
+    echo "  Grafana:    http://localhost:3000  (admin / see .env)"
+fi
+if compose_profiles_has tracing; then
+    echo "  Langfuse:   http://localhost:3100"
+fi
 
 # ─── Optional post-build steps (opt-in via flags) ──────────────────────────────
 # Run after the stack is up so Promptfoo can reach the live local proxy. These are

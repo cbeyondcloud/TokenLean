@@ -23,6 +23,22 @@ date changes.
 
 ## 2026-10-13
 
+### Langfuse runs only when tracing is on — Enhancement (OSS)
+
+Langfuse started with every local stack, though the template ships tracing off. It is now the
+`tracing` compose profile: `deploy-local.sh` and `start-local.sh` start it when `config.yaml`
+turns `G18_observability.langfuse_enabled` on (in the base config, a params file or one tenant's
+overlay), or with `--with-tracing`. The proxy no longer requires it to start, and `stop-local.sh`
+now stops every profile's services (it left Grafana, Prometheus and Jaeger running). A stack
+started before this keeps its Langfuse container until it is stopped.
+- **OSS:** a lighter default local stack; Docker Compose v2.20 or later is now required.
+
+### A data erase completes on a server that never ran Langfuse — Bug fix [Enterprise]
+
+An erase or offboard on a deployment whose database server has no Langfuse database reported
+the erase as incomplete; it now reports no traces to erase, as there are none. Nothing for
+self-hosters to upgrade — <https://tokenlean.cbeyond.cloud/>
+
 ### Grafana's savings dashboards show data with Langfuse tracing off — Bug fix
 
 The per-call, live, trends and quarterly dashboards read Langfuse's database, which stays empty

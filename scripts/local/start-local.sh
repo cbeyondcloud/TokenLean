@@ -3,7 +3,13 @@
 # start-local.sh — Start local Docker stack (zero GCP cost)
 # =============================================================================
 # Usage:
-#   ./scripts/local/start-local.sh [--seed]
+#   ./scripts/local/start-local.sh [--seed] [--with-grafana] [--with-tracing]
+#
+# Options:
+#   --seed              Seed Qdrant if empty
+#   --with-grafana      Start Prometheus + Grafana + Jaeger (the `observability` profile)
+#   --with-tracing      Start Langfuse (the `tracing` profile). It starts anyway when
+#                       config.yaml turns G18_observability.langfuse_enabled on.
 #
 # What this does:
 #   1. Checks Docker is running
@@ -16,12 +22,27 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SEED=false
+WITH_GRAFANA=false
+WITH_TRACING=false
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 info()    { echo -e "${BLUE}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+
+# The flags first: --help must not load .env or fill (write) a missing login into it.
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --seed) SEED=true; shift ;;
+    --with-grafana) WITH_GRAFANA=true; shift ;;
+    --with-tracing) WITH_TRACING=true; shift ;;
+    --help)
+      sed -n '/^# Usage:/,/^# ===/p' "$0"
+      exit 0 ;;
+    *) error "Unknown option: $1" ;;
+  esac
+done
 
 # ─── Load .env file if it exists ──────────────────────────────────────────────
 ENV_FILE="${REPO_ROOT}/.env"
@@ -35,16 +56,8 @@ fi
 # docker-compose.yml requires the stack's own credentials: any .env lacks is generated.
 source "${SCRIPT_DIR}/fill-local-env.sh"
 fill_local_env "$ENV_FILE"
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --seed) SEED=true; shift ;;
-    --help)
-      sed -n '/^# Usage:/,/^# ===/p' "$0" | head -20
-      exit 0 ;;
-    *) error "Unknown option: $1" ;;
-  esac
-done
+# The optional compose profiles (Grafana's, Langfuse's): see compose-profiles.sh.
+source "${SCRIPT_DIR}/compose-profiles.sh"
 
 # ─── Check Docker ─────────────────────────────────────────────────────────────
 info "Checking Docker..."
@@ -65,8 +78,14 @@ fi
 # ─── Start ──────────────────────────────────────────────────────────────────────
 cd "${REPO_ROOT}"
 
+# Optional compose profiles, merged with any .env sets: `observability` with --with-grafana;
+# `tracing` (Langfuse) with --with-tracing or when config.yaml turns Langfuse tracing on.
+compose_profiles_apply "$REPO_ROOT" "$WITH_GRAFANA" "$WITH_TRACING"
+info "Compose profiles: ${COMPOSE_PROFILES:-none (the core stack only)}"
+
 info "Starting local Docker stack..."
 $DC up -d
+compose_note_idle_langfuse
 
 # ─── Wait for health ────────────────────────────────────────────────────────────
 info "Waiting for services to be healthy..."
@@ -105,5 +124,7 @@ success "Local stack is running!"
 echo "  Proxy:     http://localhost:4000"
 echo "  LLMLingua: http://localhost:8080"
 echo "  Qdrant:    http://localhost:6333"
+if compose_profiles_has observability; then echo "  Grafana:   http://localhost:3000"; fi
+if compose_profiles_has tracing; then echo "  Langfuse:  http://localhost:3100"; fi
 echo ""
 echo "Stop with: ./scripts/local/stop-local.sh"

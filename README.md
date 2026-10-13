@@ -407,8 +407,8 @@ The engine is OSS in every tier. The managed **Agents console** (declare/govern 
 | `./scripts/gcp/gcp-deploy.sh --skip-infra` | Code changes only (no infrastructure changes) | ~5 min |
 | `./scripts/gcp/stop-gcp.sh` | Pause GCP infrastructure (~$2/month cost) | ~2 min |
 | `./scripts/gcp/start-gcp.sh` | Resume GCP from paused state | ~5 min |
-| `./scripts/local/deploy-local.sh --seed` | Deploy locally via Docker (zero GCP cost) | ~5 min |
-| `./scripts/local/stop-local.sh` | Stop local Docker stack | ~10 sec |
+| `./scripts/local/deploy-local.sh --seed` | Deploy locally via Docker (zero GCP cost). Langfuse starts only when tracing is on (`langfuse_enabled`, or `--with-tracing`); Grafana with `--with-grafana` | ~5 min |
+| `./scripts/local/stop-local.sh` | Stop local Docker stack, every compose profile's services | ~10 sec |
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for complete details.
 
@@ -614,9 +614,9 @@ main._record_outcome ───────────────────�
 
 | Script | Purpose |
 |--------|---------|
-| `deploy-local.sh` | Deploy full stack locally via Docker Compose |
-| `start-local.sh` | Start local Docker stack |
-| `stop-local.sh` | Stop local Docker stack (zero cost) |
+| `deploy-local.sh` | Deploy the stack locally via Docker Compose; optional profiles: `--with-grafana` (Prometheus, Grafana, Jaeger), `--with-tracing` (Langfuse, also started when `langfuse_enabled` is on) |
+| `start-local.sh` | Start local Docker stack (same profile flags) |
+| `stop-local.sh` | Stop local Docker stack, every profile's services (zero cost) |
 | `live_run_check.sh` | Live per-provider smoke test — preflight (Docker/proxy/config/keys) → real round-trip per provider (auto-generates a proxy key if absent) → PASS/FAIL/SKIP table. `./scripts/local/live_run_check.sh [provider\|all]` |
 
 ### GCP deployment (`scripts/gcp/`)

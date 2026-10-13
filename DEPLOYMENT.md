@@ -1147,8 +1147,8 @@ source .env && ./scripts/local/deploy-local.sh --seed
 
 # 3. Access services
 # Proxy:    http://localhost:4000
-# Grafana:  http://localhost:3000
-# Langfuse: http://localhost:3100
+# Grafana:  http://localhost:3000  (with --with-grafana)
+# Langfuse: http://localhost:3100  (when config.yaml turns langfuse_enabled on, or --with-tracing)
 # Qdrant:   http://localhost:6333
 
 # 4. Stop local stack

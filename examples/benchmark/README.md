@@ -98,8 +98,10 @@ breakdown** (which techniques earned the savings). Full detail is written to
   and reloads** on exit — even on failure or Ctrl-C. Pinning first means a cold stack
   starts once, on the pinned config; only a proxy that was already running is restarted.
   One setting follows *your* config rather than the template: whether Langfuse tracing is
-  on (reporting only — it moves no token count). Pass `--no-pin-config` to measure the live
-  config as-is.
+  on (reporting only — it moves no token count). The launcher starts the core stack, which no
+  longer includes Langfuse: for traces, have it running already (`docker compose --profile
+  tracing up -d`, or `COMPOSE_PROFILES=tracing` in `.env`). Pass `--no-pin-config` to measure
+  the live config as-is.
 - **Stack health, then a warm-up that must succeed** — `docker compose up -d`, wait for
   `http://localhost:4000/health`, then load the LLMLingua sidecar's model directly and send
   one unmeasured request through the proxy. No timed request is sent until that warm-up has

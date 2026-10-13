@@ -7,10 +7,11 @@
 #
 # Checks:
 #   - Docker daemon running
-#   - Docker Compose available (V1 or V2)
+#   - Docker Compose available, v2.20 or later (docker-compose.yml marks a dependency optional)
 #   - Required files exist (.env, config/config.yaml, docker-compose.yml)
 #   - Required directories exist (src/proxy, src/llmlingua-sidecar, etc.)
-#   - Required ports are free (4000, 8080, 8081, 6333, 9998, 3000, 3100)
+#   - Required ports are free (4000, 8080, 8081, 6333, 9998, 3000; Langfuse's 3100 when
+#     config.yaml turns Langfuse tracing on, which starts the `tracing` profile)
 #   - Environment variables are set (not placeholders)
 #   - YAML files are valid
 # =============================================================================
@@ -18,6 +19,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# Whether config.yaml turns Langfuse tracing on (compose_tracing_wanted): see compose-profiles.sh.
+source "${SCRIPT_DIR}/compose-profiles.sh"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 PASS="${GREEN}✓${NC}"; FAIL="${RED}✗${NC}"; WARN="${YELLOW}!${NC}"
@@ -52,6 +55,12 @@ elif docker-compose version &>/dev/null; then
 else
     error "Docker Compose not found. Install Docker Compose."
     DC="docker-compose"  # fallback for subsequent checks
+fi
+# docker-compose.yml marks the proxy's Langfuse dependency `required: false`, which Compose reads
+# from v2.20: an older one refuses the file.
+if [[ "${DC_VERSION:-}" =~ ^v?([0-9]+)\.([0-9]+) ]] \
+        && (( BASH_REMATCH[1] < 2 || (BASH_REMATCH[1] == 2 && BASH_REMATCH[2] < 20) )); then
+    error "Docker Compose v${DC_VERSION} is too old: docker-compose.yml needs v2.20 or later"
 fi
 
 # ─── Check 3: Required files ──────────────────────────────────────────────────
@@ -110,7 +119,12 @@ fi
 
 # ─── Check 6: Port availability ─────────────────────────────────────────────────
 info "Checking port availability..."
-REQUIRED_PORTS=(4000 8080 8081 6333 9998 3000 3100)
+REQUIRED_PORTS=(4000 8080 8081 6333 9998 3000)
+# Langfuse (3100) runs only with the `tracing` profile, which the deploys start when config.yaml
+# turns Langfuse tracing on.
+if compose_tracing_wanted "$REPO_ROOT"; then
+    REQUIRED_PORTS+=(3100)
+fi
 PORT_ERRORS=0
 
 # Ports published by our OWN already-running stack are not conflicts on a
