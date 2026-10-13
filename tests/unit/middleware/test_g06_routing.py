@@ -490,8 +490,12 @@ class TestG06Routing:
         mock_resp.json.return_value = {"routed_model": "gpt-4o-mini", "reason": "below_threshold"}
         mock_resp.raise_for_status = MagicMock()
         spans = []
+
+        async def tenant_key(provider, tenant_id, ctx=None):   # mf embeds with the tenant's key
+            return "sk-tenant" if provider == "openai" else None
+
         with patch("middleware.g06_routing.httpx.AsyncClient", return_value=FakeClient(mock_resp)), \
-             patch("middleware.g06_routing._openai_key_available", return_value=True), \
+             patch("providers.key_resolver._resolver", tenant_key), \
              patch("middleware.g06_routing.langfuse_tracing.add_span",
                    lambda ctx, **kw: spans.append(kw["metadata"])):
             from middleware.g06_routing import G06Routing
@@ -1841,7 +1845,6 @@ class TestG06RouteLLMSendsAnIdentityToken:
                 return _RouteResp()
 
         monkeypatch.setattr(g06.httpx, "AsyncClient", _Client)
-        monkeypatch.setattr(g06, "_openai_key_available", lambda: True)
         return g06
 
     async def test_the_call_carries_the_cloud_run_token(self, monkeypatch):

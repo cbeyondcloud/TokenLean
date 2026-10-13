@@ -144,15 +144,6 @@ def _record_substitution(ctx: RequestContext, substitute: str) -> None:
     ctx.routing_detail = "unconfigured model → configured default"
 
 
-def _openai_key_available() -> bool:
-    """True if an OpenAI key is configured (env or Secret Manager)."""
-    try:
-        from auth.api_key_manager import get_llm_provider_key
-        return bool(get_llm_provider_key("openai"))
-    except Exception:
-        return False
-
-
 def _is_configured_model(model: str) -> bool:
     """True if ``model`` is explicitly configured — listed in ``providers[].models`` OR
     matching a configured provider's ``model_prefixes``.
@@ -262,7 +253,9 @@ def _tier_reachable(model: str) -> bool:
     credentials (Bedrock SigV4 / Vertex ADC, whose adapter ``requires_api_key()`` is False).
     Used to avoid routing to a tier whose provider isn't configured (→ a downstream 503).
 
-    BYOK note: this is a best-effort, PLATFORM-level routing pre-filter (kept sync). The real
+    BYOK note: this is a best-effort, PLATFORM-level routing pre-filter (kept sync: the platform
+    lookup is cached, so a Secret Manager read happens once per provider per
+    LLM_KEY_CACHE_SECONDS, #107). The real
     per-tenant key enforcement happens at the actual tier/main call via ``_resolve_provider_key``
     / the BYOK seam; a keyless strict tenant degrades there (or the main path 402s). A tenant
     with only their own key may thus be routed through a platform-reachable tier and fail at the
@@ -1165,6 +1158,44 @@ async def _evaluate_response_confidence(
 # derivative (see THIRD_PARTY_LICENSES.md).
 _ROUTELLM_THRESHOLDS = {"bert": 0.4066, "mf": 0.11593, "sw_ranking": 0.21647, "causal_llm": 0.0962}
 _ROUTELLM_DEFAULT_ROUTER = "bert"
+# mf and sw_ranking embed the routed turn with OpenAI inside the sidecar, with the TENANT's own
+# key (the owner's rule: every model key is the tenant's), sent per request in this header.
+_ROUTELLM_EMBEDDING_ROUTERS = ("mf", "sw_ranking")
+_ROUTELLM_EMBEDDING_PROVIDER = "openai"
+_ROUTELLM_KEY_HEADER = "X-Embedding-Key"
+# When a tenant without an OpenAI key was last warned that its mf/sw_ranking runs as bert.
+_ROUTELLM_NO_KEY_WARNED: Dict[str, float] = {}
+
+
+async def _routellm_embedding_key(ctx: Optional[RequestContext]) -> Optional[str]:
+    """The tenant's own OpenAI key for an embedding router, or None: none stored, strict BYOK
+    refusing the platform's, or a lookup that failed (bert then decides, which needs none)."""
+    from providers.key_resolver import ProviderKeyError, resolve_provider_key
+    tenant_id = getattr(ctx, "tenant_id", None) or "default"
+    try:
+        return await resolve_provider_key(_ROUTELLM_EMBEDDING_PROVIDER, tenant_id, ctx)
+    except ProviderKeyError:
+        return None
+    except Exception as exc:
+        logger.warning("G06 RouteLLM: key lookup for tenant %s failed (%s)",
+                       tenant_id, type(exc).__name__)
+        return None
+
+
+def _warn_routellm_without_key(ctx: Optional[RequestContext], router: str,
+                               routellm_cfg: Dict[str, Any]) -> None:
+    """Once per tenant per ``routellm.warn_every_s``, not on every request."""
+    tenant_id = getattr(ctx, "tenant_id", None) or "default"
+    now = time.monotonic()
+    last = _ROUTELLM_NO_KEY_WARNED.get(tenant_id)
+    if last is not None and now - last < float(routellm_cfg.get("warn_every_s", 3600)):
+        return
+    _ROUTELLM_NO_KEY_WARNED[tenant_id] = now
+    logger.warning(
+        "G06 RouteLLM: router=%r embeds with the tenant's own OpenAI key and tenant %s has none "
+        "— using the bert router at its threshold %s instead",
+        router, tenant_id, _ROUTELLM_THRESHOLDS["bert"],
+    )
 
 
 async def _classify_routellm(
@@ -1200,17 +1231,17 @@ async def _classify_routellm(
         )
         return _fall_back("no_config")
 
-    # P8: the mf/sw_ranking routers compute OpenAI embeddings in the sidecar. If no OpenAI
-    # key is configured (e.g. an Anthropic/Gemini-only deployment), use the bert router (a
-    # local classifier, no embeddings) at bert's own threshold: the configured one was
-    # calibrated for the other router. If bert cannot run either, the sidecar call fails and
-    # the heuristic below decides. See docs/config-reference.md.
-    if router in ("mf", "sw_ranking") and not _openai_key_available():
-        logger.warning(
-            "G06 RouteLLM: router=%r needs OpenAI embeddings but no OpenAI key is set — "
-            "using the bert router at its threshold %s instead", router, _ROUTELLM_THRESHOLDS["bert"],
-        )
-        router, threshold = "bert", _ROUTELLM_THRESHOLDS["bert"]
+    # P8 / #99: the mf/sw_ranking routers compute OpenAI embeddings in the sidecar, with the
+    # tenant's own OpenAI key. A tenant without one (e.g. an Anthropic/Gemini-only account)
+    # gets the bert router (a local classifier, no embeddings) at bert's own threshold: the
+    # configured one was calibrated for the other router. If bert cannot run either, the
+    # sidecar call fails and the heuristic decides. See docs/config-reference.md.
+    embedding_key = None
+    if router in _ROUTELLM_EMBEDDING_ROUTERS:
+        embedding_key = await _routellm_embedding_key(ctx)
+        if not embedding_key:
+            _warn_routellm_without_key(ctx, router, routellm_cfg)
+            router, threshold = "bert", _ROUTELLM_THRESHOLDS["bert"]
 
     payload = {
         "messages": messages,
@@ -1225,12 +1256,20 @@ async def _classify_routellm(
         # was refused. Nothing is attached locally (compose) or for a URL not on run.app.
         from ml_models import cloud_run_auth_headers
         headers = await asyncio.to_thread(cloud_run_auth_headers, sidecar_url)
+        if embedding_key:                  # a header, never the body: bodies get logged
+            headers = {**(headers or {}), _ROUTELLM_KEY_HEADER: embedding_key}
         async with httpx.AsyncClient(timeout=timeout_ms / 1000) as client:
             response = await client.post(f"{sidecar_url}/route", json=payload, headers=headers)
             response.raise_for_status()
             result = response.json()
             routed_model = result.get("routed_model")
             reason = result.get("reason", "")
+            # #108: the embedding was paid for whatever the answer, so it is priced as a side call.
+            usage = result.get("embedding_usage")
+            if ctx is not None and isinstance(usage, dict):
+                record_provider_call(
+                    ctx, f"{_ROUTELLM_EMBEDDING_PROVIDER}/{usage.get('model') or 'embedding'}",
+                    {"usage": {"prompt_tokens": int(usage.get("prompt_tokens") or 0)}}, side=True)
 
             logger.debug(
                 "G06 RouteLLM routed to %s (router=%s, reason=%s)",

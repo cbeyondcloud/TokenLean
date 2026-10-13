@@ -94,7 +94,11 @@ that tenant's requests. Provider **keys** are never part of
 config — per-tenant keys (BYOK, commercial layer) live encrypted in `tenant_provider_keys`
 and resolve per (provider, tenant) through `providers/key_resolver.py`. The OSS default
 resolver uses the global `LLM_KEY_<PROVIDER>` env / Secret Manager keys, so self-host
-behaviour is unchanged.
+behaviour is unchanged. `LLM_KEY_<PROVIDER>` is read on every lookup; a key read from Secret
+Manager is reused for `LLM_KEY_CACHE_SECONDS` (env var, default `60`), as is a secret that
+does not exist or cannot be read, and a lookup that misses the cache runs off the event loop.
+If Secret Manager cannot be reached, the read is retried within seconds and the last key it
+gave is still served. So a rotated or newly added platform key takes up to that long to apply.
 
 ### rate_limit extras
 
@@ -463,6 +467,7 @@ entries are rebuilt once.
 | `routellm.strong_model` | `gpt-4o` | Strong/expensive model for RouteLLM |
 | `routellm.weak_model` | `gpt-4o-mini` | Weak/cheap model for RouteLLM |
 | `routellm.timeout_ms` | `500` | Max wait for routing decision before fallback |
+| `routellm.warn_every_s` | `3600` | How often a tenant whose `mf`/`sw_ranking` runs as `bert` (no OpenAI key of its own) is warned in the log |
 | `jev.url` | `https://api.typesafe.ai/v1/systemone` | Jev endpoint (any TypeSafe-compatible one) |
 | `jev.model` | `jev-1.13.0` | Jev model, pinned: `jev-latest` moves without notice |
 | `jev.key_provider` | `typesafe` | The name each tenant stores its TypeSafe key under in the portal; a self-hosted proxy reads `LLM_KEY_<KEY_PROVIDER>`. 2–40 lowercase letters, digits or underscores, and never a configured LLM provider's name (that provider's keys would be sent to Jev) |
@@ -566,8 +571,9 @@ Anthropic and Gemini ingress traffic. If a G24 rule skips G06 for a request,
 routing rules are skipped with it.)
 
 **RouteLLM Configuration Notes:**
-- The `mf` and `sw_ranking` routers require an OpenAI API key for embeddings (stored in Secret Manager as `routellm-openai-key`)
-- **No OpenAI key?** If `router` is `mf`/`sw_ranking` and no OpenAI key is configured, G06 logs a warning and uses the `bert` router (a local classifier, no embeddings) at bert's own threshold, so routing still works for Anthropic/Gemini-only deployments. If `bert` cannot run either, the heuristic decides
+- The `mf` and `sw_ranking` routers embed each routed turn with OpenAI, with **each tenant's own OpenAI key** (a self-hosted proxy: its `LLM_KEY_OPENAI`). G06 sends the key to the sidecar with the request, in a header; the sidecar holds none of its own. The embedding is priced as a side call of the request (the `text-embedding-3-small` pricing row)
+- **No OpenAI key?** A tenant without one (an Anthropic/Gemini-only account, or strict BYOK refusing the platform's) gets the `bert` router (a local classifier, no embeddings) at bert's own threshold, so routing still works; it is warned in the log once per `warn_every_s`, `routellm_router_used` says `bert`, and the portal tells the tenant. If `bert` cannot run either, the heuristic decides
+- **The old platform key.** The GCP secret `routellm-openai-key` is no longer read or seeded. It is kept so that no deploy deletes it; to delete it, remove the `routellm_openai_key` resource, `routellm_secret_accessor` and its `proxy_secret_ids` entry from `infra/main.tf`, then apply
 - **Tier models must be reachable.** The default tiers/`weak_model`/`strong_model` are OpenAI models — an OpenAI-free deployment should point them at its own provider's models (e.g. `weak_model: claude-haiku-4-5`, `strong_model: claude-sonnet-4-5`). If a routed tier's provider has no credential, G6 logs the unreachable tier(s) once at first use and, per `on_unreachable_tier`, either falls back to the requested model (default) or returns a clean 503
 - `bert` is the default because its checkpoint is Apache-2.0 (on MIT `xlm-roberta-base`); `mf`'s checkpoint carries no licence and `causal_llm`'s is a Meta Llama 3 derivative, so read [THIRD_PARTY_LICENSES.md](../THIRD_PARTY_LICENSES.md) before choosing either
 - The sidecar only *decides*: RouteLLM's `route()` scores the last turn and the answer is `weak_model` or `strong_model` as configured here. No model is called, so nothing is billed (`mf` and `sw_ranking` still embed that turn with OpenAI). Each router loads on first use; `causal_llm` is a large local model (an 8B-parameter checkpoint in RouteLLM's release), so give the sidecar the memory it needs before choosing it (`bert`'s 1.1 GB fits the default 2 GB)
@@ -801,7 +807,7 @@ refused both when it would be stored and when an entry stored earlier would be s
 ### G13_batch
 Batch accumulation (Redis Streams) plus TOON compact notation — converts JSON arrays of uniform objects into pipe-delimited rows. The `toon_*` knobs gate when TOON fires so it never inflates tokens. All `toon_*` knobs honour per-tenant overrides (`tenants.<id>.groups.G13_batch`). Unless `toon_auto_detect` is on, TOON runs only when a system message carries a line written in the notation itself (`schema:name|age`); mentioning "schema" next to a markdown table does not turn it on. A block with a `|` or a line break in any value or key stays JSON, and `null`, an empty string and a key a row lacks are written `null`, `""` and an empty cell.
 
-**Provider-native batch lane (optional, default off):** when `provider_native: true`, a flushed batch is grouped by provider and submitted to a native Batch API (**50% discount** on latency-tolerant traffic) instead of looping `litellm.acompletion` per item at sync price. **OpenAI** uses the OpenAI SDK directly; **Anthropic/Gemini** route through litellm's unified batch API (`custom_llm_provider`), which normalises results to OpenAI shape. A background poller (`poll_batch_jobs` / `start_batch_poller`) maps completed results back to each `request_id`, served by the existing `/v1/batch/results/{id}` endpoint. A missing key, an unsupported provider, or a submit error → graceful fallback to the per-item loop (a failed provider is memoised for the process so it isn't re-attempted every flush). Applies only to requests tagged with `batch_topic`; quality-neutral (same model/inputs). *Anthropic/Gemini batch depends on the installed litellm's batch support for that provider and needs live verification.*
+**Provider-native batch lane (optional, default off):** when `provider_native: true`, a flushed batch is grouped by provider and tenant and submitted to a native Batch API with **that tenant's own key** (**50% discount** on latency-tolerant traffic) instead of looping `litellm.acompletion` per item at sync price; the poller reads each job back with its tenant's key (a job recorded before jobs carried their tenant, with the platform key it was submitted with). A tenant without its own key takes the per-item loop. **OpenAI** uses the OpenAI SDK directly; **Anthropic/Gemini** route through litellm's unified batch API (`custom_llm_provider`), which normalises results to OpenAI shape. A background poller (`poll_batch_jobs` / `start_batch_poller`) maps completed results back to each `request_id`, served by the existing `/v1/batch/results/{id}` endpoint. A missing key, an unsupported provider, or a submit error → graceful fallback to the per-item loop (a failed submit is memoised for that provider and tenant for the process, so it isn't re-attempted every flush). The calls a request already made before it was queued (the G06 judge or Jev, G09, G10/G26) are priced when it is queued, onto its billing row and the spend counter; its answer's cost is added when the answer arrives. Applies only to requests tagged with `batch_topic`; quality-neutral (same model/inputs). *Anthropic/Gemini batch depends on the installed litellm's batch support for that provider and needs live verification.*
 
 **Flex / `service_tier`:** a request may set `service_tier` (e.g. `"flex"` — ~50% off, latency-tolerant) in its params. It is forwarded only to providers that accept it (OpenAI) and stripped for others (Anthropic/Gemini reject it), via `adapter.supports_service_tier()` in the outgoing-params build.
 

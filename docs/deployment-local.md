@@ -62,7 +62,7 @@ cp .env.template .env
 # .env
 COMPOSE_PROJECT_NAME=token-opt
 DB_PASSWORD=devpassword
-OPENAI_API_KEY=sk-...  # Required for RouteLLM
+LLM_KEY_OPENAI=sk-...  # The proxy's OpenAI key (RouteLLM needs none of its own)
 ```
 
 All local scripts automatically source `.env` at the repo root if present.
@@ -222,7 +222,7 @@ Access Grafana at http://localhost:3000 (default login: admin / the password fro
 | `Docker is not running` | Start Docker Desktop or the Docker daemon |
 | `port is already allocated` | Stop conflicting services or change ports in `.env` |
 | `proxy unhealthy` | Check logs: `docker-compose logs proxy` |
-| `RouteLLM routing fails` | Set `OPENAI_API_KEY` in `.env` |
+| `RouteLLM routing fails` (`routing_mode` says `routellm+fallback:<reason>`) | Check `docker-compose logs routellm`. No key is needed: `bert` runs locally, and `mf`/`sw_ranking` embed with each tenant's own OpenAI key |
 | `Langfuse shows database error` | Wait for postgres to be healthy: `docker-compose logs postgres` |
 | `Qdrant empty after restart` | Re-seed: `./scripts/seed-data.sh --qdrant-url http://localhost:6333` |
 | Windows line-ending errors | Run: `git config core.autocrlf false` then re-clone |

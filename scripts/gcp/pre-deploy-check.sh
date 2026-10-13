@@ -279,7 +279,7 @@ else
   fi
   
   # Check required key fields (ignore commented-out lines)
-  REQUIRED_KEYS=("openai" "anthropic" "google" "mistral" "routellm")
+  REQUIRED_KEYS=("openai" "anthropic" "google" "mistral")
   for key in "${REQUIRED_KEYS[@]}"; do
     if grep -vE "^\s*#" "$KEYS_FILE" | grep -q "^\s*${key}:"; then
       success "Key field present: ${key}"

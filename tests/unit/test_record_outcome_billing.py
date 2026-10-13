@@ -258,7 +258,7 @@ async def test_a_deferred_batch_request_is_billed_only_when_it_is_the_tenant_s(
 # arrives; G13 adds that to the spend counter then.
 @pytest.mark.asyncio
 @pytest.mark.parametrize("impersonated, counted", [
-    (True, []), (False, ["_bump_quota_counter", "_bump_trial_counter"])],
+    (True, []), (False, ["_bump_quota_counter", "_bump_spend_counter", "_bump_trial_counter"])],
     ids=["impersonated", "the tenant's own"])
 async def test_a_deferred_batch_request_counts_against_the_quota_and_trial(
         monkeypatch, counters, impersonated, counted):
@@ -268,6 +268,71 @@ async def test_a_deferred_batch_request_counts_against_the_quota_and_trial(
     main._bill_batch_deferred(ctx)
     await asyncio.sleep(0)
     assert counters == counted
+
+
+# ─── #106: what a deferred request already spent is priced when it is deferred ──
+# It leaves for the batch before the response pipeline, so G18 never priced the calls already
+# booked on it (the G06 judge or Jev, G09's schema extraction, the G10/G26 summariser): the
+# billing row and the spend cap counted none of it. The answer's own cost still arrives later.
+def _deferred_ctx(impersonated=False):
+    ctx = _impersonated_ctx() if impersonated else _ctx()
+    ctx.cache_response = None
+    ctx.model = "gpt-4o"
+    ctx.savings = SimpleNamespace(cost_actual_usd=0.0)
+    ctx.provider_calls = [
+        {"model": "judge-m", "prompt_tokens": 1000, "completion_tokens": 100, "side": True},
+        {"model": "typesafe/jev-1.13.0", "prompt_tokens": 400, "completion_tokens": 0,
+         "side": True},
+    ]
+    return ctx
+
+
+def _fake_prices(monkeypatch):
+    """Each call at ITS model's price: the judge's model costs ten times the request's."""
+    from middleware import g18_observability
+    rate = {"judge-m": 10.0, "typesafe/jev-1.13.0": 0.1}
+    monkeypatch.setattr(g18_observability, "estimate_cost",
+                        lambda prompt, completion, model:
+                        (prompt * 1e-6 + completion * 2e-6) * rate.get(model, 1.0))
+    return (1000 * 1e-6 + 100 * 2e-6) * 10.0 + 400 * 1e-6 * 0.1
+
+
+@pytest.mark.asyncio
+async def test_the_calls_a_deferred_request_already_made_are_priced_at_defer(monkeypatch):
+    from middleware import g00_rate_limit
+    expected = _fake_prices(monkeypatch)
+    meter = AsyncMock()
+    monkeypatch.setattr(main, "_usage_meter", meter)
+    added = []
+
+    class _Redis:
+        async def incrbyfloat(self, key, amount):
+            added.append(amount)
+            return amount
+
+        async def expire(self, key, ttl):
+            pass
+
+    monkeypatch.setattr(g00_rate_limit, "_get_redis", lambda: _Redis())
+    ctx = _deferred_ctx()
+    main._bill_batch_deferred(ctx)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert ctx.savings.cost_actual_usd == pytest.approx(expected)       # on the billing row
+    assert meter.record.await_args.args[0].savings.cost_actual_usd == pytest.approx(expected)
+    assert added == [pytest.approx(expected)]                            # and the spend cap
+
+
+@pytest.mark.asyncio
+async def test_an_admin_acting_as_the_tenant_has_its_calls_priced_but_not_spent(
+        monkeypatch, counters):
+    expected = _fake_prices(monkeypatch)
+    monkeypatch.setattr(main, "_usage_meter", AsyncMock())
+    ctx = _deferred_ctx(impersonated=True)
+    main._bill_batch_deferred(ctx)
+    await asyncio.sleep(0)
+    assert ctx.savings.cost_actual_usd == pytest.approx(expected)
+    assert counters == []
 
 
 @pytest.mark.asyncio

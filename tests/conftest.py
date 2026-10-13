@@ -57,6 +57,9 @@ def _reset_proxy_key_cache():
         _akm._last_version_check = 0.0
         _akm._cache_version = None
         _akm._version_check_failing = False
+        # The platform LLM-key cache and its Secret Manager client (#107).
+        _akm._LLM_KEY_CACHE.clear()
+        _akm._LLM_SM_CLIENT = None
     except Exception:
         pass
     yield
@@ -438,7 +441,7 @@ async def client():
          patch("config_loader.start_hot_reload"), \
          patch("config_loader.get_config", return_value=_integration_config()), \
          patch("litellm.acompletion", new_callable=AsyncMock, return_value=_LLM_RESPONSE_MOCK), \
-         patch("main.get_llm_provider_key", return_value="sk-test-key"), \
+         patch("auth.api_key_manager._access_llm_key_secret", return_value="sk-test-key"), \
          patch("middleware.g05_cache.G05Cache.store_response", new_callable=AsyncMock), \
          patch("middleware.g18_observability._emit_trace", new_callable=AsyncMock), \
          patch("cache.redis_pool.init_pool"), \

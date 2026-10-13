@@ -37,8 +37,6 @@ from auth.api_key_manager import (
     validate_proxy_key, is_admin_key, is_gateway_key, is_suspended,
     is_contract_inactive, get_ip_allowlist, key_cached_and_fresh, key_store_backend_installed,
 )
-# Unused here; kept because the test fixtures patch main.get_llm_provider_key.
-from auth.api_key_manager import get_llm_provider_key  # noqa: F401
 from net.client_ip import ClientIPMiddleware, request_client_ip
 from net.ip_allowlist import ip_allowed
 from tracing.otel import TraceIdHeaderMiddleware
@@ -1283,14 +1281,34 @@ def _bill_batch_deferred(ctx) -> None:
     """C1b: a batched request is billable at defer, since it was accepted and will be served
     async (the result-serve endpoint has no ctx); request_id UNIQUE keeps it single even if
     the client polls the result. Being billed, it counts against the quota and trial now
-    too; its cost is known only when its answer arrives, and G13 adds it to the spend
-    counter then. None of this when an admin key sent it as the tenant."""
+    too. #106: the calls it already paid for (the G06 judge or Jev, G09's schema extraction,
+    the G10/G26 summariser — the response pipeline that prices them never runs for it) are
+    priced now, onto the billing row and the spend counter; its answer's cost is known only
+    when the answer arrives, and G13 adds it to the spend counter then. Nothing is counted
+    against the tenant when an admin key sent it as the tenant."""
+    _price_calls_made_before_defer(ctx)
     billable = not _impersonated(ctx)
     _schedule_billing(ctx, getattr(ctx, "cache_response", None) or {}, status_code=202,
                       billable=billable)
     if billable:
         _bump_quota_counter(ctx)
+        _bump_spend_counter(ctx)
         _bump_trial_counter(ctx)
+
+
+def _price_calls_made_before_defer(ctx) -> None:
+    """Price every call booked on a deferred request so far, as G18 would have (#106)."""
+    calls = list(getattr(ctx, "provider_calls", None) or [])
+    savings = getattr(ctx, "savings", None)
+    if not calls or savings is None:
+        return
+    try:
+        from middleware.g18_observability import price_calls
+        savings.cost_actual_usd = (float(getattr(savings, "cost_actual_usd", 0.0) or 0.0)
+                                   + price_calls(calls, getattr(ctx, "model", "") or ""))
+    except Exception as exc:  # noqa: BLE001 — bookkeeping never fails a queued request
+        logger.warning("[%s] the calls made before this request was batched were not priced: %s",
+                       getattr(ctx, "request_id", "?"), exc)
 
 
 def _bump_quota_counter(ctx) -> None:

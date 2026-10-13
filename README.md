@@ -520,7 +520,7 @@ On the [Enterprise](#free-self-host-vs-enterprise-managed) managed portal, **eve
 | **G10** Memory | `sliding_window_turns` 6; `skills_top_k` 2; `skills_similarity_threshold` 0.7 | fewer verbatim turns; fewer skills | keep more turns verbatim; lower skill threshold |
 | **G11** Output Format | `max_tokens_auto_tighten` false; `tighten_quantile` 0.95; `tighten_multiplier` 2.0; `fallback_max_tokens` null | lower quantile/multiplier → tighter caps; set `fallback_max_tokens` to cap cold starts | caps are derived only from past answers to the SAME workflow or template, never from a tenant's other traffic; a request that identifies neither is never capped, and the loop ships off |
 | **G12** Reasoning Budget | `default_effort` medium; `effort_map.*` per-provider thinking budgets | `default_effort: off` — no reasoning parameter at all | raise effort for hard reasoning tasks |
-| **G13** Batch / TOON | `toon_require_net_savings` true; `toon_uniform_threshold` 1.0; `provider_native` false | relax uniformity; enable native batch lane | keep `toon_require_net_savings` on (never inflates) |
+| **G13** Batch / TOON | `toon_require_net_savings` true; `toon_uniform_threshold` 1.0; `provider_native` false | relax uniformity; enable native batch lane (each tenant's batches go with its own key) | keep `toon_require_net_savings` on (never inflates) |
 | **G14** Tool Output | `field_whitelist.*`; `spreadsheet_compression` true | whitelist fewer fields; keep compression on | whitelist all fields the model needs downstream |
 | **G15** Server Compute | `hooks` (filter/sort/project on tool results) | add hooks that shrink tool payloads | keep hooks that drop only redundant data |
 | **G16** Agent Architecture | `max_system_prompt_tokens` 4096; `system_prompt_overflow` warn; `max_tools_per_agent` 20; `tool_selection_strategy` relevance | lower tool cap → more pruning; `system_prompt_overflow: compact` enforces the prompt cap by dropping the middle and keeping both ends | leave `system_prompt_overflow` at `warn` (your prompt is never edited); raise caps so tools aren't cut |
@@ -649,7 +649,7 @@ main._record_outcome ───────────────────�
 | **Compression** | LLMLingua-2 | Prompt compression (G1) |
 | **Caching** | Redis 7 + pgvector | L1 exact-match + L2 semantic cache |
 | **RAG** | Qdrant + sentence-transformers | Vector search (G7) |
-| **Routing** | RouteLLM | Model selection (G6) |
+| **Routing** | RouteLLM (`bert` runs locally; `mf`/`sw_ranking` embed with each tenant's own OpenAI key) | Model selection (G6) |
 | **Routing (optional)** | TypeSafe Jev (hosted; each tenant's own key) | Complexity levels for G6 (`classifier: jev`) |
 | **Memory** | Redis + Qdrant | Session summaries and agent skills (G10) |
 | **Orchestration** | LangGraph | Role-decomposition templates in `templates/` (G16 guidance; the proxy does not run them) |
@@ -734,7 +734,7 @@ The tool-loading path is `src/proxy/middleware/g08_tool_loading.py`.
 | Control | Implementation |
 |---------|---------------|
 | LLM Provider Keys | GCP Secret Manager only (never exposed to developers); per-tenant BYOK keys **Fernet-encrypted** at rest, with optional **KMS master-key wrap** (`enable_kms_master_key`) |
-| **Strict-BYOK mode** | When a tenant has no key of its own, requests fail closed with a **402** — no silent fallback to platform keys |
+| **Strict-BYOK mode** | When a tenant has no key of its own, requests fail closed with a **402** — no silent fallback to platform keys. RouteLLM's embedding routers and the native batch lane use the tenant's own key too |
 | Developer Keys | Proxy-issued API keys with per-user rate limits |
 | Authentication | Workload Identity (no JSON credential files) |
 | **Spend caps** | Per-tenant monthly USD ceiling (`rate_limit.spend_cap`) + budget-threshold webhook — denial-of-wallet protection |

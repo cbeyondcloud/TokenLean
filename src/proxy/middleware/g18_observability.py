@@ -10,7 +10,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -566,6 +566,16 @@ def _baseline_cost(ctx, completion_tokens: int, usage: Dict[str, Any]) -> float:
     return estimate_cost(savings.baseline_tokens, completion_tokens, requested)
 
 
+def price_calls(calls: List[Dict[str, Any]], model: str) -> float:
+    """What these booked provider calls cost at plain list price, each at its own model (else
+    ``model``). G18 prices a request's tier probes and side calls this way, and so does a
+    request G13 defers, whose calls so far are priced when it leaves (backlog #106)."""
+    return sum(estimate_cost(int(call.get("prompt_tokens") or 0),
+                             int(call.get("completion_tokens") or 0),
+                             call.get("model") or model)
+               for call in calls)
+
+
 def price_response(ctx, response: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Set ``ctx.savings``' token and cost fields from the served call's response.
 
@@ -649,12 +659,7 @@ def price_response(ctx, response: Dict[str, Any], cfg: Optional[Dict[str, Any]] 
     _main = [_c for _c in _calls if not _c.get("side")]
     _extra = _main[:-1] + [_c for _c in _calls if _c.get("side")]
     if _extra:
-        for _c in _extra:
-            ctx.savings.cost_actual_usd += estimate_cost(
-                int(_c.get("prompt_tokens") or 0),
-                int(_c.get("completion_tokens") or 0),
-                _c.get("model") or model,
-            )
+        ctx.savings.cost_actual_usd += price_calls(_extra, model)
         # y (final_tokens_sent) deliberately stays the FINAL call's prompt so it stays
         # comparable with every past measurement; this is the total actually sent.
         ctx.savings.provider_call_count = len(_calls)

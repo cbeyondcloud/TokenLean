@@ -173,12 +173,8 @@ if [[ -f "${REPO_ROOT}/.env" ]]; then
     set +a
 fi
 
-# Check critical variables
-if [[ -z "${OPENAI_API_KEY:-}" ]] || [[ "${OPENAI_API_KEY}" == "sk-..." ]] || [[ "${OPENAI_API_KEY}" == "sk-" ]]; then
-    error "OPENAI_API_KEY not set or is placeholder in .env"
-else
-    success "OPENAI_API_KEY is set"
-fi
+# Check critical variables (OPENAI_API_KEY is not one: nothing in the stack reads it; see
+# .env.template)
 
 if [[ -z "${LLM_KEY_OPENAI:-}" ]] || [[ "${LLM_KEY_OPENAI}" == "sk-..." ]] || [[ "${LLM_KEY_OPENAI}" == "sk-" ]]; then
     warn "LLM_KEY_OPENAI not set or is placeholder (proxy may fail)"

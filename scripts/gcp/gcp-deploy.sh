@@ -318,12 +318,8 @@ provision_llm_keys() {
     store_key "llm-key-typesafe"    "typesafe"  || true
   fi
 
-  # RouteLLM embeddings key — INFRA credential for the routellm-sidecar (G06 mf/sw_ranking
-  # routers call OpenAI embeddings). NOT a tenant-answer path, so it is seeded even under
-  # strict BYOK. Provisioned when present in keys.yaml; a warning otherwise. `store_key`
-  # tolerates a missing keys_file (parse yields empty → skip), so this is safe under BYOK.
-  store_key "routellm-openai-key" "routellm" \
-    || warn "routellm key not set — G06 mf/sw_ranking routers need an OpenAI key for embeddings; without one G06 uses the bert router (the default, no key needed)."
+  # RouteLLM's mf/sw_ranking routers embed with each tenant's own OpenAI key, which G06 sends
+  # per request, so no platform key is seeded for the sidecar (backlog #99).
 
   # Langfuse keys — only available after first deploy + manual UI step
   # These live under langfuse_keys: in keys.yaml (not llm_keys:)
@@ -712,7 +708,6 @@ print(cfg.get('groups',{}).get('G6_routing',{}).get('routellm',{}).get('weak_mod
       --max-instances=1 \
       --timeout=60 \
       --set-env-vars="LOG_LEVEL=INFO,ROUTELLM_STRONG_MODEL=${ROUTELLM_STRONG},ROUTELLM_WEAK_MODEL=${ROUTELLM_WEAK}" \
-      --set-secrets="OPENAI_API_KEY=routellm-openai-key:latest" \
       --quiet
     require_private_service routellm-svc
 

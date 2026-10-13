@@ -70,11 +70,6 @@ fi
 source "${SCRIPT_DIR}/fill-local-env.sh"
 fill_local_env "$ENV_FILE"
 
-# ─── Validate required env vars ───────────────────────────────────────────────
-if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-  warn "OPENAI_API_KEY is not set — the routellm sidecar (required by the proxy for G6 routing) needs it for embedding-based routing. Set it in ${ENV_FILE}."
-fi
-
 # ─── Check Docker ─────────────────────────────────────────────────────────────
 info "Checking Docker..."
 if ! docker info > /dev/null 2>&1; then

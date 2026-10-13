@@ -23,6 +23,42 @@ date changes.
 
 ## 2026-10-13
 
+### RouteLLM's mf and sw_ranking routers use each tenant's own OpenAI key — Enhancement (OSS + Enterprise)
+
+These routers embed each routed request with OpenAI. They used one key held by the sidecar; G6
+now sends the requesting tenant's own key with each request, and a tenant without one gets the
+bert router, as a deployment without a key always did, with a log warning once an hour. The
+embedding is now priced into the request's cost ($0.02 per million tokens), so the reported
+savings on mf/sw_ranking traffic go down slightly: that is the honest figure.
+- **OSS:** the sidecar needs no `OPENAI_API_KEY` (the proxy's `LLM_KEY_OPENAI` is the key), so
+  `.env.template` and the local checks no longer ask for it, and the deploys no longer seed or
+  mount `routellm-openai-key`.
+- **[Enterprise]:** each tenant's own key from Models & Keys is used, and the portal tells a
+  tenant routed by mf/sw_ranking that has none — <https://tokenlean.cbeyond.cloud/>
+
+### The provider-native batch lane uses each tenant's own key — Bug fix
+
+With `provider_native` on, every batch was submitted, polled and fetched with the platform key,
+so tenants' batched requests were billed to the operator's account. Batches are now grouped by
+tenant and sent with that tenant's own key; a tenant without one takes the per-item lane, and a
+failed submit turns the native lane off for that tenant only. Jobs already in flight are read
+with the key that created them.
+
+### A batched request's earlier calls are priced — Bug fix
+
+A request queued for batching left before its cost was worked out, so the calls it had already
+made (the routing judge or Jev, schema extraction, the summariser) were never priced: not on its
+billing row and not against the spend cap. They are now priced when it is queued, so the
+reported cost of batched traffic goes up by what those calls cost.
+
+### Platform-key lookups are cached — Bug fix
+
+On GCP every platform-key lookup that `LLM_KEY_<PROVIDER>` did not answer made a blocking Secret
+Manager call, with an error line whenever the secret did not exist — on every routed request
+where no platform key is configured. A key, or its absence, is now reused for
+`LLM_KEY_CACHE_SECONDS` (default 60), lookups from request handling run off the event loop, and
+during a Secret Manager outage the last key is still served while the read is retried.
+
 ### G6 routing says which classifier decided, and prices every judge call — Bug fix
 
 RouteLLM's routing fields were documented but never filled: when RouteLLM decides, `_token_opt`

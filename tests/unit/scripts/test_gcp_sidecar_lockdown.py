@@ -68,6 +68,44 @@ def test_routellm_deploys_private_and_reachable_from_the_proxy():
     assert after.lstrip().startswith("require_private_service routellm-svc\n")
 
 
+def test_no_deploy_gives_routellm_a_platform_openai_key():
+    """#99: mf and sw_ranking embed with each tenant's own OpenAI key, which G06 sends per
+    request, so nothing seeds, mounts or asks for a platform one any more."""
+    import yaml
+    cmd = _deploy_command("routellm-svc")
+    assert "OPENAI_API_KEY" not in cmd and "--set-secrets" not in cmd
+    assert "routellm-openai-key" not in DEPLOY
+    precheck = (_ROOT / "scripts" / "gcp" / "pre-deploy-check.sh").read_text(encoding="utf-8")
+    required = re.search(r"^\s*REQUIRED_KEYS=\((.*)\)", precheck, re.M).group(1)
+    assert '"routellm"' not in required
+    compose = yaml.safe_load((_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    assert "OPENAI_API_KEY" not in (compose["services"]["routellm"].get("environment") or {})
+    keys_template = (_ROOT / "config" / "keys.yaml.template").read_text(encoding="utf-8")
+    assert not re.search(r"^\s*#?\s*routellm:", keys_template, re.M)
+    # Locally too: nothing in the stack reads OPENAI_API_KEY any more (the proxy refuses
+    # litellm-native vars; only tools outside the stack read it), so the local checks must
+    # not demand it or say the sidecar needs it.
+    local = _ROOT / "scripts" / "local"
+    assert "OPENAI_API_KEY not set" not in (local / "precheck-local-deployment.sh").read_text(
+        encoding="utf-8")
+    assert "routellm sidecar" not in (local / "deploy-local.sh").read_text(encoding="utf-8")
+    env_template = (_ROOT / ".env.template").read_text(encoding="utf-8")
+    assert "RouteLLM (G06) for embeddings" not in env_template
+    local_doc = (_ROOT / "docs" / "deployment-local.md").read_text(encoding="utf-8")
+    assert "Required for RouteLLM" not in local_doc and "Set `OPENAI_API_KEY`" not in local_doc
+
+
+def test_the_env_template_neither_demands_openai_api_key_nor_defeats_its_fallback():
+    """Nothing in the stack reads OPENAI_API_KEY, so the template does not list it among the
+    values the local deploy needs. And it ships empty: the benchmark's judges, which read it,
+    use LLM_KEY_OPENAI only when it is empty, so a placeholder left in place would be sent to
+    OpenAI and refused."""
+    env_template = (_ROOT / ".env.template").read_text(encoding="utf-8")
+    mandatory = env_template.split("# MANDATORY", 1)[1].split("# OPTIONAL", 1)[0]
+    assert "OPENAI_API_KEY" not in mandatory
+    assert re.findall(r"^OPENAI_API_KEY=.*$", env_template, re.M) == ["OPENAI_API_KEY="]
+
+
 def test_the_post_deploy_check_treats_routellm_as_a_private_sidecar():
     assert "\ncheck_private_sidecar routellm-svc /health\n" in CHECK
     assert "200|403|404|405)" not in CHECK      # the old probe called a public 200 healthy

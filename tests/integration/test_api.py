@@ -127,7 +127,7 @@ class TestChatCompletionsEndpoint:
             "hot_reload": patch("config_loader.start_hot_reload"),
             "get_config": patch("main.get_config", return_value=config or _test_config()),
             "litellm": patch("litellm.acompletion", new_callable=AsyncMock, return_value=_LLM_RESPONSE),
-            "provider_key": patch("main.get_llm_provider_key", return_value="sk-test-key"),
+            "provider_key": patch("auth.api_key_manager._access_llm_key_secret", return_value="sk-test-key"),
             "g05_store": patch("middleware.g05_cache.G05Cache.store_response", new_callable=AsyncMock),
             "g18_emit": patch("middleware.g18_observability._emit_trace", new_callable=AsyncMock),
         }
@@ -271,9 +271,10 @@ class TestChatCompletionsEndpoint:
 
     @pytest.mark.parametrize("impersonated", [False, True], ids=["the tenant's own", "impersonated"])
     def test_a_batched_request_counts_against_the_tenant_s_limits(self, monkeypatch, impersonated):
-        """Queued and answered 202: billed, and counted against the quota and trial, then. It
-        is queued with the spend counter its cost goes to when the answer arrives. An admin
-        key acting as the tenant does none of this to the tenant."""
+        """Queued and answered 202: billed, and counted against the quota and trial, then, and
+        what it spent before it was queued goes onto the spend counter (#106; nothing when it
+        spent nothing). It is queued with the spend counter its answer's cost goes to when the
+        answer arrives. An admin key acting as the tenant does none of this to the tenant."""
         from middleware import g13_batch
         tenant_key, admin_key = "test-tenant-key-integration", "test-admin-key-integration"
         keys = json.dumps({
@@ -311,7 +312,7 @@ class TestChatCompletionsEndpoint:
             assert (rows, bumped, queued["spend_prefix"]) == ([("acme", 202, False)], [], "")
         else:
             assert (rows, bumped, queued["spend_prefix"]) == (
-                [("acme", 202, True)], ["quota", "trial"], "t:acme:")
+                [("acme", 202, True)], ["quota", "spend", "trial"], "t:acme:")
 
     def test_missing_auth_returns_401(self):
         client, patches, active = self._client_and_patches()
@@ -386,7 +387,7 @@ class TestChatCompletionsEndpoint:
             "hot_reload": patch("config_loader.start_hot_reload"),
             "get_config": patch("main.get_config", return_value=bypass_config),
             "litellm": patch("litellm.acompletion", new_callable=AsyncMock, return_value=_LLM_RESPONSE),
-            "provider_key": patch("main.get_llm_provider_key", return_value="sk-test-key"),
+            "provider_key": patch("auth.api_key_manager._access_llm_key_secret", return_value="sk-test-key"),
         }
         active = {k: v.__enter__() for k, v in patches.items()}
         try:
@@ -423,7 +424,7 @@ class TestChatCompletionsEndpoint:
             "hot_reload": patch("config_loader.start_hot_reload"),
             "get_config": patch("main.get_config", return_value=cache_config),
             "litellm": patch("litellm.acompletion", new_callable=AsyncMock, return_value=_LLM_RESPONSE),
-            "provider_key": patch("main.get_llm_provider_key", return_value="sk-test-key"),
+            "provider_key": patch("auth.api_key_manager._access_llm_key_secret", return_value="sk-test-key"),
             "redis": patch("middleware.g05_cache._get_redis", return_value=mock_redis),
         }
         active = {k: v.__enter__() for k, v in patches.items()}

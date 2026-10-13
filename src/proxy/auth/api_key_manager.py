@@ -383,17 +383,101 @@ def get_tenant_for_key(api_key: str) -> Optional[dict]:
     return None
 
 
-def get_llm_provider_key(provider: str) -> Optional[str]:
-    """
-    Fetch the LLM provider API key from Secret Manager.
-    Called only by the proxy — developers never receive this value.
-    """
+# ── Platform LLM keys ─────────────────────────────────────────────────────────
+# `LLM_KEY_<P>` answers first and is read on every lookup. Otherwise the key comes from Secret
+# Manager, and its answers are cached (backlog #107: every lookup used to build a client and
+# make a blocking call, uncached, with an ERROR line per lookup when the secret had no
+# version). A key, or a secret that is not there to read (missing, no version, not readable,
+# no credentials or library), is kept for LLM_KEY_CACHE_SECONDS; any other failure (Secret
+# Manager unreachable) is retried after _LLM_KEY_RETRY_SECONDS, and meanwhile the last key it
+# gave is still served. A rotated or newly added platform key takes up to the TTL to apply.
+_LLM_KEY_CACHE_SECONDS = float(os.getenv("LLM_KEY_CACHE_SECONDS", "60"))
+_LLM_KEY_RETRY_SECONDS = 5.0
+_LLM_KEY_CACHE: dict = {}            # secret name -> (key or None, expires at)
+_LLM_SM_CLIENT = None
+_LLM_SM_CLIENT_LOCK = threading.Lock()
+_NO_KEY_ERRORS = frozenset({"NotFound", "PermissionDenied", "FailedPrecondition",
+                            "InvalidArgument", "DefaultCredentialsError"})
+_now = time.monotonic
+
+
+def _llm_key_secret_name(provider: str) -> str:
     env_var = f"SECRET_{provider.upper().replace('-', '_')}_API_KEY"
-    secret_name = os.getenv(env_var, f"llm-key-{provider.lower()}")
+    return os.getenv(env_var, f"llm-key-{provider.lower()}")
+
+
+def _secret_manager_client():
+    """One Secret Manager client for every platform-key read (a failed build is not kept)."""
+    global _LLM_SM_CLIENT
+    with _LLM_SM_CLIENT_LOCK:
+        if _LLM_SM_CLIENT is None:
+            from google.cloud import secretmanager
+            _LLM_SM_CLIENT = secretmanager.SecretManagerServiceClient()
+        return _LLM_SM_CLIENT
+
+
+def _access_llm_key_secret(secret_name: str) -> str:
+    """One blocking Secret Manager read; raises on any failure."""
+    name = f"projects/{_GCP_PROJECT}/secrets/{secret_name}/versions/latest"
+    response = _secret_manager_client().access_secret_version(request={"name": name})
+    return response.payload.data.decode("UTF-8")
+
+
+def _cached_llm_key(secret_name: str) -> Tuple[bool, Optional[str]]:
+    entry = _LLM_KEY_CACHE.get(secret_name)
+    if entry is not None and entry[1] > _now():
+        return True, entry[0]
+    return False, None
+
+
+def _refresh_llm_key(secret_name: str) -> Optional[str]:
+    try:
+        value = _access_llm_key_secret(secret_name)
+    except Exception as exc:  # noqa: BLE001 — every failure is classified: no key, or retry soon
+        if isinstance(exc, ImportError) or type(exc).__name__ in _NO_KEY_ERRORS:
+            logger.error("Secret Manager has no key to read at %s (%s); asking again in %ss",
+                         secret_name, type(exc).__name__, int(_LLM_KEY_CACHE_SECONDS))
+            _LLM_KEY_CACHE[secret_name] = (None, _now() + _LLM_KEY_CACHE_SECONDS)
+            return None
+        previous = (_LLM_KEY_CACHE.get(secret_name) or (None, 0.0))[0]
+        logger.error("Secret Manager fetch failed [%s]: %s; %s, retrying in %ss", secret_name, exc,
+                     "serving the last key it gave" if previous else "no key until then",
+                     int(_LLM_KEY_RETRY_SECONDS))
+        _LLM_KEY_CACHE[secret_name] = (previous, _now() + _LLM_KEY_RETRY_SECONDS)
+        return previous
+    _LLM_KEY_CACHE[secret_name] = (value, _now() + _LLM_KEY_CACHE_SECONDS)
+    return value
+
+
+def llm_provider_key_cached(provider: str) -> Tuple[bool, Optional[str]]:
+    """``(True, key or None)`` when `LLM_KEY_<P>` or a fresh cache entry answers with no Secret
+    Manager call; ``(False, None)`` when only a (blocking) read can."""
     value = os.getenv(f"LLM_KEY_{provider.upper()}")  # local dev override
     if value:
+        return True, value
+    return _cached_llm_key(_llm_key_secret_name(provider))
+
+
+def get_llm_provider_key(provider: str) -> Optional[str]:
+    """
+    Fetch the LLM provider API key: `LLM_KEY_<P>`, else Secret Manager (cached, see above).
+    Called only by the proxy — developers never receive this value. A cache miss blocks, so
+    async code calls ``get_llm_provider_key_async``.
+    """
+    known, value = llm_provider_key_cached(provider)
+    if known:
         return value
-    return _fetch_secret(secret_name)
+    return _refresh_llm_key(_llm_key_secret_name(provider))
+
+
+async def get_llm_provider_key_async(provider: str) -> Optional[str]:
+    """``get_llm_provider_key`` for async code: a cache miss is read in a worker thread, so a
+    Secret Manager call never blocks the event loop."""
+    known, value = llm_provider_key_cached(provider)
+    if known:
+        return value
+    import asyncio
+    return await asyncio.to_thread(get_llm_provider_key, provider)
 
 
 # ─── Key-store lifecycle engine (write side) ──────────────────────────────────

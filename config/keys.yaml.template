@@ -11,8 +11,8 @@ llm_keys:
   # running gcp-deploy.sh, then fill that provider's key below instead of openai.
   openai:    "sk-proj-..."       # default-provider key (REQUIRED for the default setup)
 
-  # ── RECOMMENDED: only if G06 routing uses the mf/sw_ranking routers (OpenAI embeddings)
-  routellm:  "sk-proj-..."       # RouteLLM key (can reuse the OpenAI key; warn-only if absent)
+  # (RouteLLM's mf/sw_ranking routers need no key of their own: they embed with the OpenAI
+  #  key the proxy resolves for each request.)
 
   # ── OPTIONAL (skip if you don't use these providers) ───────────────────────────
   #anthropic: "sk-ant-..."       # Anthropic API key

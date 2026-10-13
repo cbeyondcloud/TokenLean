@@ -723,18 +723,45 @@ async def _drop_stopped_consumers(redis, stream: str, group: str, consumer: str,
 
 _BATCH_JOBS_KEY = "tok_opt:batch_jobs"
 
-# Providers whose native batch submit failed this process → skip straight to the
-# per-item loop instead of re-attempting every flush. Cleared on restart.
+# (provider, tenant) pairs whose native batch submit failed this process → skip straight to
+# the per-item loop instead of re-attempting every flush. Per tenant: the submit uses the
+# tenant's own key, so one tenant's key failing says nothing about another's. Cleared on restart.
 _NATIVE_BATCH_UNSUPPORTED: set = set()
 
 
-async def _record_batch_job(job_id: str, provider: str, items: List[Dict]) -> None:
+async def _tenant_batch_key(provider: str, tenant_id: str) -> Optional[str]:
+    """The tenant's own key for a native batch, or None (none stored, or strict BYOK)."""
+    from providers.key_resolver import ProviderKeyError, resolve_provider_key
+    try:
+        return await resolve_provider_key(provider, tenant_id, None)
+    except ProviderKeyError:
+        return None
+
+
+async def _job_key(provider: str, meta: Dict[str, Any]) -> Optional[str]:
+    """The key that reads a native job back. Only a key of the account that created a batch
+    can read it: a job carries its tenant, whose own key it was submitted with, and a job
+    recorded before jobs carried one (#105) was submitted with the platform key."""
+    tenant_id = meta.get("tenant_id")
+    if tenant_id is None:
+        from auth.api_key_manager import get_llm_provider_key_async
+        return await get_llm_provider_key_async(provider)
+    key = await _tenant_batch_key(provider, tenant_id)
+    if not key:
+        logger.warning("G13 poll: tenant %s has no %s key now; its job waits for the next pass",
+                       tenant_id, provider)
+    return key
+
+
+async def _record_batch_job(job_id: str, provider: str, items: List[Dict],
+                            tenant_id: Optional[str] = None) -> None:
     """Persist an outstanding native-batch job so the background poller can finish it.
 
     Carries each item's baseline_tokens (keyed by request_id) alongside the job so
     ``poll_batch_jobs`` can pass it through to ``_store_batch_result`` on completion —
     the same attribution the per-item loop lane (``_flush_batch_loop``) stores, so
-    ``/v1/batch/results`` can emit x-tokenlean-* headers for native-batch requests too."""
+    ``/v1/batch/results`` can emit x-tokenlean-* headers for native-batch requests too.
+    It carries its tenant, whose key the poller reads it back with."""
     redis = _get_redis()
     request_ids = [it.get("request_id") for it in items]
     baseline_tokens = {it.get("request_id"): it.get("baseline_tokens", 0) for it in items}
@@ -747,6 +774,7 @@ async def _record_batch_job(job_id: str, provider: str, items: List[Dict]) -> No
             job_id,
             json.dumps({
                 "provider": provider,
+                "tenant_id": tenant_id,
                 "request_ids": request_ids,
                 "baseline_tokens": baseline_tokens,
                 "spend": spend,
@@ -763,7 +791,6 @@ async def poll_batch_jobs(cfg: Dict[str, Any]) -> int:
     job. Returns the number of jobs that finished (completed or failed) this pass.
     """
     from providers import get_adapter_by_name
-    from auth.api_key_manager import get_llm_provider_key
 
     redis = _get_redis()
     try:
@@ -791,7 +818,7 @@ async def poll_batch_jobs(cfg: Dict[str, Any]) -> int:
         except Exception:
             await redis.hdel(_BATCH_JOBS_KEY, job_id)
             continue
-        api_key = get_llm_provider_key(provider)
+        api_key = await _job_key(provider, meta)
         if not api_key:
             continue  # try again next pass
 
@@ -881,54 +908,54 @@ async def _flush_batch(
 async def _flush_batch_native(
     topic: str, items: List[Dict], cfg: Dict[str, Any]
 ) -> None:
-    """Group items by provider and submit a provider-native batch job per group.
+    """Group items by provider AND tenant and submit a provider-native batch job per group,
+    with that tenant's own key (backlog #105: every group used to go with the PLATFORM key,
+    billing tenants' requests to the operator's account).
 
-    Records each job for the background poller. Any provider without native batch
-    support, a missing key, or a submit error falls back to the per-item loop.
-
-    BYOK v1 LIMITATION: the native lane submits with the PLATFORM key (get_llm_provider_key),
-    because a provider-native batch aggregates many requests into one job. Do NOT enable
-    ``provider_native`` together with strict BYOK — tenant batches would bill the platform
-    account. The default per-item flush lane (``_flush_batch_loop``) IS tenant-key aware.
-    Per-(provider, tenant) native grouping is a documented v2 follow-up.
+    Records each job, with its tenant, for the background poller. A provider without native
+    batch support, a tenant without its own key, or a submit error falls back to the per-item
+    loop, which resolves each item's key for its tenant.
     """
     from providers import get_adapter
-    from auth.api_key_manager import get_llm_provider_key
 
     providers_config = cfg.get("providers", [])
     batch_cfg = cfg.get("groups", {}).get("G13_batch", {})
     default_model = batch_cfg.get("default_model", "gpt-4o-mini")
 
-    groups: Dict[str, List[Dict]] = {}
+    groups: Dict[Tuple[str, str], List[Dict]] = {}
     adapters: Dict[str, Any] = {}
     for item in items:
         model = item.get("model", default_model)
         adapter = get_adapter(model, providers_config)
-        groups.setdefault(adapter.name, []).append(item)
+        groups.setdefault((adapter.name, item.get("tenant_id", "default")), []).append(item)
         adapters[adapter.name] = adapter
 
-    for pname, group_items in groups.items():
+    for (pname, tenant_id), group_items in groups.items():
         adapter = adapters[pname]
-        if not adapter.supports_native_batch() or pname in _NATIVE_BATCH_UNSUPPORTED:
+        if (not adapter.supports_native_batch()
+                or (pname, tenant_id) in _NATIVE_BATCH_UNSUPPORTED):
             await _flush_batch_loop(topic, group_items, cfg)
             continue
-        api_key = get_llm_provider_key(pname)
+        api_key = await _tenant_batch_key(pname, tenant_id)
         if not api_key:
-            logger.warning("G13 native batch: key unavailable for %s — using loop", pname)
+            logger.warning("G13 native batch: tenant %s has no %s key of its own — using loop",
+                           tenant_id, pname)
             await _flush_batch_loop(topic, group_items, cfg)
             continue
         try:
             job_id = await adapter.submit_batch(group_items, api_key, batch_cfg)
-            await _record_batch_job(job_id, pname, group_items)
+            await _record_batch_job(job_id, pname, group_items, tenant_id)
             logger.info(
-                "G13 native batch submitted provider=%s job=%s items=%d", pname, job_id, len(group_items)
+                "G13 native batch submitted provider=%s tenant=%s job=%s items=%d",
+                pname, tenant_id, job_id, len(group_items),
             )
         except Exception as exc:
-            # Memoise so we don't re-attempt native every flush for an
-            # unsupported provider / misconfig (cleared on restart).
-            _NATIVE_BATCH_UNSUPPORTED.add(pname)
+            # Memoise so we don't re-attempt native every flush for an unsupported provider
+            # or a key that cannot batch (cleared on restart).
+            _NATIVE_BATCH_UNSUPPORTED.add((pname, tenant_id))
             logger.warning(
-                "G13 native batch unavailable for %s (%s) — using loop; retry on restart", pname, exc
+                "G13 native batch unavailable for %s, tenant %s (%s) — using loop; retry on restart",
+                pname, tenant_id, exc,
             )
             await _flush_batch_loop(topic, group_items, cfg)
 

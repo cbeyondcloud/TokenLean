@@ -287,7 +287,10 @@ resource "google_secret_manager_secret" "aws_secret_access_key" {
   depends_on = [google_project_service.apis]
 }
 
-# RouteLLM OpenAI API key (required for embeddings by mf/sw_ranking routers)
+# RouteLLM's old platform OpenAI key. Nothing reads it any more: mf/sw_ranking embed with each
+# tenant's own key, which G06 sends per request (backlog #99). It is kept so that no apply
+# deletes it; to delete it, remove this resource, `routellm_secret_accessor` below and its
+# entry in `proxy_secret_ids`, then apply.
 resource "google_secret_manager_secret" "routellm_openai_key" {
   secret_id = "routellm-openai-key"
   replication {
@@ -1332,7 +1335,8 @@ resource "google_service_account" "routellm_sa" {
   display_name = "RouteLLM Sidecar"
 }
 
-# The sidecar's only grant. It calls no Cloud Run service, so it holds no run.invoker, and
+# The sidecar's only grant, on the key it no longer reads (see `routellm_openai_key` above:
+# remove both together). It calls no Cloud Run service, so it holds no run.invoker, and
 # the proxy SA needs no right to act as it: `gcloud run deploy --service-account=...` is
 # run by the operator's identity, which needs iam.serviceAccountUser here (DEPLOYMENT.md).
 resource "google_secret_manager_secret_iam_member" "routellm_secret_accessor" {

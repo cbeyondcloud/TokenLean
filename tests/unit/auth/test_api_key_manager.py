@@ -101,12 +101,155 @@ class TestGetLLMProviderKey:
         assert result == "sk-local-test-key"
 
     def test_falls_back_to_secret_manager(self):
-        with patch("auth.api_key_manager._fetch_secret", return_value="sk-secret-key"):
+        with patch("auth.api_key_manager._access_llm_key_secret", return_value="sk-secret-key"):
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("LLM_KEY_OPENAI", None)
                 from auth.api_key_manager import get_llm_provider_key
                 result = get_llm_provider_key("openai")
         assert result == "sk-secret-key"
+
+
+class NotFound(Exception):
+    """Named as google.api_core's: the secret, or its latest version, does not exist."""
+
+
+class ServiceUnavailable(Exception):
+    """Named as google.api_core's: Secret Manager could not be asked."""
+
+
+class TestPlatformKeyCache:
+    """#107: on GCP every lookup that got past `LLM_KEY_<P>` built a Secret Manager client and
+    made a blocking call, uncached, with an ERROR line per lookup when the secret had no version;
+    on the managed service (no platform keys) that was every routed request."""
+
+    @pytest.fixture
+    def sm(self, monkeypatch):
+        """A fake Secret Manager read: answers from `table`, raises from `errors`, counts calls;
+        `clock` is the cache's clock."""
+        import types
+
+        from auth import api_key_manager as akm
+        state = types.SimpleNamespace(table={}, errors={}, calls=[], now=1000.0)
+
+        def access(secret_name):
+            state.calls.append(secret_name)
+            if secret_name in state.errors:
+                raise state.errors[secret_name]
+            return state.table[secret_name]
+
+        monkeypatch.setattr(akm, "_access_llm_key_secret", access)
+        monkeypatch.setattr(akm, "_now", lambda: state.now)
+        monkeypatch.delenv("LLM_KEY_OPENAI", raising=False)
+        return state
+
+    def test_a_key_is_read_once_per_ttl(self, sm):
+        from auth.api_key_manager import _LLM_KEY_CACHE_SECONDS, get_llm_provider_key
+        sm.table["llm-key-openai"] = "sk-1"
+        assert get_llm_provider_key("openai") == get_llm_provider_key("openai") == "sk-1"
+        assert len(sm.calls) == 1
+        sm.table["llm-key-openai"] = "sk-2"                    # rotated
+        sm.now += _LLM_KEY_CACHE_SECONDS + 1
+        assert get_llm_provider_key("openai") == "sk-2" and len(sm.calls) == 2
+
+    def test_a_missing_secret_is_remembered_for_the_ttl_and_logged_once(self, sm, caplog):
+        import logging
+
+        from auth.api_key_manager import (
+            _LLM_KEY_CACHE_SECONDS,
+            _LLM_KEY_RETRY_SECONDS,
+            get_llm_provider_key,
+        )
+        sm.errors["llm-key-openai"] = NotFound("no versions")
+        with caplog.at_level(logging.ERROR, logger="auth.api_key_manager"):
+            assert get_llm_provider_key("openai") is None
+            sm.now += _LLM_KEY_RETRY_SECONDS + 1   # past an outage's retry, inside the TTL
+            assert get_llm_provider_key("openai") is None
+        assert len(sm.calls) == 1, "a secret that is not there is not an outage to retry"
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+        sm.now += _LLM_KEY_CACHE_SECONDS
+        get_llm_provider_key("openai")
+        assert len(sm.calls) == 2
+
+    def test_an_outage_keeps_the_last_key_and_is_retried_soon(self, sm):
+        """A brief Secret Manager outage must not become a TTL of 'no key' on a proxy that
+        has one: the last key is still served, and the read is retried within seconds."""
+        from auth.api_key_manager import (
+            _LLM_KEY_CACHE_SECONDS,
+            _LLM_KEY_RETRY_SECONDS,
+            get_llm_provider_key,
+        )
+        sm.table["llm-key-openai"] = "sk-1"
+        get_llm_provider_key("openai")
+        sm.now += _LLM_KEY_CACHE_SECONDS + 1
+        sm.errors["llm-key-openai"] = ServiceUnavailable("unreachable")
+        assert get_llm_provider_key("openai") == "sk-1"
+        assert get_llm_provider_key("openai") == "sk-1" and len(sm.calls) == 2
+        del sm.errors["llm-key-openai"]
+        sm.table["llm-key-openai"] = "sk-2"
+        sm.now += _LLM_KEY_RETRY_SECONDS + 1
+        assert get_llm_provider_key("openai") == "sk-2" and len(sm.calls) == 3
+
+    def test_an_outage_before_any_key_is_retried_soon_not_after_the_ttl(self, sm):
+        from auth.api_key_manager import _LLM_KEY_RETRY_SECONDS, get_llm_provider_key
+        sm.errors["llm-key-openai"] = ServiceUnavailable("unreachable")
+        assert get_llm_provider_key("openai") is None
+        del sm.errors["llm-key-openai"]
+        sm.table["llm-key-openai"] = "sk-1"
+        sm.now += _LLM_KEY_RETRY_SECONDS + 1
+        assert get_llm_provider_key("openai") == "sk-1"
+
+    def test_the_env_key_is_read_on_every_lookup(self, sm, monkeypatch):
+        from auth.api_key_manager import get_llm_provider_key
+        sm.table["llm-key-openai"] = "sk-from-secret-manager"
+        get_llm_provider_key("openai")
+        monkeypatch.setenv("LLM_KEY_OPENAI", "sk-from-env")
+        assert get_llm_provider_key("openai") == "sk-from-env"
+
+    def test_one_client_serves_every_lookup(self, monkeypatch):
+        """It was one new client per lookup; a client that cannot be built is not kept."""
+        from auth.api_key_manager import get_llm_provider_key
+        from google.cloud import secretmanager
+        built = []
+
+        class Client:
+            def __init__(self, *args, **kwargs):
+                built.append(self)
+
+            def access_secret_version(self, request):
+                return MagicMock(payload=MagicMock(data=b"sk-" + request["name"].encode()[-6:]))
+
+        from auth.api_key_manager import _LLM_KEY_RETRY_SECONDS
+        clock = [1000.0]
+        monkeypatch.setattr("auth.api_key_manager._now", lambda: clock[0])
+        monkeypatch.delenv("LLM_KEY_OPENAI", raising=False)
+        monkeypatch.delenv("LLM_KEY_ANTHROPIC", raising=False)
+        assert get_llm_provider_key("openai") is None          # the suite's stand-in refuses
+        monkeypatch.setattr(secretmanager, "SecretManagerServiceClient", Client)
+        clock[0] += _LLM_KEY_RETRY_SECONDS + 1                 # a refusal is retried soon
+        assert get_llm_provider_key("openai") and get_llm_provider_key("anthropic")
+        assert len(built) == 1
+
+    async def test_async_lookups_fetch_a_miss_off_the_event_loop(self, sm):
+        import threading
+
+        from auth import api_key_manager as akm
+        from providers.key_resolver import resolve_provider_key
+        threads = []
+        sm.table["llm-key-openai"] = "sk-1"
+        real = akm._access_llm_key_secret
+
+        def access(secret_name):
+            threads.append(threading.get_ident())
+            return real(secret_name)
+
+        akm._access_llm_key_secret = access
+        try:
+            assert await resolve_provider_key("openai") == "sk-1"
+            assert await akm.get_llm_provider_key_async("openai") == "sk-1"   # cached
+        finally:
+            akm._access_llm_key_secret = real
+        assert threads and threading.get_ident() not in threads
+        assert len(sm.calls) == 1
 
 
 def test_tests_cannot_reach_the_real_secret_manager():

@@ -64,13 +64,14 @@ ProviderKeyResolverFn = Callable[[str, str, Optional[Any]], Awaitable[Optional[s
 
 
 async def _default_resolver(provider: str, tenant_id: str, ctx: Optional[Any]) -> Optional[str]:
-    """OSS default: global platform key by provider name (env LLM_KEY_<P> / Secret Manager).
+    """OSS default: global platform key by provider name (env LLM_KEY_<P> / Secret Manager,
+    cached, a miss read off the event loop).
 
     Tenant-agnostic — identical to the pre-BYOK behaviour. Lazy import avoids any import
     cycle with ``auth.api_key_manager`` and keeps ``providers`` importable in isolation.
     """
-    from auth.api_key_manager import get_llm_provider_key
-    return get_llm_provider_key(provider)
+    from auth.api_key_manager import get_llm_provider_key_async
+    return await get_llm_provider_key_async(provider)
 
 
 _resolver: ProviderKeyResolverFn = _default_resolver

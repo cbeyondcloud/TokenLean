@@ -81,8 +81,8 @@ class TestFlushNative:
         # _record_batch_job now receives the full items (not just ids) so it can carry
         # each item's baseline_tokens through to the poller for header attribution.
         rec.assert_awaited_once()
-        job_id_arg, provider_arg, items_arg = rec.await_args.args
-        assert job_id_arg == "batch-1" and provider_arg == "openai"
+        job_id_arg, provider_arg, items_arg, tenant_arg = rec.await_args.args
+        assert job_id_arg == "batch-1" and provider_arg == "openai" and tenant_arg == "default"
         assert [it["request_id"] for it in items_arg] == ["r0", "r1"]
         loop.assert_not_awaited()
 
@@ -115,7 +115,7 @@ class TestFlushNative:
              patch.object(g13_batch, "_flush_batch_loop", new=AsyncMock()) as loop:
             await g13_batch._flush_batch_native("t", _items(1), cfg)
         loop.assert_awaited_once()
-        assert "openai" in g13_batch._NATIVE_BATCH_UNSUPPORTED  # memoised
+        assert ("openai", "default") in g13_batch._NATIVE_BATCH_UNSUPPORTED  # memoised, per tenant
 
     async def test_memo_skips_native_after_failure(self):
         adapter = _fake_adapter()
@@ -128,6 +128,146 @@ class TestFlushNative:
             await g13_batch._flush_batch_native("t", _items(1), cfg)  # 2nd: skips native
         assert adapter.submit_batch.await_count == 1   # native attempted only once
         assert loop.await_count == 2                   # loop used both times
+
+
+# ---------------------------------------------------------------------------
+# #105: each tenant's own key (the owner's rule: every model key is the tenant's)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def tenant_keys():
+    """A fake tenant-key resolver: `table[(provider, tenant)]`, `denied` refuses (strict BYOK),
+    `asked` records lookups."""
+    import types
+
+    from providers.key_resolver import (
+        ProviderKeyError,
+        reset_provider_key_resolver,
+        set_provider_key_resolver,
+    )
+    state = types.SimpleNamespace(table={}, denied=set(), asked=[])
+
+    async def resolver(provider, tenant_id, ctx=None):
+        state.asked.append((provider, tenant_id))
+        if (provider, tenant_id) in state.denied:
+            raise ProviderKeyError(provider, tenant_id)
+        return state.table.get((provider, tenant_id))
+
+    set_provider_key_resolver(resolver)
+    yield state
+    reset_provider_key_resolver()
+
+
+def _tenant_items(tenant, n=1):
+    return [dict(item, request_id=f"{tenant}-{item['request_id']}", tenant_id=tenant)
+            for item in _items(n)]
+
+
+@pytest.mark.asyncio
+class TestEachTenantsOwnKey:
+    """The native lane submitted, polled and fetched every tenant's batch with the PLATFORM
+    key, billing tenants' requests to the operator's account."""
+
+    async def test_each_tenant_submits_its_own_batch_with_its_own_key(self, tenant_keys):
+        tenant_keys.table.update({("openai", "A"): "sk-A", ("openai", "B"): "sk-B"})
+        adapter = _fake_adapter()
+        cfg = {"providers": [], "groups": {"G13_batch": {}}}
+        with patch("providers.get_adapter", return_value=adapter), \
+             patch("auth.api_key_manager.get_llm_provider_key",
+                   side_effect=AssertionError("the platform key was used")), \
+             patch.object(g13_batch, "_record_batch_job", new=AsyncMock()) as rec, \
+             patch.object(g13_batch, "_flush_batch_loop", new=AsyncMock()) as loop:
+            await g13_batch._flush_batch_native("t", _tenant_items("A", 2) + _tenant_items("B"), cfg)
+        submitted = sorted((call.args[1], [it["request_id"] for it in call.args[0]])
+                           for call in adapter.submit_batch.await_args_list)
+        assert submitted == [("sk-A", ["A-r0", "A-r1"]), ("sk-B", ["B-r0"])]
+        assert sorted(call.args[3] for call in rec.await_args_list) == ["A", "B"]
+        loop.assert_not_awaited()
+
+    @pytest.mark.parametrize("deny", [False, True], ids=["no-key", "strict-byok-refuses"])
+    async def test_a_tenant_without_its_own_key_takes_the_loop_lane(self, tenant_keys, deny):
+        tenant_keys.table[("openai", "A")] = "sk-A"
+        if deny:
+            tenant_keys.denied.add(("openai", "B"))
+        adapter = _fake_adapter()
+        cfg = {"providers": [], "groups": {"G13_batch": {}}}
+        with patch("providers.get_adapter", return_value=adapter), \
+             patch.object(g13_batch, "_record_batch_job", new=AsyncMock()), \
+             patch.object(g13_batch, "_flush_batch_loop", new=AsyncMock()) as loop:
+            await g13_batch._flush_batch_native("t", _tenant_items("A") + _tenant_items("B"), cfg)
+        assert [call.args[1] for call in adapter.submit_batch.await_args_list] == ["sk-A"]
+        assert [[it["request_id"] for it in call.args[1]] for call in loop.await_args_list] == [["B-r0"]]
+
+    async def test_a_failed_submit_turns_the_native_lane_off_for_that_tenant_only(self, tenant_keys):
+        tenant_keys.table.update({("openai", "A"): "sk-A", ("openai", "B"): "sk-B"})
+        adapter = _fake_adapter()
+        adapter.submit_batch = AsyncMock(side_effect=lambda items, key, cfg: (
+            (_ for _ in ()).throw(RuntimeError("A's key cannot batch")) if key == "sk-A" else "job-B"))
+        cfg = {"providers": [], "groups": {"G13_batch": {}}}
+        with patch("providers.get_adapter", return_value=adapter), \
+             patch.object(g13_batch, "_record_batch_job", new=AsyncMock()), \
+             patch.object(g13_batch, "_flush_batch_loop", new=AsyncMock()):
+            await g13_batch._flush_batch_native("t", _tenant_items("A") + _tenant_items("B"), cfg)
+            await g13_batch._flush_batch_native("t", _tenant_items("A") + _tenant_items("B"), cfg)
+        keys_tried = [call.args[1] for call in adapter.submit_batch.await_args_list]
+        assert keys_tried.count("sk-A") == 1 and keys_tried.count("sk-B") == 2
+
+    async def test_the_job_record_carries_its_tenant(self):
+        redis = MagicMock()
+        redis.hset = AsyncMock()
+        with patch.object(g13_batch, "_get_redis", return_value=redis):
+            await g13_batch._record_batch_job("job-1", "openai", _tenant_items("A"), "A")
+        assert json.loads(redis.hset.await_args.args[2])["tenant_id"] == "A"
+
+    def _redis(self, jobs):
+        r = MagicMock()
+        r.hgetall = AsyncMock(return_value=jobs)
+        r.hdel = AsyncMock()
+        return r
+
+    async def test_a_job_is_polled_and_fetched_with_its_tenants_key(self, tenant_keys):
+        tenant_keys.table[("openai", "A")] = "sk-A"
+        jobs = {"job-A": json.dumps({"provider": "openai", "tenant_id": "A", "request_ids": ["A-r0"]})}
+        adapter = MagicMock()
+        adapter.poll_batch = AsyncMock(return_value="completed")
+        adapter.fetch_batch_results = AsyncMock(return_value=[{"request_id": "A-r0", "response": {}}])
+        with patch.object(g13_batch, "_get_redis", return_value=self._redis(jobs)), \
+             patch("providers.get_adapter_by_name", return_value=adapter), \
+             patch("auth.api_key_manager.get_llm_provider_key",
+                   side_effect=AssertionError("the platform key was used")), \
+             patch.object(g13_batch, "_store_batch_result", new=AsyncMock()):
+            assert await g13_batch.poll_batch_jobs({}) == 1
+        assert adapter.poll_batch.await_args.args == ("job-A", "sk-A")
+        assert adapter.fetch_batch_results.await_args.args == ("job-A", "sk-A")
+
+    async def test_a_job_whose_tenant_lost_its_key_waits_and_never_takes_the_platform_key(
+            self, tenant_keys):
+        tenant_keys.denied.add(("openai", "A"))
+        jobs = {"job-A": json.dumps({"provider": "openai", "tenant_id": "A", "request_ids": ["A-r0"]})}
+        redis = self._redis(jobs)
+        adapter = MagicMock()
+        adapter.poll_batch = AsyncMock(return_value="completed")
+        with patch.object(g13_batch, "_get_redis", return_value=redis), \
+             patch("providers.get_adapter_by_name", return_value=adapter), \
+             patch("auth.api_key_manager.get_llm_provider_key",
+                   side_effect=AssertionError("the platform key was used")):
+            assert await g13_batch.poll_batch_jobs({}) == 0
+        adapter.poll_batch.assert_not_awaited()
+        redis.hdel.assert_not_awaited()            # kept for the next pass
+
+    async def test_a_job_recorded_before_jobs_carried_a_tenant_is_read_with_the_platform_key(
+            self, tenant_keys):
+        """Only a key of the account that created a batch can read it, and such a job was
+        created with the platform key."""
+        jobs = {"job-old": json.dumps({"provider": "openai", "request_ids": ["r0"]})}
+        adapter = MagicMock()
+        adapter.poll_batch = AsyncMock(return_value="pending")
+        with patch.object(g13_batch, "_get_redis", return_value=self._redis(jobs)), \
+             patch("providers.get_adapter_by_name", return_value=adapter), \
+             patch("auth.api_key_manager.get_llm_provider_key", return_value="sk-platform"):
+            await g13_batch.poll_batch_jobs({})
+        assert adapter.poll_batch.await_args.args == ("job-old", "sk-platform")
+        assert tenant_keys.asked == []
 
 
 # ---------------------------------------------------------------------------
