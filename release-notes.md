@@ -57,7 +57,9 @@ On GCP every platform-key lookup that `LLM_KEY_<PROVIDER>` did not answer made a
 Manager call, with an error line whenever the secret did not exist — on every routed request
 where no platform key is configured. A key, or its absence, is now reused for
 `LLM_KEY_CACHE_SECONDS` (default 60), lookups from request handling run off the event loop, and
-during a Secret Manager outage the last key is still served while the read is retried.
+during a Secret Manager outage the last key is still served while the read is retried. Its error
+lines name the provider and never the secret: the secret's name comes from
+`SECRET_<PROVIDER>_API_KEY`, so it would be the key itself if one were set there by mistake.
 
 ### G6 routing says which classifier decided, and prices every judge call — Bug fix
 

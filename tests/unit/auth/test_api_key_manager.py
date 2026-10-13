@@ -198,6 +198,24 @@ class TestPlatformKeyCache:
         sm.now += _LLM_KEY_RETRY_SECONDS + 1
         assert get_llm_provider_key("openai") == "sk-1"
 
+    @pytest.mark.parametrize("error", [NotFound, ServiceUnavailable], ids=["no key", "outage"])
+    def test_a_key_put_in_the_secret_name_variable_never_reaches_the_log(
+            self, sm, monkeypatch, caplog, error):
+        """SECRET_<P>_API_KEY holds the NAME of the secret, and its own name invites the key
+        itself: whatever it holds is never logged, not even inside the error's text. The log
+        names the provider instead."""
+        import logging
+
+        from auth.api_key_manager import get_llm_provider_key
+        monkeypatch.setenv("SECRET_OPENAI_API_KEY", "sk-put-here-by-mistake")
+        sm.errors["sk-put-here-by-mistake"] = error(
+            "projects/p/secrets/sk-put-here-by-mistake/versions/latest: failed")
+        with caplog.at_level(logging.ERROR, logger="auth.api_key_manager"):
+            assert get_llm_provider_key("openai") is None
+        assert caplog.records, "the failure is still logged"
+        assert "sk-put-here-by-mistake" not in caplog.text
+        assert "openai" in caplog.text
+
     def test_the_env_key_is_read_on_every_lookup(self, sm, monkeypatch):
         from auth.api_key_manager import get_llm_provider_key
         sm.table["llm-key-openai"] = "sk-from-secret-manager"

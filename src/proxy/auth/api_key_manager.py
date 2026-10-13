@@ -430,17 +430,22 @@ def _cached_llm_key(secret_name: str) -> Tuple[bool, Optional[str]]:
     return False, None
 
 
-def _refresh_llm_key(secret_name: str) -> Optional[str]:
+def _refresh_llm_key(provider: str, secret_name: str) -> Optional[str]:
+    """Read and cache one platform key. The log names the provider, never the secret: its name
+    comes from SECRET_<P>_API_KEY, which invites the key itself, so it is kept out of the
+    error's text too."""
     try:
         value = _access_llm_key_secret(secret_name)
     except Exception as exc:  # noqa: BLE001 — every failure is classified: no key, or retry soon
         if isinstance(exc, ImportError) or type(exc).__name__ in _NO_KEY_ERRORS:
-            logger.error("Secret Manager has no key to read at %s (%s); asking again in %ss",
-                         secret_name, type(exc).__name__, int(_LLM_KEY_CACHE_SECONDS))
+            logger.error("Secret Manager has no %s platform key to read (%s); asking again in %ss",
+                         provider, type(exc).__name__, int(_LLM_KEY_CACHE_SECONDS))
             _LLM_KEY_CACHE[secret_name] = (None, _now() + _LLM_KEY_CACHE_SECONDS)
             return None
         previous = (_LLM_KEY_CACHE.get(secret_name) or (None, 0.0))[0]
-        logger.error("Secret Manager fetch failed [%s]: %s; %s, retrying in %ss", secret_name, exc,
+        reason = str(exc).replace(secret_name, "<secret>") if secret_name else str(exc)
+        logger.error("Secret Manager read of the %s platform key failed: %s; %s, retrying in %ss",
+                     provider, reason,
                      "serving the last key it gave" if previous else "no key until then",
                      int(_LLM_KEY_RETRY_SECONDS))
         _LLM_KEY_CACHE[secret_name] = (previous, _now() + _LLM_KEY_RETRY_SECONDS)
@@ -467,7 +472,7 @@ def get_llm_provider_key(provider: str) -> Optional[str]:
     known, value = llm_provider_key_cached(provider)
     if known:
         return value
-    return _refresh_llm_key(_llm_key_secret_name(provider))
+    return _refresh_llm_key(provider, _llm_key_secret_name(provider))
 
 
 async def get_llm_provider_key_async(provider: str) -> Optional[str]:
