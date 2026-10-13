@@ -599,14 +599,14 @@ A separate **application-quality surface** (`middleware/quality_metrics.py`) rec
 
 ```
 config.yaml pricing: table ─┐
-                            ├─► savings/calculator.py ─► _token_opt block ─┬─► Langfuse trace metadata ─► Grafana (savings panels)
-request tokens (measured) ──┘                                             └─► response body
-main._record_outcome ─────────────────────────────────► token_opt.usage_events ─► Grafana (billing / tenant / SLA panels)
+                            ├─► savings/calculator.py ─► _token_opt block ─┬─► response body
+request tokens (measured) ──┘                                             └─► Langfuse trace metadata (when tracing is on)
+main._record_outcome ─────────────────────────────────► token_opt.usage_events ─► Grafana (savings / billing / tenant / SLA panels)
 ```
 
-- **Savings panels** (tokens saved, % saved, $ saved) read the Langfuse DB `traces` table — e.g. `SUM((metadata->>'total_abs_saving')::int)`, `AVG((metadata->>'total_pct_saving')::float)`, `SUM((metadata->>'cost_saving_usd')::float)`. These come straight from the per-call `_token_opt` values recorded to the trace.
-- **Billing / tenant-overview / SLA panels** read the application DB `token_opt.usage_events` table (via the separate `AppDB` datasource). This is the **request-count** billing track — one served request = one row — and is independent of tokens.
-- **Tokens are measured, dollars are estimated.** `total_abs_saving` / `total_pct_saving` are counted directly from the request; only the `cost_*_usd` columns are derived from the static `pricing:` table, so the config-priced caveat above applies to the **dollar panels only**, not the token or request-count panels.
+- **Savings panels** (per-call, live, trends, quarterly: tokens saved, % saved, $ saved) read the application DB `token_opt.usage_events` table through the `AppDB` datasource — e.g. `SUM(tokens_saved)`, the saving % as `tokens_saved / baseline_tokens`, `SUM(cost_saved_usd)` — counting billable requests, so they work with Langfuse tracing off (the OSS default). Cost saved includes the estimated input cost a cache hit avoided. Only the per-call dashboard's collapsed "Langfuse detail" row (spans, scores, the trace link) needs `G18_observability.langfuse_enabled: true`.
+- **Billing / tenant-overview / SLA panels** read the same table. This is the **request-count** billing track — one served request = one row — and is independent of tokens.
+- **Tokens are measured, dollars are estimated.** `tokens_saved` and the saving % are counted directly from the request; only the `cost_*_usd` columns are derived from the static `pricing:` table, so the config-priced caveat above applies to the **dollar panels only**, not the token or request-count panels.
 
 ## Operational Scripts
 

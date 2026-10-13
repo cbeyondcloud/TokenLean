@@ -31,6 +31,7 @@
       "id": 1,
       "type": "stat",
       "title": "Total Tokens Saved",
+      "description": "From usage_events: this request's billing row.",
       "gridPos": {
         "x": 0,
         "y": 3,
@@ -38,12 +39,17 @@
         "h": 3
       },
       "datasource": {
-        "uid": "langfuse-postgres"
+        "type": "postgres",
+        "uid": "app-postgres"
       },
       "targets": [
         {
-          "rawSql": "SELECT (metadata->>'total_abs_saving')::int FROM traces WHERE ('${tenant}' = '.*' OR metadata->>'tenant_id' = '${tenant}') AND id = '${request_id}' LIMIT 1",
-          "format": "table"
+          "rawSql": "SELECT tokens_saved FROM usage_events WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' LIMIT 1",
+          "format": "table",
+          "datasource": {
+            "type": "postgres",
+            "uid": "app-postgres"
+          }
         }
       ],
       "options": {
@@ -90,6 +96,7 @@
       "id": 2,
       "type": "stat",
       "title": "Savings %",
+      "description": "From usage_events: this request's billing row.",
       "gridPos": {
         "x": 3,
         "y": 3,
@@ -97,12 +104,17 @@
         "h": 3
       },
       "datasource": {
-        "uid": "langfuse-postgres"
+        "type": "postgres",
+        "uid": "app-postgres"
       },
       "targets": [
         {
-          "rawSql": "SELECT (metadata->>'total_pct_saving')::float FROM traces WHERE ('${tenant}' = '.*' OR metadata->>'tenant_id' = '${tenant}') AND id = '${request_id}' LIMIT 1",
-          "format": "table"
+          "rawSql": "SELECT ROUND((CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 2) FROM usage_events WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' LIMIT 1",
+          "format": "table",
+          "datasource": {
+            "type": "postgres",
+            "uid": "app-postgres"
+          }
         }
       ],
       "options": {
@@ -136,6 +148,7 @@
       "id": 3,
       "type": "stat",
       "title": "Cost Saving (USD)",
+      "description": "From usage_events: this request's billing row. Cost saved includes the estimated input cost a cache hit avoided.",
       "gridPos": {
         "x": 6,
         "y": 3,
@@ -143,12 +156,17 @@
         "h": 3
       },
       "datasource": {
-        "uid": "langfuse-postgres"
+        "type": "postgres",
+        "uid": "app-postgres"
       },
       "targets": [
         {
-          "rawSql": "SELECT (metadata->>'cost_saving_usd')::float FROM traces WHERE id = '${request_id}' LIMIT 1",
-          "format": "table"
+          "rawSql": "SELECT cost_saved_usd FROM usage_events WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' LIMIT 1",
+          "format": "table",
+          "datasource": {
+            "type": "postgres",
+            "uid": "app-postgres"
+          }
         }
       ],
       "options": {
@@ -180,6 +198,7 @@
       "id": 4,
       "type": "stat",
       "title": "Model Routed",
+      "description": "From usage_events: this request's billing row.",
       "gridPos": {
         "x": 9,
         "y": 3,
@@ -187,12 +206,17 @@
         "h": 3
       },
       "datasource": {
-        "uid": "langfuse-postgres"
+        "type": "postgres",
+        "uid": "app-postgres"
       },
       "targets": [
         {
-          "rawSql": "SELECT metadata->>'routed_model' FROM traces WHERE id = '${request_id}' LIMIT 1",
-          "format": "table"
+          "rawSql": "SELECT routed_model FROM usage_events WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' LIMIT 1",
+          "format": "table",
+          "datasource": {
+            "type": "postgres",
+            "uid": "app-postgres"
+          }
         }
       ],
       "options": {
@@ -223,6 +247,7 @@
       "id": 5,
       "type": "stat",
       "title": "Cache Hit",
+      "description": "From usage_events: this request's billing row.",
       "gridPos": {
         "x": 12,
         "y": 3,
@@ -230,12 +255,17 @@
         "h": 3
       },
       "datasource": {
-        "uid": "langfuse-postgres"
+        "type": "postgres",
+        "uid": "app-postgres"
       },
       "targets": [
         {
-          "rawSql": "SELECT metadata->>'cache_level' FROM traces WHERE id = '${request_id}' LIMIT 1",
-          "format": "table"
+          "rawSql": "SELECT CASE WHEN cache_hit THEN cache_level ELSE 'miss' END FROM usage_events WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' LIMIT 1",
+          "format": "table",
+          "datasource": {
+            "type": "postgres",
+            "uid": "app-postgres"
+          }
         }
       ],
       "options": {
@@ -266,6 +296,7 @@
       "id": 6,
       "type": "barchart",
       "title": "Savings by G-Group (tokens)",
+      "description": "From usage_events: this request's billing row. Only groups that saved tokens are listed: one that added tokens (e.g. retrieval context) is left out, though the request totals still count it.",
       "gridPos": {
         "x": 0,
         "y": 6,
@@ -273,12 +304,17 @@
         "h": 7
       },
       "datasource": {
-        "uid": "langfuse-postgres"
+        "type": "postgres",
+        "uid": "app-postgres"
       },
       "targets": [
         {
-          "rawSql": "SELECT key AS group, (value->>'abs_saving')::int AS tokens_saved FROM traces, jsonb_each(metadata->'step_savings') WHERE id = '${request_id}' ORDER BY tokens_saved DESC",
-          "format": "table"
+          "rawSql": "SELECT key AS group, value::int AS tokens_saved FROM usage_events, jsonb_each_text(group_savings) WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' ORDER BY tokens_saved DESC",
+          "format": "table",
+          "datasource": {
+            "type": "postgres",
+            "uid": "app-postgres"
+          }
         }
       ],
       "options": {
@@ -303,6 +339,7 @@
       "id": 7,
       "type": "table",
       "title": "Step-by-Step Savings Detail",
+      "description": "From usage_events: this request's billing row. Only groups that saved tokens are listed: one that added tokens (e.g. retrieval context) is left out, though the request totals still count it.",
       "gridPos": {
         "x": 0,
         "y": 13,
@@ -310,12 +347,17 @@
         "h": 9
       },
       "datasource": {
-        "uid": "langfuse-postgres"
+        "type": "postgres",
+        "uid": "app-postgres"
       },
       "targets": [
         {
-          "rawSql": "SELECT key AS \"G-Group\", value->>'description' AS \"Description\", (value->>'tokens_before')::int AS \"Tokens Before\", (value->>'tokens_after')::int AS \"Tokens After\", (value->>'abs_saving')::int AS \"Saved\", (value->>'pct_saving_vs_baseline')::float AS \"% vs Baseline\" FROM traces, jsonb_each(metadata->'step_savings') WHERE id = '${request_id}' ORDER BY key",
-          "format": "table"
+          "rawSql": "SELECT key AS \"G-Group\", value::int AS \"Saved\", ROUND((CASE WHEN baseline_tokens = 0 THEN 0 ELSE value::int * 100.0 / baseline_tokens END)::numeric, 2) AS \"% of Baseline\" FROM usage_events, jsonb_each_text(group_savings) WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' ORDER BY key",
+          "format": "table",
+          "datasource": {
+            "type": "postgres",
+            "uid": "app-postgres"
+          }
         }
       ],
       "options": {
@@ -323,65 +365,79 @@
       }
     },
     {
-      "id": 8,
-      "type": "text",
-      "title": "Langfuse Trace",
+      "id": 12,
+      "type": "row",
+      "title": "Langfuse detail: needs Langfuse tracing (G18_observability.langfuse_enabled: true)",
+      "collapsed": true,
       "gridPos": {
         "x": 0,
         "y": 22,
         "w": 24,
-        "h": 2
+        "h": 1
       },
-      "options": {
-        "content": "<a href=\"${LANGFUSE_HOST}/project/${project_id}/traces/${request_id}\" target=\"_blank\">Open trace in Langfuse UI</a>",
-        "mode": "html"
-      }
-    },
-    {
-      "id": 9,
-      "type": "table",
-      "title": "Child Observations (Spans)",
-      "gridPos": {
-        "x": 0,
-        "y": 24,
-        "w": 12,
-        "h": 8
-      },
-      "datasource": {
-        "uid": "langfuse-postgres"
-      },
-      "targets": [
+      "panels": [
         {
-          "rawSql": "SELECT name, type, start_time, end_time, (input::text) as input_summary, (output::text) as output_summary FROM observations WHERE trace_id = '${request_id}' ORDER BY start_time",
-          "format": "table"
-        }
-      ],
-      "options": {
-        "cellHeight": "md"
-      }
-    },
-    {
-      "id": 10,
-      "type": "table",
-      "title": "Evaluation Scores",
-      "gridPos": {
-        "x": 12,
-        "y": 24,
-        "w": 12,
-        "h": 8
-      },
-      "datasource": {
-        "uid": "langfuse-postgres"
-      },
-      "targets": [
+          "id": 8,
+          "type": "text",
+          "title": "Langfuse Trace",
+          "gridPos": {
+            "x": 0,
+            "y": 23,
+            "w": 24,
+            "h": 2
+          },
+          "options": {
+            "content": "<a href=\"${LANGFUSE_HOST}/project/${project_id}/traces/${request_id}\" target=\"_blank\">Open trace in Langfuse UI</a>",
+            "mode": "html"
+          }
+        },
         {
-          "rawSql": "SELECT name, value, comment FROM scores WHERE trace_id = '${request_id}' ORDER BY name",
-          "format": "table"
+          "id": 9,
+          "type": "table",
+          "title": "Child Observations (Spans)",
+          "gridPos": {
+            "x": 0,
+            "y": 25,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "uid": "langfuse-postgres"
+          },
+          "targets": [
+            {
+              "rawSql": "SELECT name, type, start_time, end_time, (input::text) as input_summary, (output::text) as output_summary FROM observations WHERE trace_id = '${request_id}' ORDER BY start_time",
+              "format": "table"
+            }
+          ],
+          "options": {
+            "cellHeight": "md"
+          }
+        },
+        {
+          "id": 10,
+          "type": "table",
+          "title": "Evaluation Scores",
+          "gridPos": {
+            "x": 12,
+            "y": 25,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "uid": "langfuse-postgres"
+          },
+          "targets": [
+            {
+              "rawSql": "SELECT name, value, comment FROM scores WHERE trace_id = '${request_id}' ORDER BY name",
+              "format": "table"
+            }
+          ],
+          "options": {
+            "cellHeight": "md"
+          }
         }
-      ],
-      "options": {
-        "cellHeight": "md"
-      }
+      ]
     }
   ],
   "templating": {

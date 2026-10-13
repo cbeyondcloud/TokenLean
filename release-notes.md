@@ -23,6 +23,16 @@ date changes.
 
 ## 2026-10-13
 
+### Grafana's savings dashboards show data with Langfuse tracing off — Bug fix
+
+The per-call, live, trends and quarterly dashboards read Langfuse's database, which stays empty
+while tracing is off (the OSS default), so on a default stack they never showed data. They now
+read the `usage_events` table the billing dashboards use, filtered by tenant and counting billable
+requests. Where tracing was on, figures shift slightly: cost saved now includes the estimated
+input cost a cache hit avoided, per-group panels list only groups that saved tokens, and counts
+leave out impersonated and error rows. Only the per-call dashboard's collapsed "Langfuse detail"
+row (spans, scores, the trace link) still needs tracing.
+
 ### RouteLLM's mf and sw_ranking routers use each tenant's own OpenAI key — Enhancement (OSS + Enterprise)
 
 These routers embed each routed request with OpenAI. They used one key held by the sidecar; G6

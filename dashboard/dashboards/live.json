@@ -362,6 +362,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "Token Savings % (rolling)",
+      "description": "From usage_events: billable requests (an admin acting as a tenant, and error rows, are not counted).",
       "gridPos": {
         "x": 0,
         "y": 11,
@@ -369,12 +370,17 @@
         "h": 8
       },
       "datasource": {
-        "uid": "langfuse-postgres"
+        "type": "postgres",
+        "uid": "app-postgres"
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('minute', created_at) AS time, ROUND(AVG((metadata->>'total_pct_saving')::float)::numeric,1) AS avg_saving_pct FROM traces WHERE ('${tenant}' = '.*' OR metadata->>'tenant_id' = '${tenant}') AND $__timeFilter(created_at) GROUP BY 1 ORDER BY 1",
-          "format": "time_series"
+          "rawSql": "SELECT date_trunc('minute', timestamp) AS time, ROUND(AVG(CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 1) AS avg_saving_pct FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "datasource": {
+            "type": "postgres",
+            "uid": "app-postgres"
+          }
         }
       ],
       "fieldConfig": {
@@ -418,6 +424,7 @@
       "id": 10,
       "type": "barchart",
       "title": "Active Users (by calls)",
+      "description": "From usage_events: billable requests (an admin acting as a tenant, and error rows, are not counted).",
       "gridPos": {
         "x": 12,
         "y": 11,
@@ -425,12 +432,17 @@
         "h": 7
       },
       "datasource": {
-        "uid": "langfuse-postgres"
+        "type": "postgres",
+        "uid": "app-postgres"
       },
       "targets": [
         {
-          "rawSql": "SELECT metadata->>'user_id' AS user_id, COUNT(*) AS calls FROM traces WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY calls DESC LIMIT 20",
-          "format": "table"
+          "rawSql": "SELECT user_id, COUNT(*) AS calls FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') GROUP BY 1 ORDER BY calls DESC LIMIT 20",
+          "format": "table",
+          "datasource": {
+            "type": "postgres",
+            "uid": "app-postgres"
+          }
         }
       ],
       "options": {
@@ -455,6 +467,7 @@
       "id": 11,
       "type": "table",
       "title": "Last 50 Calls",
+      "description": "From usage_events: billable requests (an admin acting as a tenant, and error rows, are not counted). Cost saved includes the estimated input cost a cache hit avoided.",
       "gridPos": {
         "x": 0,
         "y": 19,
@@ -462,12 +475,17 @@
         "h": 11
       },
       "datasource": {
-        "uid": "langfuse-postgres"
+        "type": "postgres",
+        "uid": "app-postgres"
       },
       "targets": [
         {
-          "rawSql": "SELECT created_at AS \"Time\", id AS \"Request ID\", metadata->>'user_id' AS \"User\", metadata->>'routed_model' AS \"Model\", (metadata->>'baseline_tokens')::int AS \"Baseline Tokens\", (metadata->>'final_tokens_sent')::int AS \"Tokens Sent\", ROUND((metadata->>'total_pct_saving')::float::numeric,1) AS \"Saving %\", ROUND((metadata->>'cost_saving_usd')::float::numeric,6) AS \"Cost Saved ($)\", CASE WHEN (metadata->>'cache_hit')::boolean THEN metadata->>'cache_level' ELSE 'miss' END AS \"Cache\", CASE WHEN (metadata->>'bypassed')::boolean THEN 'yes' ELSE 'no' END AS \"Bypassed\" FROM traces ORDER BY created_at DESC LIMIT 50",
-          "format": "table"
+          "rawSql": "SELECT timestamp AS \"Time\", request_id AS \"Request ID\", user_id AS \"User\", routed_model AS \"Model\", baseline_tokens AS \"Baseline Tokens\", optimised_tokens AS \"Tokens Sent\", ROUND((CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 1) AS \"Saving %\", ROUND(cost_saved_usd, 6) AS \"Cost Saved ($)\", CASE WHEN cache_hit THEN cache_level ELSE 'miss' END AS \"Cache\", CASE WHEN bypassed THEN 'yes' ELSE 'no' END AS \"Bypassed\" FROM usage_events WHERE COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') ORDER BY timestamp DESC LIMIT 50",
+          "format": "table",
+          "datasource": {
+            "type": "postgres",
+            "uid": "app-postgres"
+          }
         }
       ],
       "options": {
@@ -488,9 +506,10 @@
         "type": "query",
         "label": "User",
         "datasource": {
-          "uid": "langfuse-postgres"
+          "type": "postgres",
+          "uid": "app-postgres"
         },
-        "query": "SELECT DISTINCT metadata->>'user_id' FROM traces WHERE created_at >= NOW() - INTERVAL '24 hours' ORDER BY 1",
+        "query": "SELECT DISTINCT user_id FROM usage_events WHERE timestamp >= NOW() - INTERVAL '24 hours' AND user_id <> '' ORDER BY 1",
         "current": {
           "value": "$__all",
           "text": "All"

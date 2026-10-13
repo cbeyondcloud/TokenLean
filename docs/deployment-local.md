@@ -251,9 +251,9 @@ Access Grafana at http://localhost:3000 (default login: admin / the password fro
 
 ### Grafana PostgreSQL Datasource — SSL Error
 
-**Symptom:** Grafana LangfuseDB panels show "pq: SSL is not enabled on the server" or connection refused errors.
+**Symptom:** Grafana's Postgres panels (the savings, billing and SLA dashboards read AppDB; only the per-call dashboard's "Langfuse detail" row reads LangfuseDB) show "pq: SSL is not enabled on the server" or connection refused errors.
 
-**Fix:** The provisioned datasource at `dashboard/provisioning/datasources/langfuse-postgres.yaml` must include `sslmode: disable` in `jsonData`. This is already set in the committed config:
+**Fix:** The provisioned datasources in `dashboard/provisioning/datasources/` (`app-postgres.yaml`, `langfuse-postgres.yaml`) must include `sslmode: disable` in `jsonData`. This is already set in the committed config:
 
 ```yaml
 jsonData:

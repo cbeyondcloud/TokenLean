@@ -1,6 +1,7 @@
 """Tests for Grafana dashboard JSON validity (C10-T, C11-T)."""
 import json
 import os
+import re
 import pytest
 from pathlib import Path
 
@@ -426,3 +427,136 @@ class TestTrustSafetyContextTrust:
         queried = set(re.findall(r"token_opt_[a-z0-9_]+",
                                  " ".join(_all_panel_queries(_load_dashboard("trust-safety.json")))))
         assert queried and not queried - defined
+
+
+# ── #82: the savings dashboards read usage_events, not Langfuse ──────────────
+# The OSS template ships Langfuse tracing off, so a panel reading Langfuse's database showed
+# nothing on a default stack. These four read the application database's usage_events, as
+# billing / requests / tenant-overview / SLA do; only per-call's Langfuse-only panels (spans,
+# scores, the trace link) remain, in a collapsed row that says they need Langfuse tracing.
+
+SAVINGS_DASHBOARDS = ["live.json", "per-call.json", "quarterly.json", "trends.json"]
+LANGFUSE_ROW = "needs Langfuse tracing"
+TENANT_FILTER = "('${tenant}' = '.*' OR tenant_id = '${tenant}')"
+_DDL = Path(__file__).parent.parent.parent / "src" / "proxy" / "billing" / "models.py"
+# What a query may name besides usage_events' columns and its own aliases.
+_SQL_WORDS = frozenset("""
+    select from where and or not as case when then else end sum avg count distinct round
+    nullif coalesce date_trunc to_char jsonb_each_text key value order by group desc asc limit
+    over numeric int float true false null is in interval now min max usage_events
+""".split())
+
+
+def _usage_events_columns() -> set:
+    text = _DDL.read_text(encoding="utf-8")
+    table = re.search(r"CREATE TABLE IF NOT EXISTS usage_events \((.*?)\n\);", text, re.S).group(1)
+    columns = set(re.findall(r"^\s+([a-z_]+)\s+[A-Z]", table, re.M))
+    return columns | set(re.findall(r"ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS (\w+)", text))
+
+
+def _uid(obj: dict) -> str:
+    ds = obj.get("datasource")
+    return ds.get("uid", "") if isinstance(ds, dict) else str(ds or "")
+
+
+def _panels_with_row(dashboard: dict) -> list:
+    """Every panel with the title of the row it sits in: a collapsed row nests its panels, an
+    expanded one is followed by them."""
+    out, row = [], None
+    for panel in dashboard.get("panels", []):
+        if panel.get("type") == "row":
+            row = panel.get("title", "")
+            out += [(child, row) for child in panel.get("panels", []) or []]
+        else:
+            out.append((panel, row))
+    return out
+
+
+def _appdb_queries(fname: str, variables: bool = True) -> list:
+    """(name, sql, description) for every AppDB panel target and, unless told not to, every
+    AppDB template variable."""
+    d = _load_dashboard(fname)
+    out = []
+    for panel, _ in _panels_with_row(d):
+        for target in panel.get("targets", []) or []:
+            if "app-postgres" in (_uid(panel), _uid(target)):
+                out.append((panel.get("title"), target.get("rawSql", ""), panel.get("description", "")))
+    if variables:
+        out += [(v.get("name"), v.get("query", ""), "") for v in d.get("templating", {}).get("list", [])
+                if _uid(v) == "app-postgres"]
+    return out
+
+
+def _unknown_names(sql: str, columns: set) -> set:
+    bare = re.sub(r"'[^']*'", " ", sql)                     # string literals (and ${...} in them)
+    bare = re.sub(r'"[^"]*"', " ", bare)                    # quoted aliases
+    bare = re.sub(r"\$__\w+|\$\{\w+\}|\$\w+", " ", bare)     # Grafana macros and variables
+    aliases = {a.lower() for a in re.findall(r"\bAS\s+([A-Za-z_]\w*)", sql, re.I)}
+    names = {n.lower() for n in re.findall(r"[A-Za-z_]\w*", bare)}
+    return names - columns - _SQL_WORDS - aliases
+
+
+class TestSavingsDashboardsReadUsageEvents:
+    @pytest.mark.parametrize("fname", SAVINGS_DASHBOARDS)
+    def test_nothing_reads_langfuse_outside_the_labelled_row(self, fname):
+        d = _load_dashboard(fname)
+        for var in d.get("templating", {}).get("list", []):
+            assert _uid(var) != "langfuse-postgres", f"{fname}: ${var.get('name')} reads Langfuse"
+        for panel, row in _panels_with_row(d):
+            sources = {_uid(panel)} | {_uid(t) for t in panel.get("targets", []) or []}
+            if "langfuse-postgres" in sources:
+                assert row and LANGFUSE_ROW in row, (
+                    f"{fname}: {panel.get('title')!r} reads Langfuse outside the labelled row")
+
+    def test_per_call_keeps_its_langfuse_only_panels_in_a_collapsed_labelled_row(self):
+        rows = [p for p in _load_dashboard("per-call.json")["panels"]
+                if p.get("type") == "row" and LANGFUSE_ROW in p.get("title", "")]
+        assert len(rows) == 1 and rows[0].get("collapsed") is True
+        assert "langfuse_enabled" in rows[0]["title"]
+        assert sorted(p.get("title") for p in rows[0].get("panels", [])) == [
+            "Child Observations (Spans)", "Evaluation Scores", "Langfuse Trace"]
+
+    @pytest.mark.parametrize("fname", SAVINGS_DASHBOARDS)
+    def test_every_appdb_query_names_only_usage_events_columns(self, fname):
+        columns = _usage_events_columns()
+        queries = _appdb_queries(fname)
+        assert queries, f"{fname}: no AppDB query"
+        for name, sql, _ in queries:
+            assert "FROM usage_events" in sql, f"{fname}: {name!r} does not read usage_events"
+            unknown = _unknown_names(sql, columns)
+            assert not unknown, f"{fname}: {name!r} names {sorted(unknown)}, not usage_events columns"
+
+    @pytest.mark.parametrize("fname", SAVINGS_DASHBOARDS)
+    def test_every_panel_honours_the_tenant_and_counts_billable_rows(self, fname):
+        queries = _appdb_queries(fname, variables=False)
+        assert queries, f"{fname}: no AppDB panel"
+        for name, sql, _ in queries:
+            assert TENANT_FILTER in sql, f"{fname}: {name!r} ignores the tenant"
+            if "request_id = '${request_id}'" not in sql:        # per-call reads one row, any
+                assert "COALESCE(billable, true)" in sql, f"{fname}: {name!r} counts non-billable rows"
+
+    @pytest.mark.parametrize("fname", SAVINGS_DASHBOARDS)
+    def test_every_saving_percentage_survives_a_zero_baseline(self, fname):
+        # SavingsReport.total_pct_saving is 0 when the baseline is 0; an unguarded division would
+        # fail the whole panel on one such row.
+        queries = _appdb_queries(fname)
+        assert any("/ baseline_tokens" in sql for _, sql, _ in queries), f"{fname}: no saving %"
+        for name, sql, _ in queries:
+            guarded = re.findall(r"CASE WHEN baseline_tokens = 0 THEN 0 ELSE [^/]+ / baseline_tokens END", sql)
+            assert sql.count("/ baseline_tokens") == len(guarded), f"{fname}: {name!r} divides unguarded"
+
+    @pytest.mark.parametrize("fname", SAVINGS_DASHBOARDS)
+    def test_every_moved_panel_says_what_its_numbers_mean(self, fname):
+        queries = _appdb_queries(fname, variables=False)
+        assert queries, f"{fname}: no AppDB panel"
+        for name, sql, description in queries:
+            assert "usage_events" in description, f"{fname}: {name!r} does not say where it reads"
+            if "cost_saved_usd" in sql:
+                assert "cache hit" in description, f"{fname}: {name!r} hides the cache-hit estimate"
+            if "group_savings" in sql:
+                assert "added tokens" in description, f"{fname}: {name!r} hides the groups left out"
+
+    @pytest.mark.parametrize("fname", ["live.json", "quarterly.json", "trends.json"])
+    def test_the_user_variable_lists_usage_events_users(self, fname):
+        var = next(v for v in _load_dashboard(fname)["templating"]["list"] if v.get("name") == "user_id")
+        assert _uid(var) == "app-postgres" and "FROM usage_events" in var.get("query", "")
