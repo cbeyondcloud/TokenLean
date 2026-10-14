@@ -443,7 +443,7 @@ A/B, so it **requires your own provider key** (onboarding never gives you one â€
 already have theirs). Only the bundled **public** dataset is sent to the provider â€” never your data.
 
 ```bash
-git clone https://github.com/sumitdevgupto/TokenLean.git
+git clone https://github.com/cbeyondcloud/TokenLean.git
 cd TokenLean/examples/benchmark
 ./verify.sh --proxy-url https://<your-proxy>.run.app --api-key tok-... --provider-key sk-...
 ```

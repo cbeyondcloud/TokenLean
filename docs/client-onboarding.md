@@ -23,7 +23,7 @@ over a bundled set of **recognized public datasets** (SQuAD v2 / MT-Bench / SWE-
 HumanEval / GSM8K). It prints a cold-floor + realistic-replay savings table at the end.
 
 ```bash
-git clone https://github.com/sumitdevgupto/TokenLean.git
+git clone https://github.com/cbeyondcloud/TokenLean.git
 cd TokenLean/examples/benchmark
 ./verify.sh --proxy-url "$PROXY_ENDPOINT" --api-key "$PROXY_API_KEY" --provider-key sk-...
 ```
