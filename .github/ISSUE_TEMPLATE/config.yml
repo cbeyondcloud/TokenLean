@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/sumitdevgupto/TokenLean/security/advisories/new
+    url: https://github.com/cbeyondcloud/TokenLean/security/advisories/new
     about: Please report security issues privately via Security Advisories (see SECURITY.md) — not as a public issue.
   - name: Questions & discussion
-    url: https://github.com/sumitdevgupto/TokenLean/discussions
+    url: https://github.com/cbeyondcloud/TokenLean/discussions
     about: Ask questions, share ideas, and discuss usage in GitHub Discussions.

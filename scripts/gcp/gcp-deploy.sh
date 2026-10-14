@@ -1015,7 +1015,7 @@ PYEOF
   echo -e "${GREEN}║${NC}     --update-env-vars=DOMAIN=<domain>,PROVIDER=<openai|vertex_ai>"
   echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
   echo ""
-  info "Docs: https://github.com/sumitdevgupto/TokenLean/blob/main/docs/developer-onboarding.md"
+  info "Docs: https://github.com/cbeyondcloud/TokenLean/blob/main/docs/developer-onboarding.md"
 }
 
 # ─── Step 5b: Deploy G3 Cloud Run Jobs (doc-pipeline, finetune-pipeline) ─────

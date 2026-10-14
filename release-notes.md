@@ -21,6 +21,16 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-14
+
+### Long benchmark runs no longer die with the session that started them — Bug fix
+A benchmark-harness run that takes hours ran as a child of the shell that started it, so closing
+that terminal or session, or a reboot, killed it partway through. It can now start detached (as a
+Windows Task Scheduler task; in a new session elsewhere) and writes a heartbeat every 30 seconds.
+A status command says whether the run is going, finished or died, and where; a resume command
+reruns only the datasets that did not finish, into the same run. The run lock no longer mistakes a
+process that took a dead owner's process id after a reboot for the owner.
+
 ## 2026-10-13
 
 ### Langfuse runs only when tracing is on — Enhancement (OSS)

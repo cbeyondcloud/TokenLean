@@ -15,11 +15,11 @@
   <a href="https://youtu.be/22on_HzyuuQ" target="_blank" rel="noopener"><strong>Youtube</strong></a>
 </p>
 
-[![CI](https://github.com/sumitdevgupto/TokenLean/actions/workflows/ci.yml/badge.svg)](https://github.com/sumitdevgupto/TokenLean/actions/workflows/ci.yml)
+[![CI](https://github.com/cbeyondcloud/TokenLean/actions/workflows/ci.yml/badge.svg)](https://github.com/cbeyondcloud/TokenLean/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![Quality-gated savings](https://img.shields.io/badge/quality--gated_savings-54.1%25-brightgreen.svg)](#g0g31-optimisation-and-safety-groups)
-[![GitHub stars](https://img.shields.io/github/stars/sumitdevgupto/TokenLean?style=social)](https://github.com/sumitdevgupto/TokenLean/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/cbeyondcloud/TokenLean?style=social)](https://github.com/cbeyondcloud/TokenLean/stargazers)
 
 **TokenLean** is a production-ready proxy (run locally or GCP-hosted) that sits between your app and any LLM provider and transparently shrinks every request — prompt compression, semantic caching, model routing, prefix-cache alignment, structured pruning, and **23 more techniques**. Point your existing OpenAI client at it and keep your code exactly as-is.
 
@@ -152,7 +152,7 @@ You could assemble these yourself — LLMLingua for compression, a semantic cach
 > **parity** rows, not TokenLean-exclusive claims. TokenLean's differentiation is the **breadth of stacked,
 > measured optimisations** and the **second (RAG/context) trust boundary**, not any single feature. This
 > space moves fast, so **verify against each project's current docs** — and please
-> [open an issue or PR](https://github.com/sumitdevgupto/TokenLean/issues) if any cell is out of date.
+> [open an issue or PR](https://github.com/cbeyondcloud/TokenLean/issues) if any cell is out of date.
 >
 > TokenLean's own figures (**54.1%**, **28 techniques**) are **self-measured** on our live-ablation
 > harness — directional estimates, not an independent third-party benchmark. (The "up to ~84% on
@@ -219,7 +219,7 @@ template's catalog and price rows are refreshed periodically against the provide
 ### One-Command Deploy
 
 ```bash
-git clone https://github.com/sumitdevgupto/TokenLean
+git clone https://github.com/cbeyondcloud/TokenLean
 cd TokenLean
 cp infra/terraform.tfvars.template infra/terraform.tfvars
 # Edit terraform.tfvars with your GCP project ID

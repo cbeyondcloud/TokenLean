@@ -24,7 +24,7 @@ Qdrant, sidecars) runs via Docker Compose.
 
 ```bash
 # 1. Clone and copy config templates
-git clone https://github.com/sumitdevgupto/TokenLean
+git clone https://github.com/cbeyondcloud/TokenLean
 cd TokenLean
 cp config/config.yaml.template config/config.yaml
 
