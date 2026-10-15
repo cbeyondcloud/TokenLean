@@ -21,6 +21,31 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-15
+
+### The semantic cache no longer serves one request's answer for another's numbers — Bug fix
+The semantic (L2) cache matches questions by meaning, and an embedding barely separates two requests
+that differ only in their figures: 50 order batches with different ids and amounts matched each other
+at 0.90–0.92 similarity, so a batch could be answered with another batch's totals. A semantic match is
+now served only when both questions carry the same numbers in the same order. Questions without digits
+are unaffected, and their existing cache entries stay valid. Operators can restore similarity-only
+matching with `G5_cache.l2_literal_guard: false`. This can lower measured cache hit rates; the hits it
+removes were wrong answers.
+
+### The savings harness now confirms each arm is live before measuring it — Bug fix
+Since 2026-10-04 the proxy refuses a config reload that drops a section it already has, and keeps
+serving the last good one. The harness wrote its arms (7 sections) over a proxy running the full
+operator config (14), so on any proxy it had not started, every arm was refused and a whole run measured
+the operator config five times over, with no error anywhere. Arms are now laid over the live config, and
+before any request the harness asks the proxy for its group enablement and aborts the arm if it
+disagrees, restoring the file. Runs made on such a proxy since 2026-10-04 should not be relied on per arm.
+
+### The savings harness completes tool calls on the batch dataset instead of grading them as empty — Bug fix
+On the batch order-processing dataset the optimised arms often asked for a tool instead of answering,
+and the harness recorded that tool request as an empty answer, so the batch-notation (TOON) figure
+could never be quality-checked. The harness now feeds the dataset's tool result back and grades the
+final answer, counting the extra turn's tokens and cost against the optimised arm.
+
 ## 2026-10-14
 
 ### Long benchmark runs no longer die with the session that started them — Bug fix

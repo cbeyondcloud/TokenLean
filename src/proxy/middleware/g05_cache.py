@@ -204,6 +204,35 @@ def _embed_input_truncates(query_text: str, cfg: Dict) -> bool:
     return max_chars > 0 and len(query_text) > max_chars
 
 
+# Literal guard (#127). A sentence embedding barely distinguishes two queries that differ
+# only in their numbers: DS4's 50 order batches (different ids and amounts, same keys)
+# matched each other at cosine 0.90-0.92, so one batch was served another's response. A
+# fuzzy match is only valid when the queries carry the same literals, so the sequence of
+# digit runs in the query is folded into the L2 scope: a lookup only sees rows stored with
+# the same numbers in the same order. A query with no digits gets no tag, so its scope and
+# every existing row stay byte-identical. Not caught: queries that differ only in words
+# (names, places) — the embedding is what separates those.
+_LITERAL_RE = re.compile(r"\d+(?:[.,]\d+)*")
+
+
+def _literal_scope_tag(query_text: str, cfg: Dict) -> str:
+    """Fingerprint of the digit runs in ``query_text``, in order; "" when it has none or
+    the guard is off (``G5_cache.l2_literal_guard``, default on)."""
+    if not cfg.get("l2_literal_guard", True):
+        return ""
+    literals = _LITERAL_RE.findall(query_text)
+    if not literals:
+        return ""
+    digest = hashlib.sha256("\x1f".join(literals).encode("utf-8")).hexdigest()[:16]
+    return f"literals={digest}"
+
+
+def _l2_scope(ctx, query_text: str, cfg: Dict) -> str:
+    """The L2 scope a lookup filters on and a store writes: :func:`_scope_value` plus the
+    literal tag. One function for both paths so they cannot disagree."""
+    return ":".join(p for p in (_scope_value(ctx), _literal_scope_tag(query_text, cfg)) if p)
+
+
 def _is_multiturn_continuation(ctx) -> bool:
     """True when the request continues an existing conversation — its history
     already contains a prior ``assistant`` or ``tool`` turn.
@@ -1103,19 +1132,21 @@ async def _l2_lookup(ctx: "RequestContext", threshold: float, embedding_model: s
         return None, 0.0
 
     tenant_id = getattr(ctx, "tenant_id", "default")
-    # Combined model+verbosity scope — MUST match _l2_store's INSERT value exactly, or
-    # a terse-steered answer can be semantically served to a verbose-configured request
-    # (and vice versa). Stored in the `model_scope` column (no migration needed — it's
-    # a bare TEXT column; the DB column name predates verbosity scoping).
-    scope_value = _scope_value(ctx)
     query_text = _semantic_query_text(_request_messages(ctx))
     if not query_text:
         # A user turn carries an image, audio or a file, or there is no user text:
         # nothing the embedding can safely match on. L1 exact-match still applies.
         return None, 0.0
 
-    # M2: skip the semantic layer for over-window queries (truncation → collisions).
     cfg = (getattr(ctx, "config", {}) or {}).get("groups", {}).get("G5_cache", {})
+    # Combined model+verbosity+literal scope — MUST match _l2_store's INSERT value exactly,
+    # or a terse-steered answer can be semantically served to a verbose-configured request
+    # (and vice versa), or one batch's answer to another's numbers. Stored in the
+    # `model_scope` column (no migration needed — it's a bare TEXT column; the DB column
+    # name predates verbosity scoping).
+    scope_value = _l2_scope(ctx, query_text, cfg)
+
+    # M2: skip the semantic layer for over-window queries (truncation → collisions).
     if _embed_input_truncates(query_text, cfg):
         logger.debug(
             "[%s] G05 L2 lookup skipped: query %d chars exceeds embed window",
@@ -1174,11 +1205,11 @@ async def _l2_store(ctx: "RequestContext", response: Dict, ttl: int, embedding_m
     # asyncpg has no built-in pgvector codec — pass embedding as a string
     embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
 
-    # Combined model+verbosity scope — MUST match _l2_lookup's WHERE filter exactly;
+    # Combined model+verbosity+literal scope — MUST match _l2_lookup's WHERE filter exactly;
     # this is what actually enforces isolation on the READ path (query_hash below only
     # dedupes the INSERT and is never consulted by SELECT). "" (unscoped) keeps both
     # the stored column value and the hash byte-identical to the pre-feature behaviour.
-    scope_value = _scope_value(ctx)
+    scope_value = _l2_scope(ctx, query_text, cfg)
     _hash_prefix = f"{tenant_id}:{scope_value}" if scope_value else tenant_id
     query_hash = hashlib.sha256(f"{_hash_prefix}:{query_text}".encode()).hexdigest()
 

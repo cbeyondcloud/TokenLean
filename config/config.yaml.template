@@ -757,6 +757,11 @@ groups:
     l2_embedding_model: BAAI/bge-small-en-v1.5
     l2_similarity_threshold: 0.9
     l2_max_embed_chars: 2000
+    # A semantic (L2) match is served only when both questions carry the same numbers in
+    # the same order: an embedding barely tells "total of orders 50.0, 67.35" from
+    # "835.0, 670.0", so without this one batch's answer is served for another's.
+    # Questions without digits are unaffected. false = match on similarity alone.
+    l2_literal_guard: true
     semantic_skip_multiturn: true
     l2_ttl_seconds: 86400
     step_cache_enabled: true

@@ -276,6 +276,65 @@ class TestG05L2VerbosityIsolation:
         mock_tag.assert_called_once()
 
 
+class TestG05L2LiteralGuard:
+    """#127: two requests that differ only in their numbers embed as near-identical
+    (DS4's 50 order batches matched each other at 0.90-0.92), so L2 served one batch's
+    response for another. The digits now scope the L2 row: lookup and store agree on it,
+    different numbers never share a row, and digit-free queries are byte-identical."""
+
+    BATCH_A = '[{"order_id": "ORD-1000", "amount": 50.0}, {"order_id": "ORD-1001", "amount": 67.35}]'
+    BATCH_B = '[{"order_id": "ORD-1100", "amount": 835.0}, {"order_id": "ORD-1101", "amount": 670.0}]'
+
+    _make_mock_pool = TestG05L2VerbosityIsolation._make_mock_pool
+    _insert_call_args = staticmethod(TestG05L2VerbosityIsolation._insert_call_args)
+
+    async def _scopes(self, ctx):
+        mock_pool, mock_conn = self._make_mock_pool(fetchrow_result=None)
+        with patch.dict(os.environ, {"DATABASE_URL": "postgresql://test/db"}):
+            with patch("middleware.g05_cache._embed", new_callable=AsyncMock, return_value=[0.1, 0.2]):
+                with patch("middleware.g05_cache._ensure_cache_l2_schema", new_callable=AsyncMock):
+                    with patch("cache.pg_pool.get_pg_pool", new_callable=AsyncMock, return_value=mock_pool):
+                        from middleware.g05_cache import _l2_lookup, _l2_store
+                        await _l2_lookup(ctx, 0.85)
+                        lookup_scope = mock_conn.fetchrow.await_args.args[4]
+                        await _l2_store(ctx, {"choices": []}, 3600)
+                        store_scope = self._insert_call_args(mock_conn)[6]
+        return lookup_scope, store_scope
+
+    async def test_batches_with_different_numbers_never_share_a_row(self, make_ctx):
+        a_lookup, a_store = await self._scopes(make_ctx([{"role": "user", "content": self.BATCH_A}]))
+        b_lookup, _ = await self._scopes(make_ctx([{"role": "user", "content": self.BATCH_B}]))
+        assert a_lookup == a_store and a_lookup.startswith("literals=")
+        assert a_lookup != b_lookup
+
+    async def test_paraphrase_with_the_same_numbers_shares_a_row(self, make_ctx):
+        a, _ = await self._scopes(make_ctx([{"role": "user", "content": "Total of 50.0 and 67.35?"}]))
+        b, _ = await self._scopes(make_ctx([{"role": "user", "content": "what is 50.0 plus 67.35"}]))
+        assert a == b != ""
+
+    async def test_number_order_matters(self, make_ctx):
+        a, _ = await self._scopes(make_ctx([{"role": "user", "content": "move 10 from A to 20"}]))
+        b, _ = await self._scopes(make_ctx([{"role": "user", "content": "move 20 from A to 10"}]))
+        assert a != b
+
+    async def test_digit_free_query_keeps_an_empty_scope(self, make_ctx):
+        assert await self._scopes(make_ctx([{"role": "user", "content": "Explain the outage"}])) == ("", "")
+
+    async def test_guard_off_restores_similarity_only_matching(self, make_ctx):
+        ctx = make_ctx([{"role": "user", "content": self.BATCH_A}])
+        ctx.config["groups"]["G5_cache"] = {"l2_literal_guard": False}
+        assert await self._scopes(ctx) == ("", "")
+
+    async def test_literal_tag_composes_with_the_other_scope_tags(self, make_ctx):
+        ctx = make_ctx([{"role": "user", "content": self.BATCH_A}])
+        ctx.config["groups"]["G11_output"] = {
+            "enabled": True, "verbosity_steering": {"enabled": True, "level": "ultra"}}
+        lookup, store = await self._scopes(ctx)
+        from middleware.g05_cache import _scope_value
+        assert lookup == store
+        assert lookup.startswith(_scope_value(ctx) + ":literals=")
+
+
 @pytest.mark.asyncio
 class TestG05L2PgPool:
     """Pool-lifecycle tests for the G5 L2 pgvector cache (acquire/release under
