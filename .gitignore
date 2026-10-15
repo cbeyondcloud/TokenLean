@@ -119,6 +119,9 @@ config/local-keys.json.backup.*
 config/.config.yaml.prerun
 config/.config.yaml.prepin
 config/config.yaml.backup.*
+# The GCP run's equivalents: the pristine copy of the GCS config, and the block uploaded in its place.
+config/.config.gcs.prerun
+config/.config.gcs.block
 # Rendered per-feature param files (the *.yaml.template are the source of truth)
 config/params/*.yaml
 

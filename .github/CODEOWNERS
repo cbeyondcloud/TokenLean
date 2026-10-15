@@ -1,4 +1,4 @@
-# Every file in this repository requires review from the maintainer before a
+# Every file in this repository requires review from a maintainer before a
 # pull request can be merged. Paired with the `main` branch ruleset's
-# "Require review from Code Owners" setting.
-* @sumitdevgupto
+# "Require review from Code Owners" setting. Either owner's approval counts.
+* @sumitdevgupto @cbeyondcloud
