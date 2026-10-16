@@ -23,6 +23,17 @@ date changes.
 
 ## 2026-10-16
 
+### o3-mini, o4-mini and o3 are now priced at OpenAI's list, so routing no longer moves them to a costlier model — Bug fix
+The shipped price table had no row for `o3-mini` or `o4-mini` (so `o4-mini` was priced like `gpt-4o`) and its
+`o3` row was five times OpenAI's list; `o3-mini` matched that row by substring. G06's cost guards read this
+table, so on the DS18 reasoning dataset 8 of 20 `o3-mini` / `o4-mini` requests were routed to `gpt-4o`, which
+costs about 2.3 times more at list prices and has no reasoning, while the guard judged each move neutral or
+cheaper. The three models now carry OpenAI's list prices ($1.10 in / $4.40 out per 1M for the minis, $2 / $8
+for `o3`); the same run now sends none of them to `gpt-4o`. The costs shown for these models fall by about 4.5
+times, and published cost figures for the o-series datasets will change at the next re-measurement.
+If a cheaper-tier answer is not confident and the next tier is blocked by the cost guard, G06 still serves
+the cheaper answer; that behaviour is unchanged and tracked separately.
+
 ### The semantic cache now needs 0.95 similarity, not 0.90 — Bug fix
 An embedding barely separates two questions that differ only in a name, a product or a negation, so at
 0.90 the semantic (L2) cache could answer one question with another's answer. Measured with the proxy's

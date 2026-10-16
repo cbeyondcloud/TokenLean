@@ -230,6 +230,62 @@ class TestG06Routing:
             ctx = await _drive_deferred_cascade(ctx)
         assert ctx.routed_model == "gpt-4o"
 
+    @staticmethod
+    def _shipped_pricing(drop_o_series_rows=False):
+        """The pricing table customers actually get (config.yaml.template). With
+        `drop_o_series_rows` it is the table as it shipped until 2026-10-16: no o3-mini or o4-mini
+        row, and `o3` at five times OpenAI's list price."""
+        import pathlib
+        import yaml
+        root = pathlib.Path(__file__).resolve().parents[3]
+        table = yaml.safe_load((root / "config" / "config.yaml.template")
+                               .read_text(encoding="utf-8"))["pricing"]
+        if drop_o_series_rows:
+            table = {k: v for k, v in table.items() if k not in ("o3-mini", "o4-mini")}
+            table["o3"] = {"input": 0.01, "output": 0.04}
+        return table
+
+    async def _route(self, make_ctx, requested, pricing):
+        ctx = make_ctx([{"role": "user", "content": _MEDIUM_PROMPT}], model=requested)
+        ctx.config["groups"]["G6_routing"]["classifier"] = "heuristic"
+        ctx.config["groups"]["G6_routing"]["tiers"] = {
+            "simple": ["gpt-4o-mini"], "medium": ["gpt-4o"], "complex": ["gpt-4-5"]}
+        from middleware.g06_routing import G06Routing
+        with patch("config_loader.get_pricing_table", return_value=pricing):
+            ctx = await G06Routing().process_request(ctx)
+            ctx = await _drive_deferred_cascade(ctx)
+        return ctx
+
+    @pytest.mark.parametrize("requested", ["o4-mini", "o3-mini"])
+    async def test_a_reasoning_mini_request_is_not_moved_to_the_costlier_gpt_4o(self, make_ctx, requested):
+        """DS18 (2026-10-16): 8 of 20 o3-mini / o4-mini requests were routed to gpt-4o, which costs
+        more than either at list prices and has no reasoning. The cost guard judged each move
+        neutral or cheaper because the shipped table had no row for these models. On the shipped
+        table the move is upward, so the guard reverts it."""
+        ctx = await self._route(make_ctx, requested, self._shipped_pricing())
+        assert ctx.routed_model == requested
+        assert "cost_floor" in (ctx.savings.routing_mode or "")
+
+    @pytest.mark.parametrize("requested", ["o4-mini", "o3-mini"])
+    async def test_the_old_table_let_the_costlier_move_through(self, make_ctx, requested):
+        """The known-bad input, so the test above is known to be able to fail: on the table as it
+        shipped before 2026-10-16 the same request is routed to gpt-4o."""
+        ctx = await self._route(make_ctx, requested, self._shipped_pricing(drop_o_series_rows=True))
+        assert ctx.routed_model == "gpt-4o"
+
+    async def test_a_reasoning_mini_request_can_still_go_to_a_cheaper_model(self, make_ctx):
+        """The fix must not freeze these models in place: a move to a genuinely cheaper tier is
+        still allowed."""
+        ctx = make_ctx([{"role": "user", "content": "hi"}], model="o4-mini")
+        ctx.config["groups"]["G6_routing"]["classifier"] = "heuristic"
+        ctx.config["groups"]["G6_routing"]["tiers"] = {
+            "simple": ["gpt-4o-mini"], "medium": ["gpt-4o"], "complex": ["gpt-4-5"]}
+        from middleware.g06_routing import G06Routing
+        with patch("config_loader.get_pricing_table", return_value=self._shipped_pricing()):
+            ctx = await G06Routing().process_request(ctx)
+            ctx = await _drive_deferred_cascade(ctx)
+        assert ctx.routed_model == "gpt-4o-mini"
+
     async def test_heuristic_classifier_explicit(self, make_ctx):
         ctx = make_ctx(
             [{"role": "user", "content": "Please analyse the architecture."}],
