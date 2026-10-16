@@ -23,6 +23,17 @@ date changes.
 
 ## 2026-10-16
 
+### The semantic cache now needs 0.95 similarity, not 0.90 — Bug fix
+An embedding barely separates two questions that differ only in a name, a product or a negation, so at
+0.90 the semantic (L2) cache could answer one question with another's answer. Measured with the proxy's
+own model: questions differing only in an entity ("Gold"/"Silver" tier, "Windows"/"Linux") reached 0.90
+in 6 of 30 pairs and never reached 0.95, while genuine paraphrases reached 0.90 in only 2 of 20, so little
+legitimate reuse is lost. On the cache datasets the change was invisible except DS8, which lost one
+paraphrase reuse (all-on token saving 21.1% to 17.2%); answer quality passed either way. Opposite-meaning
+questions can still match at any threshold ("available" / "not available" scored 0.97), so
+`x_cache_semantic: false` remains the per-request opt-out. `G5_cache.l2_similarity_threshold` (portal:
+Semantic match threshold) is unchanged as a setting; only its default moved.
+
 ### The docs no longer promise OpenAI fine-tuning — Bug fix
 OpenAI is winding down self-serve fine-tuning: since 2026-05-07 it refuses new fine-tuning jobs from
 organizations that had not fine-tuned before (a local run of our job prepared 100 examples and uploaded

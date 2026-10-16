@@ -196,6 +196,16 @@ def _request_messages(ctx) -> list:
 # ≈ 1 token, so the default 2000 chars sits safely under the 512-token window.
 _DEFAULT_L2_MAX_EMBED_CHARS = 2000
 
+# Similarity a stored question must reach to be served for a new one. 0.95 since 2026-10-16
+# (backlog #144); it was 0.90. Measured with the proxy's own embedding model: questions that differ
+# only in an entity ("Gold"/"Silver" tier, "Windows"/"Linux") reached 0.90 in 6 of 30 pairs and
+# never reached 0.95; genuine paraphrases reached 0.90 in only 2 of 20, so little legitimate reuse
+# is lost. An embedding cannot separate opposite meanings at ANY threshold ("available" / "not
+# available" scored 0.972), so this narrows the risk and does not remove it. Matches the shipped
+# default in config.yaml.template - the code's fallback must not silently disagree with it when a
+# hand-edited config or a per-tenant overlay omits the key.
+_DEFAULT_L2_SIMILARITY_THRESHOLD = 0.95
+
 
 def _embed_input_truncates(query_text: str, cfg: Dict) -> bool:
     """True when query_text would exceed the embedding window and be silently
@@ -682,7 +692,7 @@ class G05Cache:
             logger.warning("G05 L1 Redis error: %s", exc)
 
         # L2 — semantic similarity (pgvector)
-        l2_threshold = cfg.get("l2_similarity_threshold", 0.90)
+        l2_threshold = cfg.get("l2_similarity_threshold", _DEFAULT_L2_SIMILARITY_THRESHOLD)
         try:
             embedding_model = cfg.get("l2_embedding_model", _DEFAULT_L2_EMBEDDING_MODEL)
             cached_response, score = await _l2_lookup(ctx, l2_threshold, embedding_model)

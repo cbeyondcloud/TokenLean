@@ -755,7 +755,14 @@ groups:
     # that Dockerfile ARG to the matching revision and rebuild — the two must stay in
     # sync, and a dimension change also requires migrating the cache_l2 pgvector table.
     l2_embedding_model: BAAI/bge-small-en-v1.5
-    l2_similarity_threshold: 0.9
+    # Cosine similarity a stored question must reach to be served for a new one. 0.95 since
+    # 2026-10-16 (it was 0.9): questions differing only in an entity ("Gold"/"Silver" tier,
+    # "Windows"/"Linux") reached 0.9 in 6 of 30 test pairs and never reached 0.95, while
+    # genuine paraphrases reached 0.9 in only 2 of 20. An embedding cannot separate opposite
+    # meanings at any threshold ("available" / "not available" scored 0.97), so this narrows
+    # the risk and does not remove it; `x_cache_semantic: false` turns semantic reuse off per
+    # request. Lower = more cache hits, more wrong-answer risk.
+    l2_similarity_threshold: 0.95
     l2_max_embed_chars: 2000
     # A semantic (L2) match is served only when both questions carry the same numbers in
     # the same order: an embedding barely tells "total of orders 50.0, 67.35" from
