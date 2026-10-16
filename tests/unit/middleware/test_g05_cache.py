@@ -276,6 +276,51 @@ class TestG05L2VerbosityIsolation:
         mock_tag.assert_called_once()
 
 
+class TestG05L2ThresholdDefault:
+    """#144. At 0.90 the semantic cache served one question's answer for another that differed
+    only in a name or product ("Gold"/"Silver" tier, "Windows"/"Linux": 6 of 30 test pairs reached
+    0.90, none reached 0.95), while genuine paraphrases reached 0.90 in only 2 of 20. The default
+    is 0.95; a lower value is an explicit operator choice."""
+
+    async def _threshold_passed(self, make_ctx, cache_cfg):
+        ctx = make_ctx()
+        ctx.config["groups"]["G5_cache"] = cache_cfg
+        mock_redis = AsyncMock()
+        mock_redis.get = AsyncMock(return_value=None)
+        mock_redis.aclose = AsyncMock()
+        lookup = AsyncMock(return_value=(None, 0.0))
+        with patch("middleware.g05_cache._get_redis", return_value=mock_redis):
+            with patch("middleware.g05_cache._l2_lookup", lookup):
+                from middleware.g05_cache import G05Cache
+                await G05Cache().process_request(ctx)
+        lookup.assert_awaited_once()
+        return lookup.await_args.args[1]
+
+    async def test_a_config_that_omits_the_key_gets_the_new_default(self, make_ctx):
+        assert await self._threshold_passed(make_ctx, {"enabled": True}) == 0.95
+
+    async def test_an_explicit_value_is_still_honoured(self, make_ctx):
+        assert await self._threshold_passed(
+            make_ctx, {"enabled": True, "l2_similarity_threshold": 0.90}) == 0.90
+
+    def test_the_code_default_is_the_shipped_default(self):
+        """The template is the contract for what ships; the code's own fallback is what runs when
+        a hand-edited config or a tenant overlay omits the key. They must agree."""
+        import yaml
+        from pathlib import Path
+        from middleware import g05_cache
+        root = Path(__file__).resolve().parents[3]
+        shipped = yaml.safe_load((root / "config" / "config.yaml.template")
+                                 .read_text(encoding="utf-8"))["groups"]["G5_cache"]
+        assert g05_cache._DEFAULT_L2_SIMILARITY_THRESHOLD == shipped["l2_similarity_threshold"] == 0.95
+
+    def test_the_fallback_is_not_a_literal_in_the_call(self):
+        import inspect
+        from middleware.g05_cache import G05Cache
+        src = inspect.getsource(G05Cache.process_request)
+        assert 'cfg.get("l2_similarity_threshold", _DEFAULT_L2_SIMILARITY_THRESHOLD)' in src
+
+
 class TestG05L2LiteralGuard:
     """#127: two requests that differ only in their numbers embed as near-identical
     (DS4's 50 order batches matched each other at 0.90-0.92), so L2 served one batch's
