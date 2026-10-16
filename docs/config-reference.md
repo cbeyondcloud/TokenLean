@@ -388,7 +388,7 @@ Knowledge ingestion — hybrid RAG chunking + fine-tuning trigger.
 | `rag_fallback.top_k` | `5` | ⚠ Chunks retrieved in fallback (fewer = cheaper, lower recall) |
 | `rag_fallback.similarity_threshold` | `0.85` | ⚠ Min score for the strict strategy; `relaxed_hybrid` takes 0.15 less (and twice the chunks), `dense_only` 0.10 less (higher = stricter, may drop relevant context) |
 | `rag_fallback.strategies` | `[strict_hybrid, relaxed_hybrid, dense_only, sparse_only]` | Fallback retrieval order; the first that finds anything wins. `sparse_only` searches nothing yet (it needs a sparse query vector this path does not build) |
-| `fine_tuning.{enabled, min_docs, stability_days, auto_trigger}` | `true / 100 / 30 / false` | Fine-tuning break-even trigger |
+| `fine_tuning.{enabled, min_docs, stability_days, auto_trigger}` | `true / 100 / 30 / false` | Fine-tuning break-even trigger. The job it starts cannot train on OpenAI for an organization that had not fine-tuned before 2026-05-07 (OpenAI refuses the job), and OpenAI ends new jobs for everyone on 2027-01-06; Vertex AI is the path that remains |
 | `sparse_model` / `dense_model` | `Qdrant/bm25` / `all-MiniLM-L6-v2` | Retrieval models |
 
 **Tika.** The doc-pipeline job reads each file with Unstructured first. When Unstructured

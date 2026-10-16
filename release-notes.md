@@ -21,6 +21,16 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-16
+
+### The docs no longer promise OpenAI fine-tuning — Bug fix
+OpenAI is winding down self-serve fine-tuning: since 2026-05-07 it refuses new fine-tuning jobs from
+organizations that had not fine-tuned before (a local run of our job prepared 100 examples and uploaded
+them, then got a 403 `training_not_available` at job creation), and it ends new jobs for everyone on
+2027-01-06. The README, the config reference and the flow doc listed OpenAI as an available fine-tuning
+provider; they now say Vertex AI is the path that remains and that trained models are not yet routed to.
+No code changed.
+
 ## 2026-10-15
 
 ### The semantic cache no longer serves one request's answer for another's numbers — Bug fix

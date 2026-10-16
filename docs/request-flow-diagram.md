@@ -585,6 +585,12 @@ tenant+domain-nested GCS export path + tenant-prefixed Redis keys + BYOK trainin
 model is never trained on the platform account). A tenant sees only its own jobs via the read-only
 `GET /portal/finetune`.
 
+> **Provider availability (checked 2026-10-16).** OpenAI is winding down self-serve fine-tuning: new jobs
+> have been unavailable since 2026-05-07 to organizations that had not fine-tuned before (the API answers
+> 403 `training_not_available`), and end for active customers on 2027-01-06. The data-preparation and
+> upload steps of this job run; the job-creation call is what OpenAI refuses. The Vertex AI path is the one
+> that remains; it has not been exercised end to end.
+>
 > **Not yet auto-routed.** Trained models are **inert** — nothing routes a tenant's requests to its
 > fine-tuned model yet; wiring the model ID into per-tenant routing is a separate follow-up. Default/
 > single-tenant deploys use `rag_docs`, no Redis prefix, and no BYOK enforcement (unchanged).

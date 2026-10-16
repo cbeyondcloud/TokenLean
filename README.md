@@ -439,7 +439,7 @@ src/
 │   └── auth/               # Proxy key validation (GCP Secret Manager)
 ├── llmlingua-sidecar/      # G1: LLMLingua-2 HTTP compression sidecar
 ├── doc-pipeline/           # G3: Document ingestion Cloud Run Job
-├── finetune-pipeline/      # G3: Fine-tuning pipeline (Vertex AI/OpenAI)
+├── finetune-pipeline/      # G3: Fine-tuning job (Vertex AI; OpenAI no longer accepts new jobs from most orgs)
 ├── tika-sidecar/           # Apache Tika 3.3.1 for document parsing
 └── templates/              # G16: Developer starter kits (Python / Java / Go)
 config/                     # Externalised config (hot-reloaded from GCS)
@@ -459,7 +459,7 @@ tests/                      # Unit and integration tests (pytest)
 |-------|-----------|---------|-------------------|
 | **G1** | Prompt Compression | 20-50% | LLMLingua-2 sidecar with layered composition (base→role→task→dynamic). **Cacheable-prefix guard** (`preserve_cacheable_prefix`, off by default): span-scoped and cost-gated — compresses the span your provider caches *down to* its minimum rather than below it, keeps the never-cached remainder fully compressed, and holds tokens back only when the provider's published cache rates and observed reuse make that cheaper; shared with G8/G19. Opt-in **deterministic regex fallback** (`deterministic_fallback`) keeps compressing when the sidecar is down — zero-LLM, zero-latency, code preserved byte-for-byte |
 | **G2** | Template Registry | none (registry + budget reporting) | Versioned templates with PR-diff token checks, deprecation metadata and a budget WARNING when a request exceeds a template's `total_input_max`. Read-only: it never edits the request (its opt-in system-prompt truncation was removed 2026-09-08 because it changed answers; runtime budget compaction is G26) |
-| **G3** | Knowledge Strategy | 15-40% | RAG with OOD detection, fine-tuning pipeline with break-even detection. Opt-in **PII/PHI redaction at ingest** (`INGEST_PII_MODE`) so the vector store never holds raw personal data; **freshness metadata** (`ingested_at`/`source_date`) with a `max_age_days` stale-context filter |
+| **G3** | Knowledge Strategy | 15-40% | RAG with OOD detection, an operator-invoked fine-tuning job with break-even detection (trained models are not yet routed to; the OpenAI path is closed to organizations that had not fine-tuned before 2026-05-07 and ends for everyone on 2027-01-06, so Vertex AI is the path that remains). Opt-in **PII/PHI redaction at ingest** (`INGEST_PII_MODE`) so the vector store never holds raw personal data; **freshness metadata** (`ingested_at`/`source_date`) with a `max_age_days` stale-context filter |
 | **G4** | Rules-Based Bypass | 100% | PostgreSQL cache with exact/fuzzy matching (pg_trgm) |
 | **G5** | Response Caching | 30-80% | L1 Redis exact-match + L2 pgvector semantic. `cache_scope`: `tenant` (default — reuse across providers), `tenant+model` (isolate per requested model), `tenant+system` (isolate per system-prompt fingerprint, so personas/apps sharing one key never get each other's cached answers), or `tenant+model+system` |
 | **G6** | Model Routing | 40-70% | Three-tier cascade (fast→confidence check→escalation→rollback) + opt-in strategies (canary / weighted / round-robin / least-latency) + an opt-in Jev classifier (TypeSafe's decision model rates each request on your own complexity levels; each tenant's own key) |
