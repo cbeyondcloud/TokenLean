@@ -21,6 +21,50 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-15
+
+### The semantic cache no longer serves one request's answer for another's numbers — Bug fix
+The semantic (L2) cache matches questions by meaning, and an embedding barely separates two requests
+that differ only in their figures: 50 order batches with different ids and amounts matched each other
+at 0.90–0.92 similarity, so a batch could be answered with another batch's totals. A semantic match is
+now served only when both questions carry the same numbers in the same order. Questions without digits
+are unaffected, and their existing cache entries stay valid. Operators can restore similarity-only
+matching with `G5_cache.l2_literal_guard: false`. This can lower measured cache hit rates; the hits it
+removes were wrong answers.
+
+### Tool descriptions are no longer shortened by default, and pasted JSON is left alone when tools are offered — Bug fix
+Two more rewrites that changed what the model did on the same batch dataset, found by isolating each
+group with its arm confirmed live. Dropping one article from a tool's description ("for a batch" to
+"for batch", about one token) made the model call the tool in 14 of 20 requests instead of answering
+from the data in the prompt (156,362 tokens sent against 9,900), so `G8_tools.compress_descriptions`
+now ships **off** (it was on since 2026-09-06; G8 therefore does nothing out of the box until you
+register your own tools). Rewriting a JSON array the user pasted into a schema+rows form did the same in
+9 of 20, so G19 now leaves a user-pasted JSON payload as written when the request offers tools
+(`G19_headroom.skip_user_json_when_tools`); tool results, logs, code and prose are still pruned. With
+these and the TOON change below, the batch dataset's all-on arm passes the answer-quality gate.
+
+### Batch notation (TOON) no longer rewrites data when the request offers tools — Bug fix
+Rewriting an inline JSON array as pipe rows stopped it reading to the model as the data: on a batch of
+orders with a fetch tool on offer, the model called the tool in 10 of 20 requests (none without the
+rewrite), a second turn carrying a ~10k-token tool result, about 11x the tokens, on a billed 200. A
+request that offers tools (`tools` or `functions`) now keeps its JSON. Requests without tools are
+unchanged. `G13_batch.toon_skip_when_tools: false` restores the rewrite. The G13 token-reduction figure
+described tool-free data only and is not a result for tool-carrying requests.
+
+### The savings harness now confirms each arm is live before measuring it — Bug fix
+Since 2026-10-04 the proxy refuses a config reload that drops a section it already has, and keeps
+serving the last good one. The harness wrote its arms (7 sections) over a proxy running the full
+operator config (14), so on any proxy it had not started, every arm was refused and a whole run measured
+the operator config five times over, with no error anywhere. Arms are now laid over the live config, and
+before any request the harness asks the proxy for its group enablement and aborts the arm if it
+disagrees, restoring the file. Runs made on such a proxy since 2026-10-04 should not be relied on per arm.
+
+### The savings harness completes tool calls on the batch dataset instead of grading them as empty — Bug fix
+On the batch order-processing dataset the optimised arms often asked for a tool instead of answering,
+and the harness recorded that tool request as an empty answer, so the batch-notation (TOON) figure
+could never be quality-checked. The harness now feeds the dataset's tool result back and grades the
+final answer, counting the extra turn's tokens and cost against the optimised arm.
+
 ## 2026-10-14
 
 ### Long benchmark runs no longer die with the session that started them — Bug fix

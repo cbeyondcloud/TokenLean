@@ -64,6 +64,17 @@ class G19Headroom:
         strategies = cfg.get("compression_strategies", {})
         ratio = _dominance_ratio(cfg)
 
+        # A JSON payload the USER pasted, on a request that offers tools, is left as written
+        # (`skip_user_json_when_tools`, default on). Measured on DS4 (2026-10-15): rewriting
+        # the order array into `{"_schema_": ..., "_rows_": ...}` made the model call the
+        # offered fetch tool in 9 of 20 requests instead of answering from the array (0 of 20
+        # unrewritten) - a second turn carrying a ~10k-token tool result, 6.5x the tokens.
+        # A tool RESULT is already fetched data and is still compressed, as are logs, code
+        # and prose; only the one shape that is measured to change answer-vs-fetch is spared.
+        params = getattr(ctx, "params", None) or {}
+        spare_user_json = bool(cfg.get("skip_user_json_when_tools", True)
+                               and (params.get("tools") or params.get("functions")))
+
         changed = False
         compressed_messages = []
         for msg in ctx.messages:
@@ -72,6 +83,9 @@ class G19Headroom:
 
             if isinstance(content, str) and len(content) >= min_length:
                 content_type = _detect_content_type(content, ratio)
+                if spare_user_json and role == "user" and content_type == "json":
+                    compressed_messages.append(msg)
+                    continue
                 if content_type and content_type in strategies:
                     compressed = _compress(content, content_type, strategies[content_type])
                     if compressed and len(compressed) < len(content):

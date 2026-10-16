@@ -15,9 +15,14 @@ The cause is a fail-OPEN default that is easy to miss when reading the filter:
 
 Keeping an unknown tool is the right call — silently dropping a tool the caller sent would break
 their agent — but it means G08's pruning is inert until the operator lists their OWN tools, and
-nothing said so. These tests pin the behaviour and the shipped defaults that follow from it:
-`compress_descriptions` is now ON, because it is the only part of G08 that acts on anyone's tools
-and it never drops one.
+nothing said so. These tests pin the behaviour and the shipped defaults that follow from it.
+
+`compress_descriptions` was switched ON here because it was the only part of G08 that acts on
+anyone's tools. It is OFF again since 2026-10-15 (backlog #134): on DS4, with the arms confirmed
+live, its single edit - "for a batch." -> "for batch." - made the model call the offered tool in
+14 of 20 requests instead of answering from the data in the prompt (0 of 20 without it), 156,362
+tokens sent against 9,900. That reversal is deliberate; G08 now does nothing on a default install
+until the operator registers their own tools.
 """
 import asyncio
 import pathlib
@@ -97,17 +102,25 @@ class TestAnUnregisteredToolIsNeverPruned:
         )
 
 
-class TestDescriptionCompressionIsTheDefaultBecauseItWorksForEveryone:
-    def test_it_ships_on_in_the_template(self):
+class TestDescriptionCompressionShipsOffBecauseItChangedWhatTheModelDid:
+    def test_it_ships_off_in_the_template(self):
         """The template is the tracked, always-present contract for what ships — the same
-        source of truth `test_config_template_keys.py` reads."""
+        source of truth `test_config_template_keys.py` reads. Off because dropping one article
+        flipped the model to the tool in 14 of 20 DS4 requests (#134); turning it back on needs
+        a measurement on the operator's own tools, not this test edited."""
         cfg = yaml.safe_load((ROOT / "config" / "config.yaml.template").read_text(encoding="utf-8"))
-        assert cfg["groups"]["G8_tools"]["compress_descriptions"] is True, (
-            "with this off, G08 does nothing at all for a deployment that has not populated "
-            "its own tool registry (E17)"
-        )
+        assert cfg["groups"]["G8_tools"]["compress_descriptions"] is False
 
-    def test_it_ships_on_in_local_dev_config_if_present(self):
+    def test_the_harness_base_config_matches_what_ships(self):
+        """Every ablation arm is built from this file, so if it said `true` the published
+        measurements would describe a G08 that does not ship."""
+        base = ROOT / "config" / "config.roi-openai.yaml"
+        if not base.exists():
+            pytest.skip("the harness base config is not part of this checkout")
+        cfg = yaml.safe_load(base.read_text(encoding="utf-8"))
+        assert cfg["groups"]["G8_tools"]["compress_descriptions"] is False
+
+    def test_it_ships_off_in_local_dev_config_if_present(self):
         """`config/config.yaml` is a gitignored, operator-created copy of the template — absent
         on a clean checkout, in CI, and in the `git archive HEAD` tree the OSS gate builds, so
         it must never be read unconditionally. This only checks it when a developer has one."""
@@ -115,21 +128,43 @@ class TestDescriptionCompressionIsTheDefaultBecauseItWorksForEveryone:
         if not local.exists():
             pytest.skip("config/config.yaml is a local dev artifact — not present here")
         cfg = yaml.safe_load(local.read_text(encoding="utf-8"))
-        assert cfg["groups"]["G8_tools"]["compress_descriptions"] is True
+        assert cfg["groups"]["G8_tools"]["compress_descriptions"] is False
 
     def test_the_code_default_matches_the_documented_default(self):
         """The template value is only the SHIPPED config's default. If a hand-edited config or
         a per-tenant overlay ever omits this key, `.get(..., default)` is what actually runs —
-        and until now that fallback was still `False`, silently contradicting the docs."""
+        so the code's own fallback must say the same thing as the template."""
         from middleware import g08_tool_loading as g08
-        assert g08._COMPRESS_DESCRIPTIONS_DEFAULT is True
+        assert g08._COMPRESS_DESCRIPTIONS_DEFAULT is False
         import inspect
         src = inspect.getsource(G08ToolLoading.process_request)
         assert 'cfg.get("compress_descriptions", _COMPRESS_DESCRIPTIONS_DEFAULT)' in src, (
-            "the code's own fallback must match the documented default — a literal "
-            '.get("compress_descriptions", False) would silently revert to the old '
-            "behaviour whenever the key is missing from the effective config"
+            "the code's own fallback must come from the named default - a literal in the "
+            ".get() would silently disagree with it whenever the key is missing"
         )
+
+    def test_a_config_that_omits_the_key_leaves_every_description_byte_identical(self, make_ctx):
+        """The fallback in action: no key, no compression. The description is the instruction the
+        model reads to decide when to call a tool."""
+        desc = "Retrieve full order detail records for a batch."
+        cfg = {"groups": {"G8_tools": {"enabled": True, "registry_path": "",
+                                       "pruning": {"enabled": False}}}}
+        ctx = make_ctx([{"role": "user", "content": "look up my order"}],
+                       params={"tools": [_tool("get_order_details", desc)]}, config=cfg)
+        asyncio.run(G08ToolLoading().process_request(ctx))
+        assert ctx.params["tools"][0]["function"]["description"] == desc
+
+    def test_the_edit_that_flipped_the_model_is_what_the_lever_does_when_on(self, make_ctx):
+        """Records the measured cause rather than a hope: turned on, the compressor turns DS4's
+        tool description "for a batch." into "for batch." - the one-word edit behind 14 of 20
+        requests calling the tool (#134). If the compressor ever stops doing this, revisit the
+        default with a measurement, not by deleting this test."""
+        ctx = make_ctx([{"role": "user", "content": "look up my order"}],
+                       params={"tools": [_tool("get_order_details",
+                                               "Retrieve full order detail records for a batch.")]},
+                       config=_cfg(compress=True))
+        asyncio.run(G08ToolLoading().process_request(ctx))
+        assert ctx.params["tools"][0]["function"]["description"] ==             "Retrieve full order detail records for batch."
 
     def test_it_shrinks_an_unregistered_tool_and_drops_none(self, make_ctx):
         tools = [_tool("acme_lookup_invoice",

@@ -757,6 +757,11 @@ groups:
     l2_embedding_model: BAAI/bge-small-en-v1.5
     l2_similarity_threshold: 0.9
     l2_max_embed_chars: 2000
+    # A semantic (L2) match is served only when both questions carry the same numbers in
+    # the same order: an embedding barely tells "total of orders 50.0, 67.35" from
+    # "835.0, 670.0", so without this one batch's answer is served for another's.
+    # Questions without digits are unaffected. false = match on similarity alone.
+    l2_literal_guard: true
     semantic_skip_multiturn: true
     l2_ttl_seconds: 86400
     step_cache_enabled: true
@@ -1019,12 +1024,14 @@ groups:
     # Compress tool/function DESCRIPTION prose (deterministic regex, zero-LLM via
     # prose_compress). Tool manifests ride every agentic request and descriptions
     # are otherwise verbatim; code/paths/identifiers are preserved byte-for-byte.
-    # ON by default since 2026-09-06 (E17). Intent pruning below only ever acts on
-    # tools listed in `registry_path`; a tool that is absent is KEPT by construction,
-    # so for a deployment that has not populated the registry with its OWN tools this
-    # is the only part of G8 that does anything — it rewrites description prose and
-    # never drops a tool, so it is safe to leave on.
-    compress_descriptions: true
+    # OFF by default since 2026-10-15 (it was on from 2026-09-06). Intent pruning below
+    # only ever acts on tools listed in `registry_path`, so until you list your own tools
+    # G8 does nothing out of the box - and that is better than this lever. Measured on a
+    # batch dataset (temperature 0): dropping one article from a tool's description
+    # ("for a batch" -> "for batch", about one token) made the model call the tool in 14 of
+    # 20 requests instead of answering from the data in the prompt (0 of 20 before), 156k
+    # tokens against 9.9k. Turn it on only after measuring it on YOUR tools.
+    compress_descriptions: false
     compress_description_fields: [description]
     registry_cache_ttl_seconds: 300
     mcp_manifest_cache_ttl_seconds: 300
@@ -1263,6 +1270,11 @@ groups:
     completion_window: 24h
     poll_interval_seconds: 30
     toon_auto_detect: false
+    # Leave the data as JSON when the request offers tools. Rewritten as pipe rows, an
+    # inline array stopped reading as the data to the model: on a batch with a fetch tool
+    # on offer it called the tool in 10 of 20 requests (0 of 20 without the rewrite),
+    # roughly 11x the tokens. false = rewrite regardless.
+    toon_skip_when_tools: true
     toon_min_rows: 2
     toon_uniform_threshold: 1.0
     toon_allow_nested: false
@@ -1362,6 +1374,12 @@ groups:
     # ``` fence or one quoted log line reclassifying a whole prose message; raise it
     # for stricter detection, lower it if your payloads mix heavy prose with logs.
     detect_dominance_ratio: 0.5
+    # Leave a JSON payload the USER pasted as written when the request offers tools.
+    # Rewritten into a schema+rows form, an inline array stopped reading as the data to the
+    # model: on a batch with a fetch tool on offer it called the tool in 9 of 20 requests
+    # (0 of 20 before), 6.5x the tokens. Tool results, logs, code and prose are still
+    # compressed. false = rewrite regardless.
+    skip_user_json_when_tools: true
     min_length_to_compress: 50
     compression_strategies:
       json:

@@ -176,8 +176,20 @@ async def _apply_toon(
       • ``toon_auto_detect`` true: runs on every request, relying on the per-block
         eligibility + net-savings gates so non-tabular / nested / would-inflate data
         is left untouched as JSON (the "JSON fallback").
+
+    A request that offers tools is left as JSON (``toon_skip_when_tools``, default on).
+    Measured on DS4 (2026-10-15, arms confirmed live): the same batch that the model
+    answered directly as a JSON array, with a ``get_order_details`` tool on offer, was
+    answered by CALLING the tool in 10 of 20 requests once the array was rewritten as
+    pipe rows (the count was 0 of 20 without the rewrite) - a second turn carrying the
+    tool result, about 11x the tokens, on a billed 200. The rewrite saves a few hundred
+    tokens; the episode it can trigger costs ten thousand.
     """
     cfg = _resolve_toon_cfg(ctx)
+
+    if cfg.get("toon_skip_when_tools", True) and _tool_bearing(ctx):
+        logger.debug("[%s] G13 TOON skipped: the request offers tools", ctx.request_id)
+        return False, ctx
 
     if not cfg.get("toon_auto_detect", False):
         if not any(_has_toon_marker(msg.get("content"))

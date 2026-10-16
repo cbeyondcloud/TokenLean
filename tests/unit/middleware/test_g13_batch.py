@@ -887,6 +887,67 @@ class TestToonMarker:
 
 
 @pytest.mark.asyncio
+class TestToonSkipsToolBearingRequests:
+    """#111/#131. On DS4 (2026-10-15, arms confirmed live) rewriting the order array as pipe
+    rows made the model CALL the offered `get_order_details` tool in 10 of 20 requests (0 of 20
+    on the unrewritten JSON): a second turn carrying a ~10k-token tool result, ~11x the tokens
+    of the baseline. A request that offers tools is therefore left as JSON."""
+
+    _ROWS = '[{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}, {"name": "Carol", "age": 35}]'
+    _TOOL = {"type": "function", "function": {"name": "get_rows", "parameters": {}}}
+
+    async def _run(self, make_ctx, params=None, cfg=None, tenant_cfg=None):
+        ctx = make_ctx([{"role": "system", "content": "schema:name|age"},
+                        {"role": "user", "content": f"Analyse this data: {self._ROWS}"}],
+                       params=params or {})
+        if cfg:
+            ctx.config["groups"]["G13_batch"].update(cfg)
+        if tenant_cfg:
+            ctx.tenant_id = "acme"
+            ctx.config.setdefault("tenants", {})["acme"] = {"groups": {"G13_batch": tenant_cfg}}
+        from middleware.g13_batch import G13Batch
+        ctx = await G13Batch().process_request(ctx)
+        fired = any(s.group == "G13" for s in ctx.savings.step_savings)
+        return ctx.messages[1]["content"], fired
+
+    async def test_without_tools_the_array_is_still_rewritten(self, make_ctx):
+        content, fired = await self._run(make_ctx)
+        assert "schema:name|age" in content and fired
+
+    async def test_a_request_offering_tools_keeps_its_json(self, make_ctx):
+        content, fired = await self._run(make_ctx, params={"tools": [self._TOOL]})
+        assert content == f"Analyse this data: {self._ROWS}" and not fired
+
+    async def test_the_legacy_functions_field_counts_as_tools(self, make_ctx):
+        content, fired = await self._run(make_ctx, params={"functions": [{"name": "get_rows"}]})
+        assert content == f"Analyse this data: {self._ROWS}" and not fired
+
+    async def test_an_empty_tools_list_offers_nothing(self, make_ctx):
+        content, fired = await self._run(make_ctx, params={"tools": []})
+        assert "schema:name|age" in content and fired
+
+    async def test_the_knob_off_restores_the_rewrite(self, make_ctx):
+        content, fired = await self._run(make_ctx, params={"tools": [self._TOOL]},
+                                         cfg={"toon_skip_when_tools": False})
+        assert "schema:name|age" in content and fired
+
+    async def test_a_tenant_can_turn_it_back_on(self, make_ctx):
+        content, fired = await self._run(make_ctx, params={"tools": [self._TOOL]},
+                                         tenant_cfg={"toon_skip_when_tools": False})
+        assert "schema:name|age" in content and fired
+
+    async def test_auto_detect_does_not_bypass_it(self, make_ctx):
+        content, fired = await self._run(make_ctx, params={"tools": [self._TOOL]},
+                                         cfg={"toon_auto_detect": True})
+        assert content == f"Analyse this data: {self._ROWS}" and not fired
+
+    async def test_the_template_ships_it_on(self):
+        import yaml
+        cfg = yaml.safe_load(open("config/config.yaml.template", encoding="utf-8"))
+        assert cfg["groups"]["G13_batch"]["toon_skip_when_tools"] is True
+
+
+@pytest.mark.asyncio
 class TestBatchOwnerRecord:
     """/v1/batch/results serves a result only to the tenant recorded as its owner. The record
     was written after the request was queued, for one hour, and a failed write was ignored,
