@@ -50,13 +50,18 @@ _TOOL_USAGE_PREFIX = "tok_opt:tool:usage:"
 _TOOL_PRUNING_LOCK = "tok_opt:tool:pruning_lock"
 # The daily pass runs once per UTC day across replicas: the first to SET this key runs it.
 _TOOL_PRUNING_DAY = "tok_opt:tool:pruning_day:"
-# ON by default since 2026-09-06 (E17): a tool absent from the registry is always kept
-# (fail-open — see the `reg_entry`/`tool_intents` filter below), so intent pruning is a
-# no-op until the operator populates their own tools. Compressing description prose is the
-# one part of G08 that helps a customer who has not done that. Matches the shipped default
-# in config.yaml.template — the code's own fallback must not silently disagree with it if a
+# OFF by default since 2026-10-15 (backlog #134); it was ON from 2026-09-06 (E17), when it was
+# the one part of G08 that acted on a customer who had not registered their tools. Measured on
+# DS4 with the arms confirmed live (temperature 0, fixed seed): the compressor's only edit to
+# the tool block was "for a batch." -> "for batch." (-2 characters, about one token), and the
+# model then called the tool in 14 of 20 requests instead of answering from the data in the
+# prompt (0 of 20 without it) - 156,362 tokens sent against 9,900. A description is the
+# instruction the model reads to decide when to call a tool; dropping its articles saved a
+# token and changed that decision. The lever stays available (set `compress_descriptions:
+# true`) for an operator who has measured it on their own tools. Matches the shipped default
+# in config.yaml.template - the code's own fallback must not silently disagree with it if a
 # hand-edited config or a per-tenant overlay omits the key.
-_COMPRESS_DESCRIPTIONS_DEFAULT = True
+_COMPRESS_DESCRIPTIONS_DEFAULT = False
 
 
 # ── Config-first knob resolution (item 83a) ───────────────────────────────────
