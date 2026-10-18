@@ -235,7 +235,7 @@ stopped. With tracing off: `docker stop token-opt-langfuse` (its data stays in P
 | `Docker is not running` | Start Docker Desktop or the Docker daemon |
 | `port is already allocated` | Stop conflicting services or change ports in `.env` |
 | `proxy unhealthy` | Check logs: `docker-compose logs proxy` |
-| `RouteLLM routing fails` (`routing_mode` says `routellm+fallback:<reason>`) | Check `docker-compose logs routellm`. No key is needed: `bert` runs locally, and `mf`/`sw_ranking` embed with each tenant's own OpenAI key |
+| `RouteLLM routing fails` (`routing_mode` says `routellm+fallback:<reason>`) | Check `docker-compose logs routellm`. No key is needed: `bert` runs locally, and `sw_ranking` embeds with each tenant's own OpenAI key |
 | `Langfuse shows database error` | Wait for postgres to be healthy: `docker-compose logs postgres` |
 | `localhost:3100` unreachable | Langfuse runs only with tracing on: set `G18_observability.langfuse_enabled: true` (or pass `--with-tracing`) and redeploy |
 | `Qdrant empty after restart` | Re-seed: `./scripts/seed-data.sh --qdrant-url http://localhost:6333` |

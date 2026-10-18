@@ -596,7 +596,7 @@ pricing:
   typesafe/jev:
     input: 0.000042
     output: 0.0
-  # The embedding RouteLLM's mf/sw_ranking routers make per routed turn, with the tenant's own
+  # The embedding RouteLLM's sw_ranking router makes per routed turn, with the tenant's own
   # OpenAI key: $0.02 per million input tokens. Recorded as openai/<model>.
   text-embedding-3-small:
     input: 0.00002
@@ -935,15 +935,16 @@ groups:
     expected_output_tokens_estimate: 512
     routellm:
       url: http://routellm-svc:8081
-      # bert: a local classifier with an Apache-2.0 checkpoint. mf and sw_ranking embed the
-      # prompt with the tenant's own OpenAI key (without one G06 uses bert), mf's checkpoint
-      # has no licence, and causal_llm is a 16 GB Meta Llama 3 derivative.
+      # bert: a local classifier with an Apache-2.0 checkpoint. sw_ranking embeds the prompt
+      # with the tenant's own OpenAI key (without one G06 uses bert), and causal_llm is a 16 GB
+      # Meta Llama 3 derivative. RouteLLM's mf router is not offered: its checkpoint was
+      # published with no licence (a config naming it gets bert, with a warning).
       router: bert
       # ~50% of requests to strong_model. Each router has its own scale (RouteLLM's
-      # calibration): bert 0.4066, mf 0.11593, sw_ranking 0.21647, causal_llm 0.0962.
+      # calibration): bert 0.4066, sw_ranking 0.21647, causal_llm 0.0962.
       threshold: 0.4066
       timeout_ms: 500
-      warn_every_s: 3600       # a tenant whose mf/sw_ranking runs as bert (no key) is warned this often
+      warn_every_s: 3600       # a tenant whose sw_ranking runs as bert (no key) is warned this often
       weak_model: gpt-4o-mini
       strong_model: gpt-4o
       model_map:

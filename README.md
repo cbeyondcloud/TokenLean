@@ -649,7 +649,7 @@ main._record_outcome ───────────────────�
 | **Compression** | LLMLingua-2 | Prompt compression (G1) |
 | **Caching** | Redis 7 + pgvector | L1 exact-match + L2 semantic cache |
 | **RAG** | Qdrant + sentence-transformers | Vector search (G7) |
-| **Routing** | RouteLLM (`bert` runs locally; `mf`/`sw_ranking` embed with each tenant's own OpenAI key) | Model selection (G6) |
+| **Routing** | RouteLLM (`bert` runs locally; `sw_ranking` embeds with each tenant's own OpenAI key) | Model selection (G6) |
 | **Routing (optional)** | TypeSafe Jev (hosted; each tenant's own key) | Complexity levels for G6 (`classifier: jev`) |
 | **Memory** | Redis + Qdrant | Session summaries and agent skills (G10) |
 | **Orchestration** | LangGraph | Role-decomposition templates in `templates/` (G16 guidance; the proxy does not run them) |

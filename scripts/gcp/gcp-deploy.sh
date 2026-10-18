@@ -318,7 +318,7 @@ provision_llm_keys() {
     store_key "llm-key-typesafe"    "typesafe"  || true
   fi
 
-  # RouteLLM's mf/sw_ranking routers embed with each tenant's own OpenAI key, which G06 sends
+  # RouteLLM's sw_ranking router embeds with each tenant's own OpenAI key, which G06 sends
   # per request, so no platform key is seeded for the sidecar (backlog #99).
 
   # Langfuse keys — only available after first deploy + manual UI step

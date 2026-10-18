@@ -68,8 +68,8 @@ card, or by the LICENSE file in its repository; checked 2026-10-04.
 | `Qdrant/bm25` | G03 / G07 sparse (BM25) embeddings | Apache-2.0 | |
 | `cross-encoder/ms-marco-MiniLM-L-6-v2` | G07 reranking | Apache-2.0 | |
 | `microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank` | `llmlingua-sidecar` (G01) | Apache-2.0 | |
-| `routellm/bert_gpt4_augmented` | `routellm-sidecar`: `bert`, G06's default router (and its choice when `mf`/`sw_ranking` have no OpenAI key) | Apache-2.0 | Base model `xlm-roberta-base` (MIT) |
-| `routellm/mf_gpt4_augmented` | `routellm-sidecar`: `mf` router, only when configured (with an OpenAI key) | **None declared** — outside the rule | The repository holds only the weights: no LICENSE file, no license on the model card |
+| `routellm/bert_gpt4_augmented` | `routellm-sidecar`: `bert`, G06's default router (and its choice when `sw_ranking` has no OpenAI key) | Apache-2.0 | Base model `xlm-roberta-base` (MIT) |
+| `routellm/mf_gpt4_augmented` | **Not offered** (removed 2026-10-18) | **None declared** | RouteLLM's `mf` router. The repository holds only the weights: no LICENSE file, no license on the model card, so there is no right to use them. G06 substitutes `bert` for a config that still names `mf`, and the sidecar refuses it |
 | `routellm/causal_llm_gpt4_augmented` | `routellm-sidecar`: `causal_llm` router, only when configured | Apache-2.0 **and the Meta Llama 3 Community License** — outside the rule | Its repository ships an Apache-2.0 LICENSE, but its config names `meta-llama/Meta-Llama-3-8B` as the base model |
 | RouteLLM arena datasets | `routellm-sidecar`: `sw_ranking` router, only when configured (with an OpenAI key) | Apache-2.0 for `lmsys/lmsys-arena-human-preference-55k` and `routellm/gpt4_judge_battles`; none declared for their two embedding datasets — outside the rule | |
 | spaCy `en_core_web_lg` | presidio-analyzer's default model (G29, only with `use_presidio: true`) | MIT | |
@@ -118,9 +118,9 @@ that does **not** impose copyleft on the larger Apache-2.0 Work:
   7.2 (BSD-3-Clause).
 - Weak-copyleft transitive deps (certifi, tqdm, orjson — MPL-2.0) are file-level and
   compatible with Apache-2.0 redistribution.
-- G06's RouteLLM router defaults to `bert` (Apache-2.0). The `mf` (no license),
-  `causal_llm` (Meta Llama 3 derivative) and `sw_ranking` (partly unlicensed data) routers
-  fall outside the rule and run only if an operator configures them. See [Models](#models).
+- G06's RouteLLM router defaults to `bert` (Apache-2.0). The `mf` router (its checkpoint has no
+  license) is no longer offered. `causal_llm` (Meta Llama 3 derivative) and `sw_ranking` (partly
+  unlicensed data) fall outside the rule and run only if an operator configures them. See [Models](#models).
 - No Python dependency requires attribution in compiled binaries or restricts sublicensing.
 
 *Last verified: 2026-10-04.*

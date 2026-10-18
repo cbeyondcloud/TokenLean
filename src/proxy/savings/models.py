@@ -56,7 +56,7 @@ class SavingsRecord:
     # classifier that could not decide carries "+fallback:<reason>" (e.g. "jev+fallback:no_key").
     routing_mode: Optional[str] = None
     # The router and threshold RouteLLM decided with; set only when it decided.
-    routellm_router_used: Optional[str] = None  # e.g., "mf"
+    routellm_router_used: Optional[str] = None  # e.g., "bert"
     routellm_threshold: Optional[float] = None
     # The level a level-rating classifier (Jev) chose, e.g. "high". Set only when it decided,
     # so its presence is the proof that the classifier itself made the call.
