@@ -4,13 +4,13 @@ RouteLLM HTTP Sidecar — G06 routing service.
 POST /route
   Request:  { "messages": [...], "router": "bert", "threshold": 0.4066,
               "strong_model": "gpt-4-1106-preview", "weak_model": "gpt-4o-mini" }
-            header X-Embedding-Key: the tenant's own OpenAI key (mf and sw_ranking only)
+            header X-Embedding-Key: the tenant's own OpenAI key (sw_ranking only)
   Response: { "routed_model": "gpt-4o-mini", "reason": "below_threshold", "router_used": "bert" }
             (+ "embedding_usage": {"model", "prompt_tokens"} when the router embedded)
 
 The answer is always one of the two model names in the request (G06 maps it by exact name).
 The sidecar only DECIDES: `Controller.route()` scores the last turn and makes no completion
-call, so no conversation is sent to a model. The `mf` and `sw_ranking` routers do embed that
+call, so no conversation is sent to a model. The `sw_ranking` router does embed that
 turn with OpenAI, with the key G06 sends for the request, and report the usage so G06 can
 price the call.
 
@@ -43,18 +43,24 @@ _controllers: Dict[str, Any] = {}
 
 # RouteLLM's threshold per router for ~50% strong-model calls (`routellm.calibrate_threshold
 # --strong-model-pct 0.5` on its published Chatbot Arena scores); G06 uses the same table. bert
-# is the default router: its checkpoint is Apache-2.0, while mf's has no licence.
-_THRESHOLDS = {"bert": 0.4066, "mf": 0.11593, "sw_ranking": 0.21647, "causal_llm": 0.0962}
+# is the default router: its checkpoint is Apache-2.0.
+_THRESHOLDS = {"bert": 0.4066, "sw_ranking": 0.21647, "causal_llm": 0.0962}
 _DEFAULT_ROUTER = "bert"
+# Routers RouteLLM ships that this sidecar refuses, with the reason: a request naming one is
+# answered 400 before any checkpoint loads. G06 never sends them (it substitutes bert).
+_REMOVED_ROUTERS = {
+    "mf": "its checkpoint, routellm/mf_gpt4_augmented, was published with no licence "
+          "(removed 2026-10-18; see THIRD_PARTY_LICENSES.md)",
+}
 
 # ── The tenant's own embedding key (backlog #99) ──────────────────────────────
-# mf and sw_ranking embed with ONE module-level OpenAI client that RouteLLM builds at import
+# sw_ranking embeds with ONE module-level OpenAI client that RouteLLM builds at import
 # from the environment (routellm/routers/similarity_weighted/utils.py; routers.py and
 # matrix_factorization/model.py import that name). The key is each tenant's own, sent by G06
 # per request, so that client is replaced in all three modules by one that embeds with the
 # request's key. RouteLLM builds its client even for bert and openai refuses to build one with
 # no key, so the import gets a stand-in value that nothing uses.
-_EMBEDDING_ROUTERS = ("mf", "sw_ranking")
+_EMBEDDING_ROUTERS = ("sw_ranking",)
 _ROUTELLM_CLIENT_MODULES = ("routellm.routers.similarity_weighted.utils",
                             "routellm.routers.matrix_factorization.model",
                             "routellm.routers.routers")
@@ -150,7 +156,7 @@ class RouteResponse(BaseModel):
     routed_model: str
     reason: str
     router_used: str
-    embedding_usage: Optional[Dict[str, Any]] = None    # mf / sw_ranking only
+    embedding_usage: Optional[Dict[str, Any]] = None    # sw_ranking only
 
 
 @app.get("/health")
@@ -164,6 +170,9 @@ async def route(req: RouteRequest,
     """Route a request to the strong or the weak model using RouteLLM."""
     if not req.messages:
         raise HTTPException(status_code=400, detail="Messages cannot be empty")
+    if req.router in _REMOVED_ROUTERS:
+        raise HTTPException(status_code=400, detail=(
+            f"the {req.router} router is no longer available: {_REMOVED_ROUTERS[req.router]}"))
     embeds = req.router in _EMBEDDING_ROUTERS
     if embeds and not embedding_key:
         raise HTTPException(status_code=400, detail=(

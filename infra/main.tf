@@ -1317,7 +1317,7 @@ resource "google_secret_manager_secret_iam_member" "qdrant_api_key_accessor" {
 }
 
 # ─── RouteLLM Sidecar Service Account ───────────────────────────────────────
-# The sidecar's identity, with no grant: it reads no secret (mf/sw_ranking embed with each
+# The sidecar's identity, with no grant: it reads no secret (sw_ranking embeds with each
 # tenant's own key, which G06 sends per request; backlog #99) and calls no Cloud Run
 # service, so it holds no run.invoker. The proxy SA needs no right to act as it:
 # `gcloud run deploy --service-account=...` is run by the operator's identity, which needs

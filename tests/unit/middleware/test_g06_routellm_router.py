@@ -1,14 +1,15 @@
 """
 G06's RouteLLM classifier: which router, at which threshold, reaches the sidecar.
 
-The default router is `bert`: its checkpoint is Apache-2.0 on an MIT base model, while `mf`'s
-was published with no licence and `causal_llm`'s is a Meta Llama 3 derivative. `mf` and
-`sw_ranking` embed the prompt with OpenAI inside the sidecar, with the TENANT's own OpenAI key
+The default router is `bert`: its checkpoint is Apache-2.0 on an MIT base model, while
+`causal_llm`'s is a Meta Llama 3 derivative and `mf`'s was published with no licence, so `mf` is
+no longer offered (2026-10-18): a config naming it gets bert, with one warning. `sw_ranking`
+embeds the prompt with OpenAI inside the sidecar, with the TENANT's own OpenAI key
 (the owner's rule: every model key is the tenant's), sent per request; without one G06 logs the
 switch and uses `bert` at bert's own threshold, because a threshold calibrated for one router
 means nothing to another. Each default threshold is RouteLLM's calibration for ~50%
 strong-model calls on its published Chatbot Arena scores (`routellm.calibrate_threshold
---strong-model-pct 0.5`; it gives mf the README's 0.11593).
+--strong-model-pct 0.5`).
 """
 import logging
 
@@ -105,7 +106,7 @@ async def _route(cfg):
     return await g06._classify_routellm(MESSAGES, {}, {"routellm": {**BASE, **cfg}})
 
 
-@pytest.mark.parametrize("key", [True, False])   # with a key, an mf default would show
+@pytest.mark.parametrize("key", [True, False])   # with a key, an embedding default would show
 async def test_an_unset_router_is_bert_at_its_calibrated_threshold(sent, keys, key):
     _openai_key(keys, key)
     assert await _route({}) == "simple"
@@ -113,7 +114,7 @@ async def test_an_unset_router_is_bert_at_its_calibrated_threshold(sent, keys, k
 
 
 @pytest.mark.parametrize("router, threshold", [
-    ("bert", 0.4066), ("mf", 0.11593), ("sw_ranking", 0.21647), ("causal_llm", 0.0962)])
+    ("bert", 0.4066), ("sw_ranking", 0.21647), ("causal_llm", 0.0962)])
 async def test_a_named_router_without_a_threshold_gets_its_own_calibration(
         sent, keys, router, threshold):
     _openai_key(keys, True)
@@ -123,11 +124,11 @@ async def test_a_named_router_without_a_threshold_gets_its_own_calibration(
 
 async def test_an_operator_threshold_is_sent_as_configured(sent, keys):
     _openai_key(keys, True)
-    await _route({"router": "mf", "threshold": 0.2})
-    assert (sent[0]["router"], sent[0]["threshold"]) == ("mf", 0.2)
+    await _route({"router": "sw_ranking", "threshold": 0.2})
+    assert (sent[0]["router"], sent[0]["threshold"]) == ("sw_ranking", 0.2)
 
 
-@pytest.mark.parametrize("router", ["mf", "sw_ranking"])
+@pytest.mark.parametrize("router", ["sw_ranking"])
 async def test_an_embedding_router_without_an_openai_key_falls_back_to_bert_and_logs_it(
         sent, keys, caplog, router):
     _openai_key(keys, False)
@@ -148,15 +149,45 @@ async def test_a_local_router_needs_no_key_and_is_used_as_configured(sent, keys,
     assert "X-Embedding-Key" not in sent.headers[0]
 
 
+# ── the removed mf router (2026-10-18) ────────────────────────────────────────
+
+async def test_the_removed_mf_router_runs_as_bert_and_warns_once(sent, keys, make_ctx, caplog):
+    """mf's checkpoint was published with no licence, so the router is no longer offered. A
+    config still naming it gets bert at bert's threshold (not mf's), no key is looked up for
+    it, the fields say bert, and the tenant is warned once, not on every request."""
+    g06._ROUTELLM_REMOVED_WARNED.clear()
+    ctx = make_ctx(MESSAGES)
+    _openai_key(keys, True, tenant=ctx.tenant_id)
+    cfg = {"routellm": {**BASE, "router": "mf", "threshold": 0.11593}}
+    with caplog.at_level(logging.WARNING, logger=g06.logger.name):
+        for _ in range(3):
+            tier = await g06._classify_routellm(MESSAGES, {}, cfg, ctx=ctx)
+    assert tier == "simple"
+    assert [(p["router"], p["threshold"]) for p in sent] == [("bert", 0.4066)] * 3
+    assert keys.asked == []
+    assert all("X-Embedding-Key" not in h for h in sent.headers)
+    assert (ctx.savings.routellm_router_used, ctx.savings.routellm_threshold) == ("bert", 0.4066)
+    assert ctx.classifier_fallback is None
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING and "no licence" in r.getMessage()]
+    assert len(warned) == 1 and "'mf'" in warned[0].getMessage()
+
+
+def test_mf_is_in_no_router_table():
+    """Removed means removed: not a threshold, not an embedding router."""
+    assert "mf" not in g06._ROUTELLM_THRESHOLDS
+    assert "mf" not in g06._ROUTELLM_EMBEDDING_ROUTERS
+    assert "mf" in g06._ROUTELLM_REMOVED_ROUTERS
+
+
 # `_token_opt` documents routellm_router_used and routellm_threshold; nothing set them.
-@pytest.mark.parametrize("key, router, threshold", [(True, "mf", 0.2), (False, "bert", 0.4066)])
+@pytest.mark.parametrize("key, router, threshold", [(True, "sw_ranking", 0.2), (False, "bert", 0.4066)])
 async def test_a_decision_records_the_router_and_threshold_it_was_made_with(
         sent, keys, make_ctx, key, router, threshold):
-    """Without an OpenAI key mf runs as bert at bert's threshold, and the fields say so."""
+    """Without an OpenAI key sw_ranking runs as bert at bert's threshold, and the fields say so."""
     ctx = make_ctx(MESSAGES)
     _openai_key(keys, key, tenant=ctx.tenant_id)
     tier = await g06._classify_routellm(
-        MESSAGES, {}, {"routellm": {**BASE, "router": "mf", "threshold": 0.2}}, ctx=ctx)
+        MESSAGES, {}, {"routellm": {**BASE, "router": "sw_ranking", "threshold": 0.2}}, ctx=ctx)
     assert tier == "simple"
     assert (ctx.savings.routellm_router_used, ctx.savings.routellm_threshold) == (router, threshold)
     assert ctx.classifier_fallback is None
@@ -215,7 +246,7 @@ async def test_a_fallback_says_why_and_records_no_decision(
 
 # ── #99: the tenant's own OpenAI key, sent per request · #108: the embedding is priced ──
 
-@pytest.mark.parametrize("router", ["mf", "sw_ranking"])
+@pytest.mark.parametrize("router", ["sw_ranking"])
 async def test_an_embedding_router_sends_the_tenants_own_key(sent, keys, make_ctx, router):
     ctx = make_ctx(MESSAGES)
     _openai_key(keys, True, tenant=ctx.tenant_id)
@@ -234,7 +265,7 @@ async def test_a_tenant_without_its_own_key_gets_bert_and_one_warning(
     _openai_key(keys, False, tenant=ctx.tenant_id)
     if deny:
         keys.denied.add(("openai", ctx.tenant_id))
-    cfg = {"routellm": {**BASE, "router": "mf"}}
+    cfg = {"routellm": {**BASE, "router": "sw_ranking"}}
     with caplog.at_level(logging.WARNING, logger=g06.logger.name):
         for _ in range(3):
             await g06._classify_routellm(MESSAGES, {}, cfg, ctx=ctx)
@@ -248,7 +279,7 @@ async def test_the_key_never_reaches_a_log_line(sent, keys, make_ctx, caplog):
     ctx = make_ctx(MESSAGES)
     _openai_key(keys, True, tenant=ctx.tenant_id)
     with caplog.at_level(logging.DEBUG):
-        await g06._classify_routellm(MESSAGES, {}, {"routellm": {**BASE, "router": "mf"}}, ctx=ctx)
+        await g06._classify_routellm(MESSAGES, {}, {"routellm": {**BASE, "router": "sw_ranking"}}, ctx=ctx)
     assert caplog.records and all(TENANT_KEY not in r.getMessage() for r in caplog.records)
 
 
@@ -258,7 +289,7 @@ async def test_the_embedding_is_booked_as_a_side_call(sent, keys, make_ctx):
     _openai_key(keys, True, tenant=ctx.tenant_id)
     sent.answer = {"routed_model": "weak-m",
                    "embedding_usage": {"model": "text-embedding-3-small", "prompt_tokens": 12}}
-    await g06._classify_routellm(MESSAGES, {}, {"routellm": {**BASE, "router": "mf"}}, ctx=ctx)
+    await g06._classify_routellm(MESSAGES, {}, {"routellm": {**BASE, "router": "sw_ranking"}}, ctx=ctx)
     assert ctx.provider_calls == [{"model": "openai/text-embedding-3-small", "prompt_tokens": 12,
                                    "completion_tokens": 0, "reasoning_tokens": 0,
                                    "cached_tokens": 0, "side": True}]

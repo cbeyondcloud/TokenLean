@@ -21,7 +21,7 @@ _SIDECAR_APP = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "src", "routellm-sidecar", "app.py"))
 
 
-# RouteLLM's mf and sw_ranking embed with ONE module-level OpenAI client that these three
+# RouteLLM's sw_ranking embeds with ONE module-level OpenAI client that these three
 # modules hold (similarity_weighted.utils builds it; the other two import the name).
 _CLIENT_MODULES = ("routellm.routers.similarity_weighted.utils",
                    "routellm.routers.matrix_factorization.model", "routellm.routers.routers")
@@ -46,7 +46,7 @@ class _FakeController:
 
     def route(self, prompt, router, threshold):
         self.routed.append((prompt, router, threshold))
-        if router in ("mf", "sw_ranking"):
+        if router in ("sw_ranking",):
             sys.modules["routellm.routers.routers"].OPENAI_CLIENT.embeddings.create(
                 input=[prompt], model="text-embedding-3-small")
         return self.strong if "prove" in prompt else self.weak
@@ -99,7 +99,7 @@ def client(app_module):
     return TestClient(app_module.app)
 
 
-def _route(client, content, router="mf", key=KEY, **extra):
+def _route(client, content, router="sw_ranking", key=KEY, **extra):
     body = {"messages": [{"role": "system", "content": "be brief"},
                          {"role": "user", "content": content}],
             "router": router, "threshold": 0.2,
@@ -128,9 +128,16 @@ class TestRoute:
         assert r.status_code == 200, r.text
         assert set(r.json()) == {"routed_model", "reason", "router_used"}
 
+    def test_the_removed_mf_router_is_refused_before_anything_loads(self, client):
+        """mf's checkpoint has no licence (removed 2026-10-18): a 400 that names the reason,
+        no controller built, nothing embedded."""
+        r = _route(client, "hi there", router="mf")
+        assert r.status_code == 400 and "no licence" in r.json()["detail"]
+        assert _OpenAI.embedded == [] and _FakeController.built == []
+
     def test_the_last_turn_and_the_threshold_are_what_is_routed(self, client):
         _route(client, [{"type": "text", "text": "prove it"}, {"type": "image_url"}])
-        assert _FakeController.built[0].routed == [("prove it", "mf", 0.2)]
+        assert _FakeController.built[0].routed == [("prove it", "sw_ranking", 0.2)]
 
     def test_env_names_when_the_request_names_none(self, client, monkeypatch):
         monkeypatch.setenv("ROUTELLM_WEAK_MODEL", "env-weak")
@@ -158,10 +165,10 @@ class TestDefaults:
 
 
 class TestTheTenantsKey:
-    """#99: mf and sw_ranking embedded with ONE platform key from the sidecar's environment;
+    """#99: sw_ranking embedded with ONE platform key from the sidecar's environment;
     the key is each tenant's own (the owner's rule), sent per request in X-Embedding-Key."""
 
-    @pytest.mark.parametrize("router", ["mf", "sw_ranking"])
+    @pytest.mark.parametrize("router", ["sw_ranking"])
     def test_an_embedding_router_embeds_with_the_request_key(self, client, router):
         r = _route(client, "hi there", router=router)
         assert r.status_code == 200, r.text
@@ -169,7 +176,7 @@ class TestTheTenantsKey:
         # #108: the usage comes back, so G06 can price the call.
         assert r.json()["embedding_usage"] == {"model": "text-embedding-3-small", "prompt_tokens": 7}
 
-    @pytest.mark.parametrize("router", ["mf", "sw_ranking"])
+    @pytest.mark.parametrize("router", ["sw_ranking"])
     def test_an_embedding_router_without_a_key_is_refused(self, client, router):
         r = _route(client, "hi there", router=router, key=None)
         assert r.status_code == 400 and "X-Embedding-Key" in r.json()["detail"]
@@ -208,7 +215,7 @@ class TestTheTenantsKey:
             async with httpx.AsyncClient(transport=transport, base_url="http://sidecar") as c:
                 async def one(text, key):
                     return await c.post("/route", headers={"X-Embedding-Key": key}, json={
-                        "messages": [{"role": "user", "content": text}], "router": "mf",
+                        "messages": [{"role": "user", "content": text}], "router": "sw_ranking",
                         "strong_model": "s", "weak_model": "w"})
                 return await asyncio.gather(*(one(f"text-{i}", f"sk-key-{i}") for i in range(6)))
 
@@ -248,5 +255,5 @@ class TestControllers:
         # Building a router loads its checkpoint; causal_llm's is an 8B model.
         _route(client, "hi")
         _route(client, "hello")
-        _route(client, "hi", router="sw_ranking")
-        assert [c.routers for c in _FakeController.built] == [["mf"], ["sw_ranking"]]
+        _route(client, "hi", router="bert", key=None)
+        assert [c.routers for c in _FakeController.built] == [["sw_ranking"], ["bert"]]

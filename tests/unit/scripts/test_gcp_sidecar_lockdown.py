@@ -69,7 +69,7 @@ def test_routellm_deploys_private_and_reachable_from_the_proxy():
 
 
 def test_no_deploy_gives_routellm_a_platform_openai_key():
-    """#99: mf and sw_ranking embed with each tenant's own OpenAI key, which G06 sends per
+    """#99: sw_ranking embeds with each tenant's own OpenAI key, which G06 sends per
     request, so nothing seeds, mounts or asks for a platform one any more, and Terraform no
     longer declares the old secret (the next apply deletes it)."""
     import yaml

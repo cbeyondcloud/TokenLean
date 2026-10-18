@@ -1154,17 +1154,26 @@ async def _evaluate_response_confidence(
 # RouteLLM's threshold per router for ~50% strong-model calls: `routellm.calibrate_threshold
 # --strong-model-pct 0.5` on its published Chatbot Arena scores. A threshold only means
 # something for the router it was calibrated on. bert is the default router: its checkpoint
-# is Apache-2.0 (MIT base model), while mf's has no licence and causal_llm's is a Meta Llama 3
-# derivative (see THIRD_PARTY_LICENSES.md).
-_ROUTELLM_THRESHOLDS = {"bert": 0.4066, "mf": 0.11593, "sw_ranking": 0.21647, "causal_llm": 0.0962}
+# is Apache-2.0 (MIT base model), while causal_llm's is a Meta Llama 3 derivative (see
+# THIRD_PARTY_LICENSES.md).
+_ROUTELLM_THRESHOLDS = {"bert": 0.4066, "sw_ranking": 0.21647, "causal_llm": 0.0962}
 _ROUTELLM_DEFAULT_ROUTER = "bert"
-# mf and sw_ranking embed the routed turn with OpenAI inside the sidecar, with the TENANT's own
-# key (the owner's rule: every model key is the tenant's), sent per request in this header.
-_ROUTELLM_EMBEDDING_ROUTERS = ("mf", "sw_ranking")
+# Routers RouteLLM ships that this proxy no longer offers, with the reason. A config that still
+# names one gets bert, at bert's threshold, and a warning: silently routing with it would be
+# using a model nobody has the right to use. The sidecar refuses it too (400).
+_ROUTELLM_REMOVED_ROUTERS = {
+    "mf": "its checkpoint, routellm/mf_gpt4_augmented, was published with no licence "
+          "(removed 2026-10-18; see THIRD_PARTY_LICENSES.md)",
+}
+# sw_ranking embeds the routed turn with OpenAI inside the sidecar, with the TENANT's own key
+# (the owner's rule: every model key is the tenant's), sent per request in this header.
+_ROUTELLM_EMBEDDING_ROUTERS = ("sw_ranking",)
 _ROUTELLM_EMBEDDING_PROVIDER = "openai"
 _ROUTELLM_KEY_HEADER = "X-Embedding-Key"
-# When a tenant without an OpenAI key was last warned that its mf/sw_ranking runs as bert.
+# When a tenant without an OpenAI key was last warned that its sw_ranking runs as bert, and
+# when a tenant was last warned that it names a removed router.
 _ROUTELLM_NO_KEY_WARNED: Dict[str, float] = {}
+_ROUTELLM_REMOVED_WARNED: Dict[str, float] = {}
 
 
 async def _routellm_embedding_key(ctx: Optional[RequestContext]) -> Optional[str]:
@@ -1180,6 +1189,22 @@ async def _routellm_embedding_key(ctx: Optional[RequestContext]) -> Optional[str
         logger.warning("G06 RouteLLM: key lookup for tenant %s failed (%s)",
                        tenant_id, type(exc).__name__)
         return None
+
+
+def _warn_routellm_removed(ctx: Optional[RequestContext], router: str,
+                           routellm_cfg: Dict[str, Any]) -> None:
+    """Once per tenant per ``routellm.warn_every_s``: the config names a removed router."""
+    tenant_id = getattr(ctx, "tenant_id", None) or "default"
+    now = time.monotonic()
+    last = _ROUTELLM_REMOVED_WARNED.get(tenant_id)
+    if last is not None and now - last < float(routellm_cfg.get("warn_every_s", 3600)):
+        return
+    _ROUTELLM_REMOVED_WARNED[tenant_id] = now
+    logger.warning(
+        "G06 RouteLLM: router=%r is no longer available (%s) and tenant %s still names it "
+        "— using the bert router at its threshold %s instead",
+        router, _ROUTELLM_REMOVED_ROUTERS[router], tenant_id, _ROUTELLM_THRESHOLDS["bert"],
+    )
 
 
 def _warn_routellm_without_key(ctx: Optional[RequestContext], router: str,
@@ -1231,7 +1256,13 @@ async def _classify_routellm(
         )
         return _fall_back("no_config")
 
-    # P8 / #99: the mf/sw_ranking routers compute OpenAI embeddings in the sidecar, with the
+    # A removed router (mf: unlicensed checkpoint) is replaced by bert at bert's threshold,
+    # with a warning, before any key is looked up for it.
+    if router in _ROUTELLM_REMOVED_ROUTERS:
+        _warn_routellm_removed(ctx, router, routellm_cfg)
+        router, threshold = _ROUTELLM_DEFAULT_ROUTER, _ROUTELLM_THRESHOLDS[_ROUTELLM_DEFAULT_ROUTER]
+
+    # P8 / #99: the sw_ranking router computes OpenAI embeddings in the sidecar, with the
     # tenant's own OpenAI key. A tenant without one (e.g. an Anthropic/Gemini-only account)
     # gets the bert router (a local classifier, no embeddings) at bert's own threshold: the
     # configured one was calibrated for the other router. If bert cannot run either, the

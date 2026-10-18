@@ -21,6 +21,16 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-18
+
+### RouteLLM's `mf` router is no longer offered: its checkpoint has no licence — Bug fix
+G06's RouteLLM classifier exposed four routers. The `mf` (matrix-factorization) one loads
+`routellm/mf_gpt4_augmented`, published as weights only, with no licence file and none on the
+model card, so nobody has a right to use it. It was never the default (`bert`, Apache-2.0, is), but
+one config line turned it on. The proxy now treats a config naming `mf` as `bert` at bert's own
+threshold and warns once per tenant; the sidecar refuses `mf` with a 400 before loading anything.
+`bert`, `sw_ranking` (tenant's own OpenAI key) and `causal_llm` (Meta Llama 3 licence) are unchanged.
+
 ## 2026-10-16
 
 ### o3-mini, o4-mini and o3 are now priced at OpenAI's list, so routing no longer moves them to a costlier model — Bug fix

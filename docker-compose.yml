@@ -240,7 +240,7 @@ services:
       LOG_LEVEL: INFO
       ROUTELLM_STRONG_MODEL: ${ROUTELLM_STRONG_MODEL:-gpt-4o}
       ROUTELLM_WEAK_MODEL: ${ROUTELLM_WEAK_MODEL:-gpt-4o-mini}
-      # No OpenAI key here: mf/sw_ranking embed with the key G06 sends per request (the proxy's
+      # No OpenAI key here: sw_ranking embeds with the key G06 sends per request (the proxy's
       # LLM_KEY_OPENAI, or each tenant's own under the portal).
     networks:
       - token-opt-net

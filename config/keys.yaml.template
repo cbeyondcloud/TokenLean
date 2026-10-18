@@ -11,7 +11,7 @@ llm_keys:
   # running gcp-deploy.sh, then fill that provider's key below instead of openai.
   openai:    "sk-proj-..."       # default-provider key (REQUIRED for the default setup)
 
-  # (RouteLLM's mf/sw_ranking routers need no key of their own: they embed with the OpenAI
+  # (RouteLLM's sw_ranking router needs no key of its own: it embeds with the OpenAI
   #  key the proxy resolves for each request.)
 
   # ── OPTIONAL (skip if you don't use these providers) ───────────────────────────

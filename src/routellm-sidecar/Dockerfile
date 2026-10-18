@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
-# CPU-only torch: routellm's mf/causal_llm routers pull torch transitively. requirements.txt
+# CPU-only torch: routellm's causal_llm router pulls torch transitively. requirements.txt
 # leaves it (and its CUDA companions) out, so it is pinned here: at the version
 # requirements.in names, which the pins are resolved against.
 RUN pip install --no-cache-dir torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu

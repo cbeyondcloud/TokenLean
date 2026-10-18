@@ -536,8 +536,8 @@ class TestG06Routing:
         ctx.config["groups"]["G6_routing"]["classifier"] = "routellm"
         ctx.config["groups"]["G6_routing"]["routellm"] = {
             "url": "http://routellm-svc:8081",
-            "router": "mf",
-            "threshold": 0.11593,
+            "router": "sw_ranking",
+            "threshold": 0.21647,
             "weak_model": "gpt-4o-mini",
             "strong_model": "gpt-4-1106-preview",
             "model_map": {"weak": "simple", "strong": "complex"},
@@ -547,7 +547,7 @@ class TestG06Routing:
         mock_resp.raise_for_status = MagicMock()
         spans = []
 
-        async def tenant_key(provider, tenant_id, ctx=None):   # mf embeds with the tenant's key
+        async def tenant_key(provider, tenant_id, ctx=None):   # sw_ranking embeds with the tenant's key
             return "sk-tenant" if provider == "openai" else None
 
         with patch("middleware.g06_routing.httpx.AsyncClient", return_value=FakeClient(mock_resp)), \
@@ -561,8 +561,8 @@ class TestG06Routing:
         assert ctx.savings.routing_mode == "routellm"
         # _token_opt documents both; the trace span carries them too.
         meta = ctx.savings.to_langfuse_metadata()
-        assert (meta["routellm_router_used"], meta["routellm_threshold"]) == ("mf", 0.11593)
-        assert (spans[-1]["routellm_router_used"], spans[-1]["routellm_threshold"]) == ("mf", 0.11593)
+        assert (meta["routellm_router_used"], meta["routellm_threshold"]) == ("sw_ranking", 0.21647)
+        assert (spans[-1]["routellm_router_used"], spans[-1]["routellm_threshold"]) == ("sw_ranking", 0.21647)
         assert "routellm_confidence" not in spans[-1]
 
     async def test_routellm_fallback_on_error(self, make_ctx):
@@ -573,8 +573,8 @@ class TestG06Routing:
         ctx.config["groups"]["G6_routing"]["classifier"] = "routellm"
         ctx.config["groups"]["G6_routing"]["routellm"] = {
             "url": "http://routellm-svc:8081",
-            "router": "mf",
-            "threshold": 0.11593,
+            "router": "sw_ranking",
+            "threshold": 0.21647,
             "weak_model": "gpt-4o-mini",
             "strong_model": "gpt-4-1106-preview",
             "model_map": {"weak": "simple", "strong": "complex"},
@@ -597,8 +597,8 @@ class TestG06Routing:
         ctx.config["groups"]["G6_routing"]["classifier"] = "routellm"
         ctx.config["groups"]["G6_routing"]["routellm"] = {
             "url": "http://routellm-svc:8081",
-            "router": "mf",
-            "threshold": 0.11593,
+            "router": "sw_ranking",
+            "threshold": 0.21647,
             "weak_model": "gpt-4o-mini",
             "strong_model": "gpt-4-1106-preview",
             "model_map": {"weak": "simple", "strong": "medium"},  # strong → medium, not complex
