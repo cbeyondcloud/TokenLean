@@ -668,6 +668,7 @@ All parameters externalised in `config/config.yaml.template` — no hardcoded va
 - **Per-tenant precedence** — a tenant's stored overrides (Postgres) win over `tenants.<id>` YAML, which wins over the base config; all hot-reloaded on the same 60s cycle
 - Optional **data-retention purge** for stored request artefacts (off by default)
 - **Quality-safe defaults** — every savings-vs-quality knob ships at a quality-preserving default; tune per workload using the [Tuning Knobs table](#tuning-knobs--savings-vs-quality) above
+- **Profile overlays** — `CONFIG_OVERLAYS` names YAML files deep-merged over the config (a profile states only what it changes); `config/profiles/agentic.yaml` is the gateway-only **LITE** profile, which runs routing-by-model, failover, limits, metering and caching with every prompt-, model- or answer-changing optimisation off
 
 See [docs/config-reference.md](docs/config-reference.md) for all parameters.
 

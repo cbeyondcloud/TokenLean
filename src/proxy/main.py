@@ -153,7 +153,8 @@ async def lifespan(app: FastAPI):
     # memoised instance and the cold cost is paid off the request path.
     async def _warm_l2_embedding_model():
         g5 = (cfg.get("groups", {}) or {}).get("G5_cache", {}) or {}
-        if not g5.get("enabled", True):
+        from middleware.g05_cache import l2_enabled
+        if not g5.get("enabled", True) or not l2_enabled(g5):
             return
         model_name = g5.get("l2_embedding_model", "BAAI/bge-small-en-v1.5")
         try:

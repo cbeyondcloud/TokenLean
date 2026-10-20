@@ -49,6 +49,15 @@ verification for any outbound HTTPS call made through certifi's bundle (provider
 lockfiles now pin certifi 2026.10.19, bumped with `compile-requirements.sh --upgrade-package certifi`; no
 other pin moves.
 
+### Profile overlays and a gateway-only LITE profile; the semantic cache tier can be switched off on its own — Enhancement (OSS)
+New `CONFIG_OVERLAYS` env var: YAML files deep-merged over the config in order, on every load. A missing overlay
+fails the load instead of being skipped. `config/profiles/agentic.yaml` is the first profile ("LITE"). It keeps
+the gateway (auth, model-based provider selection, failover, limits and spend caps, metering, provider prompt
+caching, exact-match caching, trust & safety in `flag` mode) and turns off every group that changes the prompt, the
+model or the answer. A test checks that the provider receives the request unchanged. New `G5_cache.l2_enabled`
+(default `true`) turns off semantic matching and keeps exact-match caching.
+- **OSS:** all of it; nothing changes unless `CONFIG_OVERLAYS` or `l2_enabled: false` is set.
+
 ### Every call now reports what it actually cost: `x-tokenlean-cost-usd`, and an opt-in cost frame on streams — Enhancement (OSS)
 The `x-tokenlean-*` headers said what a call saved, never what it cost; the actual cost was only in the
 OpenAI-shaped body. Non-streamed responses on every route now carry `x-tokenlean-cost-usd` (6 dp, `0.000000`

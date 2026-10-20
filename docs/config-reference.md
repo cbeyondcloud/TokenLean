@@ -18,6 +18,15 @@ params file is read by nothing, and the proxy logs a warning. This reference cov
 optimisation groups **G0–G28** (27 implemented; G27 is reserved); the tables below show the most
 commonly tuned keys per group, not every field.
 
+**Profile overlays (`CONFIG_OVERLAYS`).** An environment variable naming YAML files,
+comma-separated, that are deep-merged over the loaded config in order, after the params files and
+before `${VAR}` expansion, on every load and hot reload. An overlay states only what it changes,
+at any depth: mappings merge key by key, and any other value (a list, a scalar) replaces. Unset,
+nothing changes. A missing, unreadable or non-mapping overlay fails the load — startup refuses
+to start and a hot reload keeps the running config — because an overlay that exists to switch
+features off must never be dropped quietly. Shipped profiles live in `config/profiles/` (e.g.
+`agentic.yaml`, the gateway-only LITE profile used by `deploy/lite/`).
+
 ## Top-level sections
 
 | Section | Purpose |
@@ -438,6 +447,7 @@ listed here until 2026-10-01; nothing read it.
 | `l1_ttl_seconds` | `3600` | Redis exact-match TTL |
 | `l2_similarity_threshold` | `0.95` | Semantic similarity threshold. **0.95 since 2026-10-16 (it was 0.90)**: questions that differ only in an entity ("Gold"/"Silver" tier, "Windows"/"Linux") reached 0.90 in 6 of 30 test pairs and never reached 0.95, while genuine paraphrases reached 0.90 in only 2 of 20, so little legitimate reuse is lost. An embedding cannot separate opposite meanings at any threshold ("available" / "not available" scored 0.97): this narrows the risk, it does not remove it, and `x_cache_semantic: false` turns semantic reuse off per request. Lower = more cache hits and more wrong-answer risk. The lookup takes the tenant's nearest stored question through an HNSW index on `cache_l2.embedding`, which the proxy builds in the background (`CONCURRENTLY`) on first use, and serves it only within this threshold. pgvector 0.8 or later keeps the index scan going past other tenants' rows; on an older pgvector a tenant with few rows among many can miss (`ALTER EXTENSION vector UPDATE`) |
 | `l2_literal_guard` | `true` | Serve a semantic (L2) match only when both questions carry the same numbers, in the same order (every digit run in the user turns, folded into the L2 scope). An embedding barely separates two requests that differ only in their numbers — 50 order batches with different ids and amounts matched each other at 0.90–0.92 — so without this one request's answer is served for another's figures. Questions without digits keep their scope and existing rows unchanged. Questions that differ only in words (names, places) are still separated by the embedding alone. Operator-only |
+| `l2_enabled` | `true` | The semantic (L2) tier on/off. `false` = exact-match (L1) caching only: no embedding, no `cache_l2` lookup or store, no embedding-model warm-up at start. For deployments where a near-match answer is never acceptable (agent pipelines, code generation). `x_cache_semantic: false` does the same per request |
 | `l2_ttl_seconds` | `86400` | pgvector semantic cache TTL. Enforced on every read: a row past its expiry is never served. The store also deletes expired rows (one bounded batch per tenant every 5 minutes, more while a backlog remains), whether or not `retention` is enabled |
 | `auto_ttl_enabled` | `true` | Adapt both TTLs to the tenant's recent hit rate per tier, counted in hourly windows (the current and previous one): above 80% a new entry is stored for 25% longer, below 20% for 25% shorter, and with fewer than 10 lookups as configured. `false` = the configured TTLs, and no hit/miss counting |
 | `auto_ttl_min_multiplier` | `0.25` | Floor on an adapted TTL, as a multiple of the configured one. The adaptation is 25% either way, so only a value above `0.75` changes anything |

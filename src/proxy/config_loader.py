@@ -44,6 +44,10 @@ _sleep = time.sleep
 class ConfigLoadError(RuntimeError):
     """The config could not be loaded by a caller that cannot run without one."""
 
+
+class ConfigOverlayError(ValueError):
+    """A file named by CONFIG_OVERLAYS is missing, unreadable or not a mapping."""
+
 # Matches ${VAR} and ${VAR:-default} (shell-style) inside config string values.
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -144,6 +148,45 @@ def merge_params_dir(base: Dict[str, Any], params_dir: str) -> Dict[str, Any]:
     return result
 
 
+def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+    """``overlay`` merged over ``base`` into a new dict: mappings merge key by key at every
+    depth; any other value (list, scalar, null) replaces. Neither input is modified."""
+    import copy
+    result = copy.deepcopy(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def overlay_paths() -> List[str]:
+    """The overlay files named by ``CONFIG_OVERLAYS`` (comma-separated, applied in order)."""
+    return [p.strip() for p in os.getenv("CONFIG_OVERLAYS", "").split(",") if p.strip()]
+
+
+def apply_overlays(base: Dict[str, Any], paths: List[str]) -> Dict[str, Any]:
+    """Deep-merge each overlay file over ``base``, in order (a deployment profile states only
+    what it changes, at any depth, over the shipped config). A missing, unreadable or
+    non-mapping overlay RAISES: a profile that exists to switch things off must never be
+    dropped quietly, leaving them on. An empty file changes nothing."""
+    result = base
+    for path in paths:
+        try:
+            data = _load_from_file(path)
+        except Exception as exc:
+            raise ConfigOverlayError(f"config overlay {path} could not be read: {exc}") from exc
+        if data is None:
+            continue
+        if not isinstance(data, dict):
+            raise ConfigOverlayError(f"config overlay {path} must be a mapping, "
+                             f"got {type(data).__name__}")
+        result = deep_merge(result, data)
+        logger.debug("Applied config overlay: %s", path)
+    return result
+
+
 def _uses_gcs() -> bool:
     storage_backend = os.getenv("STORAGE_BACKEND", "gcs").lower().strip()
     return bool(os.getenv("CONFIG_GCS_BUCKET", "")) and storage_backend != "local"
@@ -184,6 +227,9 @@ def _load_once(reload: bool = False) -> Dict[str, Any]:
     params_dir = raw.get("params_dir", "")
     if params_dir:
         raw = merge_params_dir(raw, params_dir)
+    # Deployment profile overlays (CONFIG_OVERLAYS), after the params files so a profile has
+    # the last word, and before ${VAR} expansion so overlays can use placeholders too.
+    raw = apply_overlays(raw, overlay_paths())
     # Resolve ${VAR} / ${VAR:-default} placeholders from the environment so all
     # tunable defaults live in config.yaml + .env, never hardcoded in the proxy.
     raw = expand_env_vars(raw)
@@ -223,7 +269,7 @@ def load_config(required: bool = False) -> Dict[str, Any]:
                 _sleep(_REQUIRED_LOAD_BACKOFF_SECONDS * 2 ** (attempt - 1))
                 continue
             if required:
-                hint = "" if _uses_gcs() else (
+                hint = "" if _uses_gcs() or isinstance(exc, ConfigOverlayError) else (
                     " (for a local deployment, copy config/config.yaml.template to it)")
                 raise ConfigLoadError(
                     f"could not load config from {source}: {exc}{hint}") from exc

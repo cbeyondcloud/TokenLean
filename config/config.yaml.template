@@ -780,6 +780,11 @@ groups:
     l2_literal_guard: true
     semantic_skip_multiturn: true
     l2_ttl_seconds: 86400
+    # The semantic (L2) tier on/off. false = exact-match (L1) caching only: no embedding, no
+    # cache_l2 lookup or store, and no embedding-model warm-up at start. For deployments
+    # where serving a NEAR-match answer is never acceptable (agent pipelines, code
+    # generation). Per request, `x_cache_semantic: false` does the same.
+    l2_enabled: true
     step_cache_enabled: true
     step_cache_ttl_seconds: 86400
     # (l3_enabled / l3_similarity_threshold removed 2026-09-07 — the L3 tier never
