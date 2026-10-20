@@ -21,10 +21,12 @@ commonly tuned keys per group, not every field.
 **Profile overlays (`CONFIG_OVERLAYS`).** An environment variable naming YAML files,
 comma-separated, that are deep-merged over the loaded config in order, after the params files and
 before `${VAR}` expansion, on every load and hot reload. An overlay states only what it changes,
-at any depth: mappings merge key by key, and any other value (a list, a scalar) replaces. Unset,
-nothing changes. A missing, unreadable or non-mapping overlay fails the load — startup refuses
+at any depth: mappings merge key by key, a list or scalar replaces, and a null (a key with
+nothing under it, as in a half-edited file) changes nothing — it never wipes a section. Paths
+cannot contain commas. Unset, nothing changes. A missing, unreadable or non-mapping overlay fails the load — startup refuses
 to start and a hot reload keeps the running config — because an overlay that exists to switch
-features off must never be dropped quietly. Shipped profiles live in `config/profiles/` (e.g.
+features off must never be dropped quietly. Such an error is not retried: it is the operator's
+to fix, not a storage blip. Shipped profiles live in `config/profiles/` (e.g.
 `agentic.yaml`, the gateway-only LITE profile used by `deploy/lite/`).
 
 ## Top-level sections
@@ -91,9 +93,10 @@ guardrails never reached a provider — those echo `"sent": null` with a
 |---|---|---|
 | `observability.stream_cost_event` | `false` | End each completed stream with its actual cost as an SSE comment frame |
 
-A non-streamed response always carries its actual cost in the `x-tokenlean-cost-usd` header
-(USD, 6 dp; `0.000000` when no provider was paid — a cache hit, bypass or block). A stream
-cannot: headers go out before the first chunk. With this key `true`, a stream that completes
+A served (2xx) non-streamed completion carries its actual cost in the `x-tokenlean-cost-usd`
+header (USD, 6 dp; `0.000000` when no provider was paid — a cache hit, bypass or block). It is
+not on the `202` of a deferred batch request, the batch-results poll, or error responses. A
+stream cannot: headers go out before the first chunk. With this key `true`, a stream that completes
 ends with one extra frame, just before its terminator (`data: [DONE]` on the OpenAI route;
 after `message_stop` on Anthropic, after the last chunk on Gemini):
 
@@ -485,6 +488,7 @@ entries are rebuilt once.
 | `canary_pct` | `0` | For `strategy: canary` — percentage of traffic routed to the tier's second (candidate) model |
 | `least_latency_alpha` | `0.3` | For `strategy: least_latency` — EWMA smoothing factor (0–1) for the per-model latency estimate; higher reacts faster to recent calls, lower is smoother/slower to react. Hot-reloadable — no redeploy needed to tune it |
 | `on_unreachable_tier` | `fallback` | When a routed tier model's provider has **no usable credential** (key or ambient creds): `fallback` serves the caller's own requested model (cost-routing no-ops); `error` returns a clean 503 |
+| `on_unconfigured_model` | `substitute` | A requested model matching no `providers[].models` / `model_prefixes`, on a path that does not route (G6 off or no tiers): `substitute` serves `proxy.default_model` and discloses it in `x-tokenlean-model-substituted`; `reject` answers 400 (`code: model_not_configured`) without calling any provider. Read even while G6 is off. Any other value behaves as `substitute` and logs a warning |
 | `cascade_confidence_threshold` | `0.70` | Escalate to the next tier when the current tier's confidence is below this (see *Tuning the cascade threshold* below) |
 | `judge_model` | `""` (empty) | Optional model that scores each tier's response for confidence. Empty → a cheap no-LLM response-adequacy heuristic (`response_confidence.*`) is used instead |
 | `judge_timeout_ms` | `2000` | Max wait for a `judge_model` confidence score before falling back |

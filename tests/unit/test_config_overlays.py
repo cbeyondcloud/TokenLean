@@ -107,3 +107,37 @@ def test_deep_merge_does_not_mutate_inputs():
     merged = deep_merge(base, over)
     assert merged == {"a": {"b": 1, "c": 2}}
     assert base == {"a": {"b": 1}} and over == {"a": {"c": 2}}
+
+
+@pytest.mark.parametrize("text", [
+    "groups:\n",                              # an empty section
+    "groups:\n  G5_cache:\n",                 # an empty group
+    "groups:\n  G5_cache:\n    nested:\n",     # an empty nested map
+    "proxy:\n  port: ~\n",                    # an explicit null scalar
+])
+def test_a_null_value_in_an_overlay_changes_nothing(base, tmp_path, monkeypatch, text):
+    """A key written with nothing under it (a half-edited overlay) must never replace what
+    the config has: `groups:` alone used to put groups=None live on a hot reload."""
+    ov = tmp_path / "ov.yaml"
+    ov.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("CONFIG_OVERLAYS", str(ov))
+    cfg = config_loader.load_config(required=True)
+    assert cfg["groups"]["G5_cache"] == {"enabled": True, "l1_ttl_seconds": 3600,
+                                         "nested": {"x": 1, "y": 2}}
+    assert cfg["proxy"]["port"] == 4000
+
+
+def test_deep_merge_skips_none_at_any_depth():
+    assert deep_merge({"a": {"b": 1}, "c": 2}, {"a": None, "c": None, "d": None}) == \
+        {"a": {"b": 1}, "c": 2}
+
+
+def test_a_bad_overlay_is_not_retried(base, tmp_path, monkeypatch):
+    """Retrying rides out a storage blip; a missing or invalid overlay is the operator's
+    mistake and will not fix itself, so it fails at once, without the 1s + 2s of sleeps."""
+    sleeps = []
+    monkeypatch.setattr(config_loader, "_sleep", sleeps.append)
+    monkeypatch.setenv("CONFIG_OVERLAYS", str(tmp_path / "missing.yaml"))
+    with pytest.raises(ConfigLoadError):
+        config_loader.load_config(required=True)
+    assert sleeps == []

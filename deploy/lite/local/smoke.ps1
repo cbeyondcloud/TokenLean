@@ -6,8 +6,8 @@
   smoke.ps1   model: $env:SMOKE_MODEL, else the mock (after up.ps1 -Mock), else a model for
               the first provider key set in .env.lite
 
-  Checks: /health; an OpenAI chat completion (x-tokenlean-request-id + x-tokenlean-cost-usd);
-  the same streamed (the final ': x-tokenlean-cost' frame and [DONE]); an Anthropic
+  Checks: /health; an OpenAI chat completion (x-tokenlean-request-id + x-tokenlean-cost-usd,
+  and no x-tokenlean-model-substituted); the same streamed (the final ': x-tokenlean-cost' frame and [DONE]); an Anthropic
   /v1/messages call (x-api-key auth, x-tokenlean-* headers); then a usage row for each of the
   three calls, through /admin/usage-export. TokenLean has no /v1/responses endpoint.
   Live mode makes three small real calls (a fraction of a cent). HTTP only, any engine.
@@ -80,12 +80,16 @@ try {
 # 2. OpenAI chat completion
 $body = "{`"model`":`"$model`",`"max_tokens`":16,`"messages`":[{`"role`":`"user`",`"content`":`"Reply with the word pong. ($nonce a)`"}]}"
 $r = Send-Json '/v1/chat/completions' $body $bearer
-$id1 = ''; $cost1 = ''
-if ($r.Response) { $id1 = Get-Header $r.Response 'x-tokenlean-request-id'; $cost1 = Get-Header $r.Response 'x-tokenlean-cost-usd' }
-if ($r.Status -eq 200 -and $id1 -and $cost1 -and $r.Text -match '"choices"') {
-    Write-Pass "chat completion (cost `$$cost1)"; $ids.Add($id1)
+$id1 = ''; $cost1 = ''; $sub1 = ''
+if ($r.Response) {
+    $id1 = Get-Header $r.Response 'x-tokenlean-request-id'
+    $cost1 = Get-Header $r.Response 'x-tokenlean-cost-usd'
+    $sub1 = Get-Header $r.Response 'x-tokenlean-model-substituted'
+}
+if ($r.Status -eq 200 -and $id1 -and $cost1 -and -not $sub1 -and $r.Text -match '"choices"') {
+    Write-Pass "chat completion (cost `$$cost1, model not substituted)"; $ids.Add($id1)
 } else {
-    Write-Fail "chat completion (status $($r.Status), request-id '$id1', cost '$cost1'): $(Get-Snippet $r.Text)"
+    Write-Fail "chat completion (status $($r.Status), request-id '$id1', cost '$cost1', substituted '$sub1'): $(Get-Snippet $r.Text)"
 }
 
 # 3. OpenAI chat completion, streamed
@@ -107,12 +111,16 @@ if ($r.Status -eq 200 -and $id2 -and $r.Text -match '(?m)^data: \[DONE\]') {
 # 4. Anthropic messages
 $body = "{`"model`":`"$model`",`"max_tokens`":16,`"messages`":[{`"role`":`"user`",`"content`":`"Reply with the word pong. ($nonce c)`"}]}"
 $r = Send-Json '/v1/messages' $body @{ 'x-api-key' = $key; 'anthropic-version' = '2023-06-01' }
-$id3 = ''; $cost3 = ''
-if ($r.Response) { $id3 = Get-Header $r.Response 'x-tokenlean-request-id'; $cost3 = Get-Header $r.Response 'x-tokenlean-cost-usd' }
-if ($r.Status -eq 200 -and $id3 -and $cost3 -and $r.Text -match '"type":"message"') {
-    Write-Pass "messages (cost `$$cost3)"; $ids.Add($id3)
+$id3 = ''; $cost3 = ''; $sub3 = ''
+if ($r.Response) {
+    $id3 = Get-Header $r.Response 'x-tokenlean-request-id'
+    $cost3 = Get-Header $r.Response 'x-tokenlean-cost-usd'
+    $sub3 = Get-Header $r.Response 'x-tokenlean-model-substituted'
+}
+if ($r.Status -eq 200 -and $id3 -and $cost3 -and -not $sub3 -and $r.Text -match '"type":"message"') {
+    Write-Pass "messages (cost `$$cost3, model not substituted)"; $ids.Add($id3)
 } else {
-    Write-Fail "messages (status $($r.Status), request-id '$id3', cost '$cost3'): $(Get-Snippet $r.Text)"
+    Write-Fail "messages (status $($r.Status), request-id '$id3', cost '$cost3', substituted '$sub3'): $(Get-Snippet $r.Text)"
 }
 
 # 5. a usage row for each call (rows are written just after each response)

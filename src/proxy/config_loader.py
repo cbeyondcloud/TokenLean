@@ -48,6 +48,7 @@ class ConfigLoadError(RuntimeError):
 class ConfigOverlayError(ValueError):
     """A file named by CONFIG_OVERLAYS is missing, unreadable or not a mapping."""
 
+
 # Matches ${VAR} and ${VAR:-default} (shell-style) inside config string values.
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -150,10 +151,15 @@ def merge_params_dir(base: Dict[str, Any], params_dir: str) -> Dict[str, Any]:
 
 def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
     """``overlay`` merged over ``base`` into a new dict: mappings merge key by key at every
-    depth; any other value (list, scalar, null) replaces. Neither input is modified."""
+    depth; a list or scalar replaces; a null changes nothing (a key written with nothing
+    under it, as in a half-edited file, must not wipe a section). Neither input is
+    modified."""
     import copy
+
     result = copy.deepcopy(base)
     for key, value in overlay.items():
+        if value is None:
+            continue
         if isinstance(value, dict) and isinstance(result.get(key), dict):
             result[key] = deep_merge(result[key], value)
         else:
@@ -176,12 +182,15 @@ def apply_overlays(base: Dict[str, Any], paths: List[str]) -> Dict[str, Any]:
         try:
             data = _load_from_file(path)
         except Exception as exc:
-            raise ConfigOverlayError(f"config overlay {path} could not be read: {exc}") from exc
+            raise ConfigOverlayError(
+                f"config overlay {path} could not be read: {exc}"
+            ) from exc
         if data is None:
             continue
         if not isinstance(data, dict):
-            raise ConfigOverlayError(f"config overlay {path} must be a mapping, "
-                             f"got {type(data).__name__}")
+            raise ConfigOverlayError(
+                f"config overlay {path} must be a mapping, got {type(data).__name__}"
+            )
         result = deep_merge(result, data)
         logger.debug("Applied config overlay: %s", path)
     return result
@@ -263,7 +272,9 @@ def load_config(required: bool = False) -> Dict[str, Any]:
             return _load_once(reload=not required)
         except Exception as exc:
             source = _config_source()
-            if attempt < attempts:
+            # A missing or invalid overlay is the operator's mistake, not a storage blip:
+            # retrying cannot fix it, so it fails at once.
+            if attempt < attempts and not isinstance(exc, ConfigOverlayError):
                 logger.warning("Config load from %s failed (attempt %d/%d): %s — retrying",
                                source, attempt, attempts, exc)
                 _sleep(_REQUIRED_LOAD_BACKOFF_SECONDS * 2 ** (attempt - 1))

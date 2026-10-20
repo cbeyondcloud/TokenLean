@@ -62,14 +62,16 @@ New `CONFIG_OVERLAYS` env var: YAML files deep-merged over the config in order, 
 fails the load instead of being skipped. `config/profiles/agentic.yaml` is the first profile ("LITE"). It keeps
 the gateway (auth, model-based provider selection, failover, limits and spend caps, metering, provider prompt
 caching, exact-match caching, trust & safety in `flag` mode) and turns off every group that changes the prompt, the
-model or the answer. A test checks that the provider receives the request unchanged. New `G5_cache.l2_enabled`
-(default `true`) turns off semantic matching and keeps exact-match caching.
+model or the answer, plus G21's request-editing knobs and the reasoning-budget raise. Tests show the provider gets the
+messages and parameters unchanged for an OpenAI, an Anthropic, a Gemini and a reasoning model. New
+`G6_routing.on_unconfigured_model` (default `substitute`; LITE `reject`) answers an unknown model with a 400 instead
+of the default model. New `G5_cache.l2_enabled` (default `true`) turns off semantic matching only.
 - **OSS:** all of it; nothing changes unless `CONFIG_OVERLAYS` or `l2_enabled: false` is set.
 
 ### Every call now reports what it actually cost: `x-tokenlean-cost-usd`, and an opt-in cost frame on streams — Enhancement (OSS)
 The `x-tokenlean-*` headers said what a call saved, never what it cost; the actual cost was only in the
-OpenAI-shaped body. Non-streamed responses on every route now carry `x-tokenlean-cost-usd` (6 dp, `0.000000`
-when no provider was paid). A stream cannot add a header once it has started, so with the new operator key
+OpenAI-shaped body. Served non-streamed completions on every route now carry `x-tokenlean-cost-usd` (6 dp,
+`0.000000` when no provider was paid; not the batch 202/poll or errors). A stream cannot add a header once it has started, so with the new operator key
 `observability.stream_cost_event: true` a completed stream ends with `: x-tokenlean-cost {...}` (request id,
 cost, reported/estimated usage). It is an SSE comment, which SDKs skip. Off by default: streams are unchanged.
 - **OSS:** the header always; the stream frame when the operator turns it on.

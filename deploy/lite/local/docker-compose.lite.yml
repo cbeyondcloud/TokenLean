@@ -124,6 +124,11 @@ services:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
     volumes:
       - qdrantdata:/qdrant/storage
+    healthcheck:   # the image has bash but no curl/wget
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   langfuse:
@@ -149,6 +154,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/public/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
     restart: unless-stopped
 
   # A stand-in OpenAI-compatible endpoint (mock/mock_llm.py, standard library only) on the
@@ -161,6 +172,12 @@ services:
     command: ["python", "/app/lite/mock/mock_llm.py"]
     volumes:
       - ./mock:/app/lite/mock:ro
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
 volumes:

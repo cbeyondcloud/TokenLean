@@ -70,6 +70,7 @@ from protocols.base import UnsupportedRequestField, header_params
 import events
 from middleware import RequestContext, record_provider_call
 from middleware.g00_rate_limit import RateLimitExceeded, add_to_spend, counter_prefix
+from middleware.g06_routing import UnconfiguredModelError
 from middleware.g03_doc_pipeline import trigger_doc_ingestion
 # The SAME predicate G05 uses to refuse STORING an empty answer, reused here to refuse
 # SERVING one that is already stored. One definition, so the two sides cannot drift.
@@ -2110,6 +2111,24 @@ async def _serve_core(
     # Run the request-side pipeline (authoritative stage order: middleware/pipeline.py)
     try:
         ctx = await _pipeline.process_request(ctx, request_headers=dict(request.headers))
+    except UnconfiguredModelError as exc:
+        # G6_routing.on_unconfigured_model: reject. Refused before any provider call and
+        # never billed, instead of being answered by proxy.default_model.
+        logger.info("[%s] refused unconfigured model %r", request_id, exc.model)
+        langfuse_tracing.finish_trace(ctx, None)
+        _record_outcome(ctx, _request_start, "400")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": (f"Model '{exc.model}' is not configured on this proxy. Use a "
+                                "model listed under providers[].models or matching a provider's "
+                                "model_prefixes (GET /v1/models)."),
+                    "type": "invalid_request_error",
+                    "code": "model_not_configured",
+                }
+            },
+        )
     except RateLimitExceeded as exc:
         logger.warning(
             "[%s] Rate limit exceeded: %s for %s (retry-after=%d)",

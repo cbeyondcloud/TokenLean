@@ -8,9 +8,18 @@ $LiteDir = $PSScriptRoot
 $LiteEnvFile = Join-Path $LiteDir '.env.lite'
 $LiteStateDir = Join-Path $LiteDir '.state'
 $LiteComposeFile = Join-Path $LiteDir 'docker-compose.lite.yml'
+# Every compose call names this project explicitly (-p), so nothing else can redirect it.
+$LiteProject = 'tokenlean-lite'
 # docker (default) or podman. Both are driven as '<engine> compose ...'.
 $LiteEngine = if ($env:CONTAINER_ENGINE) { $env:CONTAINER_ENGINE } else { 'docker' }
 $LiteAllProfiles = @('--profile', 'qdrant', '--profile', 'langfuse', '--profile', 'mock')
+
+# Compose settings exported for another stack must never steer these scripts: the full
+# TokenLean .env sets COMPOSE_PROJECT_NAME=token-opt, and with it 'down -Purge' would
+# remove that stack's containers and volumes.
+foreach ($name in @('COMPOSE_PROJECT_NAME', 'COMPOSE_FILE', 'COMPOSE_PROFILES')) {
+    [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+}
 
 function Stop-Lite([string]$Message) {
     Write-Host "lite: $Message" -ForegroundColor Red
@@ -30,7 +39,8 @@ function Assert-LiteEngine {
 }
 
 # Set each KEY=value of .env.lite in this process's environment, literally. A variable
-# already set to a non-empty value wins, as it does for compose itself.
+# already set to a non-empty value wins, as it does for compose itself. COMPOSE_* keys are
+# ignored (see above).
 function Import-LiteEnv {
     if (-not (Test-Path $LiteEnvFile)) { Stop-Lite '.env.lite not found - run up.ps1 first' }
     foreach ($line in [IO.File]::ReadAllLines($LiteEnvFile)) {
@@ -39,7 +49,7 @@ function Import-LiteEnv {
         $i = $l.IndexOf('=')
         if ($i -lt 1) { continue }
         $key = $l.Substring(0, $i)
-        if ($key -notmatch '^[A-Za-z0-9_]+$') { continue }
+        if ($key -notmatch '^[A-Za-z0-9_]+$' -or $key.StartsWith('COMPOSE_')) { continue }
         $current = [Environment]::GetEnvironmentVariable($key, 'Process')
         if ([string]::IsNullOrEmpty($current)) {
             [Environment]::SetEnvironmentVariable($key, $l.Substring($i + 1), 'Process')
@@ -54,7 +64,7 @@ function Invoke-LiteCompose([string[]]$ComposeArgs, [string]$EnvFile = $LiteEnvF
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $LiteEngine compose -f $LiteComposeFile --env-file $EnvFile @ComposeArgs | Out-Host
+        & $LiteEngine compose -p $LiteProject -f $LiteComposeFile --env-file $EnvFile @ComposeArgs | Out-Host
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $old

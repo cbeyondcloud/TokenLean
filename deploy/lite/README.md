@@ -3,9 +3,14 @@
 LITE is TokenLean as a **gateway only**. It uses the same code and the same OSS image as the full stack, with the [LITE profile](config/agentic.yaml) applied on top of the shipped config:
 
 - **On:** authentication with per-user proxy keys, choosing the provider from the model name (OpenAI, Anthropic, Gemini, Mistral, Bedrock, Azure, any OpenAI-compatible endpoint), failover, rate limits and spend caps, a `usage_events` row and Prometheus metrics for every call, cost headers, provider prompt caching, and exact-match response caching. The trust and safety checks (PII, prompt injection, context trust, tool eligibility) also run, in `flag` mode, which records findings and never edits or blocks.
-- **Off:** every optimisation that changes the prompt, the model or the answer: compression, routing/cascade, the semantic cache, the step cache, memory, output and reasoning control, tool pruning, and so on.
+- **Off:** every optimisation that changes the prompt, the model or the answer: compression, routing/cascade, the semantic cache, the step cache, memory, output and reasoning control, tool pruning, and so on. Also off: G21's request-editing knobs (system-message reordering, cache_control markers; its provider prompt-cache key stays) and the reasoning-model output-budget raise.
+- **Refused:** a model the config does not know gets a `400` (`model_not_configured`) instead of being answered by the default model.
 
-The provider receives exactly the request the client sent (a test pins this: `tests/unit/test_agentic_profile.py`). Turn optimisations on later one at a time, with your own overlay, after an A/B run on your own evaluation harness.
+What is proven, by `tests/unit/test_agentic_profile.py`: for an OpenAI, an Anthropic, a Gemini and a reasoning model, on a ~35-message request with a repeated turn, a mid-conversation system message, a large JSON tool result and 40 tools, the provider receives the same messages, model and parameters; the only keys added are the credential, timeouts/retries, the provider prompt-cache key and (streams) the usage request; streamed chunks are relayed unchanged. Switching back on any group that acts on such a request is caught by the same comparison; the groups that cannot act on it in a test (they need a sidecar, a registry, a caller opt-in, or never edit) are pinned off by the config checks, each with its reason.
+
+By design, LITE can still answer with a different model in one case: when you configure `resilience.fallbacks` and the requested model fails, the fallback answers (shown in `x-tokenlean-routed-model`). Without fallbacks configured it does not happen.
+
+Turn optimisations on later one at a time, with your own overlay, after an A/B run on your own evaluation harness.
 
 LITE is meant for agent pipelines (such as the agentic SDLC framework) and for teams that want one metered, key-managed endpoint for every LLM provider.
 
@@ -81,7 +86,7 @@ powershell -ExecutionPolicy Bypass -File .\down.ps1
 - OpenAI SDKs: `base_url="http://127.0.0.1:4100/v1"`, `api_key=<TOKENLEAN_API_KEY>`.
 - Anthropic SDKs / Claude Code: `ANTHROPIC_BASE_URL=http://127.0.0.1:4100`, with the key as `x-api-key`.
 - Gemini: `POST /v1beta/models/{model}:generateContent` with `x-goog-api-key`.
-- Every non-streamed response carries `x-tokenlean-request-id`, `x-tokenlean-routed-model`, `x-tokenlean-cost-usd` (what the call cost) and the other `x-tokenlean-*` headers. Every completed stream ends with `: x-tokenlean-cost {"request_id":…,"cost_usd":…}`, an SSE comment that SDKs ignore.
+- Every served non-streamed completion carries `x-tokenlean-request-id`, `x-tokenlean-routed-model`, `x-tokenlean-cost-usd` (what the call cost) and the other `x-tokenlean-*` headers (errors do not). Every completed stream ends with `: x-tokenlean-cost {"request_id":…,"cost_usd":…}`, an SSE comment that SDKs ignore.
 - Usage rows: `POST /admin/usage-export` (your own tenant with a user key; any tenant with the admin key).
 
 ## Customising

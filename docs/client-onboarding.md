@@ -186,9 +186,16 @@ unchanged to Anthropic and Gemini clients.
 | `x-tokenlean-tokens-saved` | `230` | tokens avoided vs the unoptimised baseline |
 | `x-tokenlean-pct-saved` | `51.10` | savings % for the call |
 | `x-tokenlean-cost-saved-usd` | `0.002217` | headline $ saved (alias of the legacy `x-savings-usd`) |
+| `x-tokenlean-cost-usd` | `0.000412` | what the call actually cost (every provider call it made); `0.000000` when no provider was paid (cache hit, bypass, block) |
+| `x-tokenlean-model-substituted` | `gpt-4o-mini` | only when an unconfigured model was answered by the configured default (absent when `G6_routing.on_unconfigured_model: reject`, which refuses it with a 400) |
 | `x-tokenlean-latency-ms` | `812.4` | end-to-end proxy latency, to chart cost against latency |
 | `x-tokenlean-request-id` | `a1b2…` | join key to your traces/logs |
 | `x-trace-id` | `4bf92f35…` | the call's OpenTelemetry trace in the proxy's own tracing, when the operator exports it (`tracing.propagate_trace_id_header`, on by default); sent on streamed answers and refusals too |
+
+The `x-tokenlean-*` headers are on served (2xx) non-streamed completions. They are **not** on
+streamed answers (headers go out before the first chunk; with `observability.stream_cost_event`
+the stream ends with a `: x-tokenlean-cost {...}` comment frame instead), on the `202` a deferred
+batch request gets, on `GET /v1/batch/results/{id}` (a smaller set), or on error responses.
 
 Pick **one** capture point — whichever your org already runs. No application or SDK change is
 required for the first two:

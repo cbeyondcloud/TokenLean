@@ -16,7 +16,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --purge) PURGE=1 ;;
     -h | --help)
-      sed -n '2,10p' "$0"
+      lite_usage "$0"
       exit 0
       ;;
     *) lite_die "unknown option: $1 (see --help)" ;;

@@ -12,6 +12,7 @@
 # First run: creates .env.lite from .env.lite.template and generates its secrets and proxy
 # keys. Engine: CONTAINER_ENGINE=docker (default) or podman.
 set -euo pipefail
+umask 077   # .env.lite holds secrets: owner-only from its first byte (.state is opened below)
 # shellcheck source=_lib.sh
 . "$(cd "$(dirname "$0")" && pwd)/_lib.sh"
 
@@ -26,7 +27,7 @@ while [ $# -gt 0 ]; do
     --mock) MOCK=1 ;;
     --no-build) BUILD=0 ;;
     -h | --help)
-      sed -n '2,15p' "$0"
+      lite_usage "$0"
       exit 0
       ;;
     *) lite_die "unknown option: $1 (see --help)" ;;
@@ -42,23 +43,12 @@ if [ ! -f "$LITE_ENV_FILE" ]; then
   echo "lite: created .env.lite (edit it to add provider keys)"
 fi
 chmod 600 "$LITE_ENV_FILE" 2>/dev/null || true
+lite_normalize_env_file
 
 rand_hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
+fill() { lite_fill "$@"; }
 
-# Set KEY in .env.lite only where it is empty or missing; never overwrite a value.
-fill() {
-  local key=$1 value=$2 tmp
-  if grep -q "^$key=$" "$LITE_ENV_FILE"; then
-    tmp="$LITE_ENV_FILE.tmp"
-    awk -v k="$key" -v v="$value" '$0 == k "=" { print k "=" v; next } { print }' \
-      "$LITE_ENV_FILE" >"$tmp"
-    mv "$tmp" "$LITE_ENV_FILE"
-  elif ! grep -q "^$key=" "$LITE_ENV_FILE"; then
-    printf '%s=%s\n' "$key" "$value" >>"$LITE_ENV_FILE"
-  fi
-}
-
-TENANT=$(sed -n 's/^LITE_TENANT_ID=//p' "$LITE_ENV_FILE" | tr -d '\r' | head -n 1)
+TENANT=$(sed -n 's/^LITE_TENANT_ID=//p' "$LITE_ENV_FILE" | head -n 1)
 TENANT=${TENANT:-LITE-LOC-01}
 case "$TENANT" in *[!A-Za-z0-9._-]*) lite_die "LITE_TENANT_ID may hold only A-Z a-z 0-9 . _ -" ;; esac
 

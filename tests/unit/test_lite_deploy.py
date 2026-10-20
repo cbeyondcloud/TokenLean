@@ -19,6 +19,19 @@ _LOCAL = os.path.join(_LITE, "local")
 _COMPOSE = os.path.join(_LOCAL, "docker-compose.lite.yml")
 
 
+def _git(*args):
+    """Run git in the repo, or skip: the OSS-tree gate and source tarballs run these tests
+    without git or outside a work tree."""
+    import shutil
+    if not shutil.which("git"):
+        pytest.skip("git not available")
+    inside = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=_REPO,
+                            capture_output=True, text=True)
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        pytest.skip("not a git work tree")
+    return subprocess.run(["git", *args], cwd=_REPO, capture_output=True, text=True)
+
+
 def _compose():
     with open(_COMPOSE, encoding="utf-8") as fh:
         return yaml.safe_load(fh)
@@ -100,8 +113,7 @@ def test_bash_scripts_are_committed_executable(script):
     """A checkout on macOS/Linux must be able to run ./up.sh as is (mode 100755 in git;
     files written on Windows otherwise land as 100644)."""
     rel = f"deploy/lite/local/{script}"
-    out = subprocess.run(["git", "ls-files", "-s", rel], cwd=_REPO,
-                         capture_output=True, text=True).stdout
+    out = _git("ls-files", "-s", rel).stdout
     if not out:
         pytest.skip(f"{rel} is not committed yet")
     assert out.split()[0] == "100755", out
@@ -121,7 +133,7 @@ def test_shared_helpers_drive_any_engine_through_compose():
 
 def test_env_template_is_tracked_and_the_real_env_is_ignored():
     def ignored(rel):
-        return subprocess.run(["git", "check-ignore", "-q", rel], cwd=_REPO).returncode == 0
+        return _git("check-ignore", "-q", rel).returncode == 0
 
     assert not ignored("deploy/lite/local/.env.lite.template")
     assert ignored("deploy/lite/local/.env.lite")
@@ -165,3 +177,117 @@ def test_langfuse_overlay_only_turns_tracing_on(monkeypatch):
     assert traced["groups"]["G18_observability"]["langfuse_enabled"] is True
     traced["groups"]["G18_observability"]["langfuse_enabled"] = False
     assert traced == base
+
+
+# ── The scripts' helpers, run for real with a stub engine (skipped without the shell) ──
+
+def _bash():
+    import shutil
+    import sys
+    if sys.platform == "win32":
+        git_bash = r"C:\Program Files\Git\bin\bash.exe"
+        if os.path.exists(git_bash):
+            return git_bash
+        found = shutil.which("bash")
+        # System32\bash.exe is WSL: it would run in another filesystem namespace
+        return found if found and "system32" not in found.lower() else None
+    return shutil.which("bash")
+
+
+def _powershell():
+    import shutil
+    return shutil.which("powershell") or shutil.which("pwsh")
+
+
+def _run_bash(script, env_extra=None):
+    bash = _bash()
+    if not bash:
+        pytest.skip("bash not available")
+    env = dict(os.environ, **(env_extra or {}))
+    out = subprocess.run([bash, "-c", script], cwd=_LOCAL, env=env,
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+def test_bash_helpers_pin_the_project_and_ignore_a_foreign_compose_project(tmp_path):
+    """The full stack's .env sets COMPOSE_PROJECT_NAME=token-opt. Exported in the shell, or
+    written into .env.lite, it must never steer `down --purge` onto that stack."""
+    env_file = tmp_path / "env.lite"
+    env_file.write_text("COMPOSE_PROJECT_NAME=token-opt\nCOMPOSE_FILE=other.yml\n"
+                        "COMPOSE_PROFILES=x\nLITE_PROXY_PORT=4199\n", encoding="utf-8")
+    out = _run_bash(
+        '. ./_lib.sh; LITE_ENV_FILE="$1"; LITE_ENGINE=echo; lite_load_env; '
+        'echo "project=${COMPOSE_PROJECT_NAME-unset} file=${COMPOSE_FILE-unset} '
+        'profiles=${COMPOSE_PROFILES-unset} port=$LITE_PROXY_PORT"; lite_compose down'
+        .replace('"$1"', f'"{env_file.as_posix()}"'),
+        {"COMPOSE_PROJECT_NAME": "token-opt", "COMPOSE_FILE": "x.yml"})
+    assert "project=unset file=unset profiles=unset port=4199" in out
+    assert "compose -p tokenlean-lite -f " in out
+
+
+def test_bash_fill_handles_a_crlf_env_file(tmp_path):
+    """.env.lite edited in a Windows editor has CRLF line ends: generated values must still
+    be filled, and no value may keep a trailing CR."""
+    env_file = tmp_path / "env.lite"
+    env_file.write_bytes(b"LITE_TENANT_ID=T1\r\nDB_PASSWORD=\r\nREDIS_PASSWORD=keep\r\n")
+    _run_bash(f'. ./_lib.sh; LITE_ENV_FILE="{env_file.as_posix()}"; lite_normalize_env_file; '
+              'lite_fill DB_PASSWORD abc; lite_fill REDIS_PASSWORD xyz; lite_fill NEW_KEY n1')
+    data = env_file.read_bytes()
+    assert b"\r" not in data
+    assert data.decode().splitlines() == ["LITE_TENANT_ID=T1", "DB_PASSWORD=abc",
+                                          "REDIS_PASSWORD=keep", "NEW_KEY=n1"]
+
+
+@pytest.mark.parametrize("script", ["up.sh", "down.sh", "smoke.sh"])
+def test_bash_help_prints_only_the_header(script):
+    out = _run_bash(f"./{script} --help" if script != "smoke.sh" else
+                    ". ./_lib.sh; lite_usage smoke.sh")
+    assert out.strip()
+    assert "set -euo" not in out
+    assert not [line for line in out.splitlines() if line.startswith("#")]
+
+
+def test_up_sh_writes_secrets_owner_only():
+    text = _read(os.path.join(_LOCAL, "up.sh"))
+    first_write = text.index('cp "$LITE_DIR/.env.lite.template"')
+    assert text.index("umask 077") < first_write
+
+
+def test_smoke_sh_keeps_the_key_off_the_command_line():
+    """Arguments are visible to every user of the machine (ps); headers go in a 0600 file."""
+    text = _read(os.path.join(_LOCAL, "smoke.sh"))
+    assert "$TOKENLEAN_API_KEY" not in "".join(
+        line for line in text.splitlines() if line.lstrip().startswith("curl")
+        or line.lstrip().startswith("-H"))
+    assert "-H @" in text
+
+
+def test_powershell_helpers_pin_the_project_and_ignore_a_foreign_compose_project(tmp_path):
+    ps = _powershell()
+    if not ps:
+        pytest.skip("PowerShell not available")
+    env_file = tmp_path / "env.lite"
+    env_file.write_text("COMPOSE_PROJECT_NAME=token-opt\nLITE_PROXY_PORT=4199\n",
+                        encoding="utf-8")
+    out_file = tmp_path / "args.txt"
+    script = (
+        f". '{os.path.join(_LOCAL, '_lib.ps1')}'; "
+        f"$LiteEnvFile = '{env_file}'; Import-LiteEnv; "
+        f"function Invoke-FakeEngine {{ ($args -join ' ') | Set-Content -Path '{out_file}' }}; "
+        "$LiteEngine = 'Invoke-FakeEngine'; $null = Invoke-LiteCompose @('down'); "
+        "Write-Output ('project=' + [string]$env:COMPOSE_PROJECT_NAME + "
+        "' port=' + $env:LITE_PROXY_PORT)"
+    )
+    env = dict(os.environ, COMPOSE_PROJECT_NAME="token-opt")
+    out = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", script],
+                         env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert "project= port=4199" in out.stdout
+    assert out_file.read_text().startswith("compose -p tokenlean-lite -f ")
+
+
+def test_mock_and_optional_services_have_healthchecks():
+    services = _compose()["services"]
+    for name in ("mock-llm", "qdrant", "langfuse"):
+        assert services[name].get("healthcheck", {}).get("test"), name

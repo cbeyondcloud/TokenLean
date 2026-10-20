@@ -819,6 +819,11 @@ groups:
     # deployment left the default gpt-4o tiers): `fallback` (default) serves the caller's
     # own requested model — cost-routing simply no-ops; `error` returns a clean 503.
     on_unreachable_tier: fallback
+    # A model that matches no providers[].models / model_prefixes, on a path that does not
+    # route (G06 off, or no tiers): `substitute` (default) serves proxy.default_model and
+    # discloses it (x-tokenlean-model-substituted); `reject` answers 400
+    # (code model_not_configured) without calling any provider.
+    on_unconfigured_model: substitute
     tiers:
       simple:
       - gpt-4o-mini

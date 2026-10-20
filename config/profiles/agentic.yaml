@@ -9,10 +9,11 @@
 #
 # What stays ON (the gateway): authentication, provider selection by model name, failover
 # (`resilience`), rate limits and spend caps (`rate_limit`), metering (`usage_events`,
-# Prometheus), the cost headers, provider prompt caching (G21), exact-match response
-# caching (G05 L1), and the trust & safety groups G29–G32 in their shipped `flag` mode
-# (they record findings and never edit or block). Nothing here names a provider: whichever
-# LLM_KEY_* the deployment sets decides which providers are reachable.
+# Prometheus), the cost headers, provider prompt caching (G21's cache key only), exact-match
+# response caching (G05 L1), and the trust & safety groups G29–G32 in their shipped `flag`
+# mode (they record findings and never edit or block). No provider is assumed: whichever
+# LLM_KEY_* the deployment sets decides which providers are reachable. The only provider
+# names below switch OFF the per-provider G21 knobs that would edit a request.
 #
 # What goes OFF: every group that changes the prompt, the model, or the answer. Turn one
 # back on at a time, in a later overlay, after an A/B run on your own harness shows it
@@ -30,6 +31,17 @@ groups:
     l2_enabled: false           # no semantic near-match: it can answer another question
     step_cache_enabled: false   # no X-Step-Name replays keyed on caller-supplied hashes
 
+  G21_cache_alignment:
+    # Provider prompt caching stays as the cache key only (OpenAI prompt_cache_key; the
+    # provider caches the prefix it already received). What would edit the request is off:
+    stabilise:
+      enabled: false            # relocates volatile prompt text
+    providers:
+      openai:
+        auto: false             # would move a mid-conversation system message to the front
+      anthropic:
+        marker: false           # would rebuild messages/tools with cache_control markers
+
   # ── Off: they change the prompt, the model, or the answer ──────────────────────
   G1_compression:
     enabled: false              # prompt compression
@@ -41,6 +53,9 @@ groups:
     enabled: false              # canned answers instead of a model call
   G6_routing:
     enabled: false              # model routing/cascade: the caller's model is used as sent
+    # A model the config does not know is refused with a 400 (code model_not_configured)
+    # instead of being answered by proxy.default_model, which is the shipped behaviour.
+    on_unconfigured_model: reject
   G7_retrieval:
     enabled: false              # injects retrieved documents
   G8_tools:
@@ -53,6 +68,13 @@ groups:
     enabled: false              # output format + max_tokens control
   G12_reasoning:
     enabled: false              # reasoning budget prompt / params
+    # Read even while G12 is off: for reasoning models the proxy raises a too-small output
+    # budget (disclosed as x-tokenlean-output-budget-raised) so hidden thinking cannot use it
+    # all up. LITE forwards the caller's budget unchanged; the caller owns its budget (and a
+    # budget ledger that reserved on that number), and an answer cut short comes back with
+    # finish_reason "length".
+    reasoning_headroom:
+      enabled: false
   G13_batch:
     enabled: false              # deferred batching + TOON re-encoding
   G14_tool_output:
