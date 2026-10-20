@@ -49,6 +49,14 @@ verification for any outbound HTTPS call made through certifi's bundle (provider
 lockfiles now pin certifi 2026.10.19, bumped with `compile-requirements.sh --upgrade-package certifi`; no
 other pin moves.
 
+### Every call now reports what it actually cost: `x-tokenlean-cost-usd`, and an opt-in cost frame on streams — Enhancement (OSS)
+The `x-tokenlean-*` headers said what a call saved, never what it cost; the actual cost was only in the
+OpenAI-shaped body. Non-streamed responses on every route now carry `x-tokenlean-cost-usd` (6 dp, `0.000000`
+when no provider was paid). A stream cannot add a header once it has started, so with the new operator key
+`observability.stream_cost_event: true` a completed stream ends with `: x-tokenlean-cost {...}` (request id,
+cost, reported/estimated usage). It is an SSE comment, which SDKs skip. Off by default: streams are unchanged.
+- **OSS:** the header always; the stream frame when the operator turns it on.
+
 ## 2026-10-18
 
 ### RouteLLM's `mf` router is no longer offered: its checkpoint has no licence — Bug fix

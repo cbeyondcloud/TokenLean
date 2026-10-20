@@ -579,7 +579,7 @@ Every LLM response includes detailed savings metadata:
 > measured directly; dollar figures are an estimate. Provider-reconciled billing is a
 > separate, non-OSS concern.
 
-Alongside the `_token_opt` body, the same figures are emitted as machine-readable **`x-tokenlean-*` response headers** (request-id, routed-model, cache state, tokens/%/$ saved, latency) — **including on cache-hit, bypass, and content-filter responses** — so a FinOps pipeline attributes cost per call without parsing the body.
+Alongside the `_token_opt` body, the same figures are emitted as machine-readable **`x-tokenlean-*` response headers** (request-id, routed-model, cache state, tokens/%/$ saved, the call's actual cost `x-tokenlean-cost-usd`, latency) — **including on cache-hit, bypass, and content-filter responses** — so a FinOps pipeline attributes cost per call without parsing the body. Streams cannot carry a header after the fact, so with `observability.stream_cost_event: true` a completed stream ends with its actual cost as an SSE comment frame (`: x-tokenlean-cost {...}`), which SDKs skip and raw readers can parse.
 
 A separate **application-quality surface** (`middleware/quality_metrics.py`) records signal kept deliberately distinct from ops/savings metrics: retrieval hit-rate, context freshness, grounding coverage, and output schema-validation rate — PII-free labels only.
 

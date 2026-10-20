@@ -76,6 +76,29 @@ available on the OpenAI route only. A request served from cache, bypassed, or re
 guardrails never reached a provider — those echo `"sent": null` with a
 `sent_skipped_reason`, rather than implying a prompt was sent.
 
+### `observability.stream_cost_event` — the actual cost of a streamed call
+
+| Key | Default | Meaning |
+|---|---|---|
+| `observability.stream_cost_event` | `false` | End each completed stream with its actual cost as an SSE comment frame |
+
+A non-streamed response always carries its actual cost in the `x-tokenlean-cost-usd` header
+(USD, 6 dp; `0.000000` when no provider was paid — a cache hit, bypass or block). A stream
+cannot: headers go out before the first chunk. With this key `true`, a stream that completes
+ends with one extra frame, just before its terminator (`data: [DONE]` on the OpenAI route;
+after `message_stop` on Anthropic, after the last chunk on Gemini):
+
+```
+: x-tokenlean-cost {"request_id":"6f0c…","cost_usd":"0.000412","usage":"reported"}
+```
+
+`usage` is `reported` when the provider sent a usage chunk and `estimated` when it did not.
+It is an SSE **comment**, which SSE parsers (the OpenAI, Anthropic and Google SDKs, browser
+`EventSource`) skip, so SDK callers see exactly the events they saw before; a client reading
+the raw stream reads the cost. A cached or short-circuited answer sent as a stream carries the
+frame too (without `usage`). A stream that fails, or that the client abandons, carries none.
+The value must be the boolean `true` — a string does not switch it on.
+
 ### Per-tenant configuration precedence
 
 At request time the effective config for a tenant resolves in this order (most specific wins):

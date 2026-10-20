@@ -1843,3 +1843,12 @@ observability:
   # clipped and `truncated: true` is set — never silently shortened, because a quietly
   # trimmed prompt reads as evidence of what the model saw while being something else.
   max_echo_chars: 200000
+  # End a completed stream with its actual cost, as an SSE COMMENT frame just before the
+  # terminator:  `: x-tokenlean-cost {"request_id":"…","cost_usd":"0.000123","usage":"reported"}`
+  # (`usage` is `estimated` when the provider sent no usage chunk). A stream cannot carry the
+  # cost in a header — headers go out before the first chunk — and non-streamed responses
+  # already carry it as `x-tokenlean-cost-usd`. SSE parsers skip comment lines, so SDKs see
+  # the same events; a client reading the raw stream gets the cost. Applies to the OpenAI,
+  # Anthropic and Gemini streaming routes and to cached/short-circuited answers sent as a
+  # stream. A stream that fails or is cut off carries no frame. Off: byte-identical streams.
+  stream_cost_event: false
