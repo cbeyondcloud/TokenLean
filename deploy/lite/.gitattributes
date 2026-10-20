@@ -1,0 +1,8 @@
+# The LITE scripts run on Windows, macOS and Linux from one checkout. bash refuses CRLF, so
+# shell scripts, compose and env files are LF everywhere; PowerShell reads either.
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.py        text eol=lf
+*.template  text eol=lf
+*.ps1       text eol=crlf

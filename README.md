@@ -409,6 +409,7 @@ The engine is OSS in every tier. The managed **Agents console** (declare/govern 
 | `./scripts/gcp/start-gcp.sh` | Resume GCP from paused state | ~5 min |
 | `./scripts/local/deploy-local.sh --seed` | Deploy locally via Docker (zero GCP cost). Langfuse starts only when tracing is on (`langfuse_enabled`, or `--with-tracing`); Grafana with `--with-grafana` | ~5 min |
 | `./scripts/local/stop-local.sh` | Stop local Docker stack, every compose profile's services | ~10 sec |
+| `deploy/lite/local/up.sh` · `up.ps1` | **LITE** stack: proxy (LITE profile) + Postgres + Redis only; optional Qdrant / Langfuse; Docker or Podman; `smoke` + `down` alongside. See [deploy/lite/README.md](deploy/lite/README.md) | ~5 min first build |
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for complete details.
 

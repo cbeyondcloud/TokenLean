@@ -49,6 +49,14 @@ verification for any outbound HTTPS call made through certifi's bundle (provider
 lockfiles now pin certifi 2026.10.19, bumped with `compile-requirements.sh --upgrade-package certifi`; no
 other pin moves.
 
+### `deploy/lite/`: the LITE gateway on a laptop, with Postgres and Redis only — Enhancement (OSS)
+`deploy/lite/local/` starts the proxy with the LITE profile, plus Postgres and Redis, under its own compose
+project (it runs alongside the full stack). Qdrant, Langfuse and a keyless OpenAI-compatible stand-in are opt-in
+compose profiles. `up`, `down` and `smoke` ship for bash (macOS/Linux) and PowerShell (Windows). The scripts work
+with Docker or Podman (`CONTAINER_ENGINE`), generate the secrets and per-user proxy keys, and wait for `/health`.
+`smoke` checks a chat completion, a stream and a `/v1/messages` call, their `x-tokenlean-*` cost, and the usage rows.
+- **OSS:** all of it; images pinned to exact multi-arch releases.
+
 ### Profile overlays and a gateway-only LITE profile; the semantic cache tier can be switched off on its own — Enhancement (OSS)
 New `CONFIG_OVERLAYS` env var: YAML files deep-merged over the config in order, on every load. A missing overlay
 fails the load instead of being skipped. `config/profiles/agentic.yaml` is the first profile ("LITE"). It keeps

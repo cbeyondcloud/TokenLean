@@ -1,0 +1,22 @@
+# LITE overlay for `up --mock`: every request goes to the local OpenAI-compatible stand-in
+# (mock_llm.py, compose profile `mock`), so the stack and smoke run with no provider key
+# and no spend. Lists replace in an overlay, so this is the only provider while it applies.
+# Its "key" is the placeholder LLM_KEY_LITEMOCK in docker-compose.lite.yml (the stand-in
+# accepts any key; the provider client refuses to send none).
+proxy:
+  default_model: lite-mock-1
+  fallback_request_model: lite-mock-1
+  default_provider: litemock
+providers:
+- name: litemock
+  adapter: generic
+  openai_compatible: true
+  api_base: http://mock-llm:8080/v1
+  model_prefixes:
+  - lite-mock
+  models:
+  - lite-mock-1
+pricing:
+  lite-mock:                 # USD per 1k tokens: non-zero, so the cost headers show a value
+    input: 0.001
+    output: 0.002

@@ -1,0 +1,169 @@
+# =============================================================================
+# TokenLean LITE — local stack: proxy (LITE profile) + Postgres + Redis
+# =============================================================================
+# Start it with up.sh / up.ps1 (they generate .env.lite, the proxy key file and the overlay
+# list, then wait for /health). By hand, from this directory:
+#   docker compose --env-file .env.lite up -d --build
+# Optional services are compose profiles: `qdrant`, `langfuse`, and `mock` (a local
+# OpenAI-compatible stand-in, so smoke runs with no provider key). Podman works through
+# `podman compose` (set CONTAINER_ENGINE=podman for the scripts).
+#
+# Only the proxy (and Langfuse's UI when its profile is on) publishes a port, bound to
+# LITE_BIND (127.0.0.1 unless set). Postgres, Redis and Qdrant are reachable only on the
+# stack's own network. The project name keeps this stack apart from the full TokenLean
+# compose (token-opt-*): different containers, volumes and network.
+#
+# Images: the proxy is built from src/proxy/Dockerfile (the OSS image, multi-arch base) unless
+# TOKENLEAN_IMAGE names a pre-built one. The others are exact releases, published for both
+# amd64 and arm64 (Apple Silicon), under the licences TokenLean allows:
+#   pgvector/pgvector 0.8.7-pg15 (PostgreSQL), redis 7.2.16 (BSD-3; 7.4+ is not),
+#   qdrant v1.12.6 (Apache-2.0), langfuse 2.95.11 (MIT; v3 needs ClickHouse).
+# =============================================================================
+
+name: tokenlean-lite
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg15
+    environment:
+      POSTGRES_USER: tokenlean
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is empty - run up.sh or up.ps1, which generates it}
+      POSTGRES_DB: tokenlean
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tokenlean -d tokenlean"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.2.16-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is empty - run up.sh or up.ps1}",
+              "--appendonly", "yes"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  proxy:
+    image: ${TOKENLEAN_IMAGE:-tokenlean-lite-proxy:local}
+    build:
+      context: ../../../src/proxy
+      dockerfile: Dockerfile
+    ports:
+      - "${LITE_BIND:-127.0.0.1}:${LITE_PROXY_PORT:-4100}:8080"
+    environment:
+      PORT: "8080"
+      LOG_LEVEL: ${LITE_LOG_LEVEL:-INFO}
+      REDIS_URL: redis://redis:6379/0
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      DATABASE_URL: postgresql://tokenlean:${DB_PASSWORD}@postgres:5432/tokenlean
+      # The shipped config, with the LITE profile (and any extra overlays) applied on top.
+      CONFIG_LOCAL_PATH: /app/config/config.yaml.template
+      CONFIG_OVERLAYS: ${LITE_CONFIG_OVERLAYS:-/app/lite/config/agentic.yaml}
+      STORAGE_BACKEND: local
+      LOCAL_PROXY_KEYS_FILE: /app/lite/state/local-keys.json
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_LOCAL_NOAUTH: "1"
+      LANGFUSE_HOST: http://langfuse:3000
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      # /metrics needs this token (Prometheus sends it as a bearer token).
+      METRICS_SCRAPE_TOKEN: ${METRICS_SCRAPE_TOKEN:-}
+      METRICS_ALLOW_UNAUTHENTICATED: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # Provider credentials reach the proxy only as LLM_KEY_<PROVIDER> (see the main compose).
+      LLM_KEY_OPENAI: ${LLM_KEY_OPENAI:-}
+      LLM_KEY_ANTHROPIC: ${LLM_KEY_ANTHROPIC:-}
+      LLM_KEY_GOOGLE: ${LLM_KEY_GOOGLE:-}
+      LLM_KEY_GEMINI: ${LLM_KEY_GEMINI:-}
+      LLM_KEY_MISTRAL: ${LLM_KEY_MISTRAL:-}
+      LLM_KEY_COHERE: ${LLM_KEY_COHERE:-}
+      LLM_KEY_DEEPSEEK: ${LLM_KEY_DEEPSEEK:-}
+      LLM_KEY_XAI: ${LLM_KEY_XAI:-}
+      LLM_KEY_GROQ: ${LLM_KEY_GROQ:-}
+      LLM_KEY_OPENROUTER: ${LLM_KEY_OPENROUTER:-}
+      LLM_KEY_OPENCODE: ${LLM_KEY_OPENCODE:-}
+      LLM_KEY_AZURE: ${LLM_KEY_AZURE:-}
+      # Not a secret: the `mock` profile's stand-in accepts any key, and the provider it
+      # belongs to exists only when up --mock adds mock/mock-provider.yaml.
+      LLM_KEY_LITEMOCK: lite-mock-accepts-any-key
+    volumes:
+      - ../../../config:/app/config:ro
+      - ../config:/app/lite/config:ro
+      - ./mock:/app/lite/mock:ro
+      - ./.state:/app/lite/state:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Optional ────────────────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.12.6
+    profiles: ["qdrant"]
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
+    volumes:
+      - qdrantdata:/qdrant/storage
+    restart: unless-stopped
+
+  langfuse:
+    image: langfuse/langfuse:2.95.11
+    profiles: ["langfuse"]
+    ports:
+      - "${LITE_BIND:-127.0.0.1}:${LITE_LANGFUSE_PORT:-3110}:3000"
+    environment:
+      DATABASE_URL: postgresql://tokenlean:${DB_PASSWORD}@postgres:5432/langfuse
+      NEXTAUTH_URL: http://localhost:${LITE_LANGFUSE_PORT:-3110}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-}
+      SALT: ${LANGFUSE_SALT:-}
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_INIT_ORG_ID: tokenlean-lite
+      LANGFUSE_INIT_ORG_NAME: TokenLean LITE
+      LANGFUSE_INIT_PROJECT_ID: tokenlean-lite
+      LANGFUSE_INIT_PROJECT_NAME: tokenlean-lite
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@lite.local}
+      LANGFUSE_INIT_USER_NAME: LITE Admin
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # A stand-in OpenAI-compatible endpoint (mock/mock_llm.py, standard library only) on the
+  # proxy's own image, so no extra image is pulled. `pull_policy: never`: the image is the one
+  # the proxy service just built (or TOKENLEAN_IMAGE, pulled by the up script).
+  mock-llm:
+    image: ${TOKENLEAN_IMAGE:-tokenlean-lite-proxy:local}
+    pull_policy: never
+    profiles: ["mock"]
+    command: ["python", "/app/lite/mock/mock_llm.py"]
+    volumes:
+      - ./mock:/app/lite/mock:ro
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  qdrantdata:
