@@ -28,8 +28,28 @@
 # SCRIPT is the one sanctioned way to refresh the pins.
 #
 # Usage: bash scripts/compile-requirements.sh          (needs Docker running)
+#        bash scripts/compile-requirements.sh --upgrade-package aiohttp [--upgrade-package yarl]
+#
+# Without arguments pip-compile keeps every existing pin it can, so a security fix in a
+# transitive package does NOT arrive by re-running this. `--upgrade-package NAME` (repeatable)
+# moves only NAME, and whatever NAME now needs, to the newest version the sources allow, in
+# every lockfile that holds it - the targeted bump a Dependabot security alert asks for,
+# without Dependabot's regenerator (which re-pins torch and the CUDA runtime).
 # =============================================================================
 set -euo pipefail
+
+UPGRADE_ARGS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --upgrade-package)
+      [ $# -ge 2 ] || { echo "--upgrade-package needs a package name" >&2; exit 2; }
+      # A distribution name only: the value is expanded inside the container's bash -c.
+      [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "not a package name: $2" >&2; exit 2; }
+      UPGRADE_ARGS="$UPGRADE_ARGS --upgrade-package $2"
+      shift 2 ;;
+    *) echo "unknown argument: $1 (only --upgrade-package NAME is accepted)" >&2; exit 2 ;;
+  esac
+done
 
 # pwd -W: Git Bash on Windows must hand Docker a d:/... path, not /d/...
 ROOT_DIR="$(cd "$(dirname "$0")/.." && (pwd -W 2>/dev/null || pwd))"
@@ -40,14 +60,14 @@ IMAGE="$(sed -n 's/^FROM \([^ ]*\).*/\1/p' "$(dirname "$0")/../src/proxy/Dockerf
 
 # MSYS_NO_PATHCONV: stop Git Bash rewriting container paths like -w /w into W:/
 # (harmless no-op on real Linux/macOS shells).
-MSYS_NO_PATHCONV=1 docker run --rm -v "${ROOT_DIR}:/w" -w /w "$IMAGE" bash -c '
+MSYS_NO_PATHCONV=1 docker run --rm -e UPGRADE_ARGS="$UPGRADE_ARGS" -v "${ROOT_DIR}:/w" -w /w "$IMAGE" bash -c '
   set -euo pipefail
   pip install -q pip-tools
   # The CUDA companions of torch are never pinned (nvidia-*, cuda-*), nor their comment blocks.
   sweep() { awk -f /w/scripts/drop-cuda-pins.awk "$1" > "$1.tmp" && mv "$1.tmp" "$1"; }
 
   cd src/proxy
-  pip-compile --no-strip-extras \
+  pip-compile --no-strip-extras $UPGRADE_ARGS \
       --unsafe-package torch --unsafe-package triton --unsafe-package uvloop \
       --output-file requirements.txt requirements.in
   # Belt for the guard test: a future torch bump may drag new CUDA runtime
@@ -55,7 +75,7 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "${ROOT_DIR}:/w" -w /w "$IMAGE" bash -c '
   sweep requirements.txt
 
   cd ../../tests
-  pip-compile --no-strip-extras \
+  pip-compile --no-strip-extras $UPGRADE_ARGS \
       -c ../src/proxy/requirements.txt \
       --output-file requirements-test.txt requirements-test.in
 
@@ -63,7 +83,7 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "${ROOT_DIR}:/w" -w /w "$IMAGE" bash -c '
   # CPU-only in their Dockerfile, and a pin would drag in the CUDA build.
   for dir in llmlingua-sidecar routellm-sidecar doc-pipeline finetune-pipeline; do
     cd "/w/src/$dir"
-    pip-compile --no-strip-extras \
+    pip-compile --no-strip-extras $UPGRADE_ARGS \
         --unsafe-package torch --unsafe-package triton --unsafe-package uvloop \
         --output-file requirements.txt requirements.in
     sweep requirements.txt

@@ -21,6 +21,18 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-21
+
+### aiohttp 3.14.5 closes three advisories, two of them High — Bug fix
+The proxy and RouteLLM sidecar images pinned aiohttp 3.14.3, affected by GHSA-2g87-pp6c-29x5
+(unbounded memory/CPU use, High), GHSA-5wr8-gcqf-gqf3 (no initial request/header timeout in aiohttp's
+server, High) and GHSA-494j-54xm-rwp3 (cookie `Secure` attribute, Low). TokenLean's own code does not
+import aiohttp and serves through uvicorn, so the server-timeout issue does not apply; aiohttp arrives as
+an HTTP client inside litellm and instructor. Both lockfiles now pin aiohttp 3.14.5 (and the proxy yarl
+1.25.1, which it requires). `scripts/compile-requirements.sh` gained `--upgrade-package NAME` for exactly
+this: a targeted bump through the sanctioned compile, instead of Dependabot's regeneration, which re-pins
+torch and the CUDA runtime.
+
 ## 2026-10-18
 
 ### RouteLLM's `mf` router is no longer offered: its checkpoint has no licence — Bug fix
