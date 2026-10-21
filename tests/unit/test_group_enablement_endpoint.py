@@ -136,7 +136,7 @@ class TestItReportsNothingElse:
         _cfg(monkeypatch, {"groups": {"G1_compression": {
             "enabled": True,
             "sidecar_url": "http://llmlingua-svc:8080/compress",
-            "kompress_model": "microsoft/Kompress-v2-base",
+            "force_reserve_digit": True,
             "compression_ratio_target": 0.5,
         }}})
         out = await pipeline.effective_group_enablement()

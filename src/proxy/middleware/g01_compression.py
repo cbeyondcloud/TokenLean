@@ -34,11 +34,10 @@ try:
 except ImportError:
     pass
 
-# Kompress-v2-base fallback for log/error content (optional — no sidecar needed)
-# Loaded lazily on first use; None when transformers is not installed.
-_kompress_pipe: Optional[Any] = None
-_kompress_pipe_model: Optional[str] = None  # model name of the loaded pipeline
-_kompress_loaded: bool = False               # True once load was attempted (even if failed)
+# (A Kompress-v2 fallback for log/error content lived here until 2026-10-21 and never ran:
+#  the configured `microsoft/Kompress-v2-base` does not exist, it was loaded as a
+#  text2text-generation pipeline, and the real model (chopratejas/kompress-v2-base) is an
+#  extractive token classifier that needs the Headroom library, removed 2026-09-07. Backlog #151.)
 
 import re as _re
 
@@ -164,8 +163,6 @@ class SelectiveContextPruner:
             return text, 1.0
 
 
-# ─── Kompress-v2-base fallback ────────────────────────────────────────────────
-
 # ── Faithfulness boundary for every compressed message (E26, 2026-09-06) ──────
 # DS9 shipped a wrong answer to a customer through this module. The assistant message
 # said:
@@ -218,7 +215,7 @@ def _is_faithful_compression(before: str, after: str) -> bool:
 
     The first refusal was learned from one defect (E26): if a meaning-critical word appears
     in the source and not in the output, the output may assert something the source did not.
-    The second: LLMLingua-2 drops word tokens and Kompress rewrites text, and neither can
+    The second: LLMLingua-2 drops word tokens and cannot
     tell `fetch_user` or `/v2/users/` from filler, so the model would answer about, or edit,
     code it never wrote. We cannot tell "harmlessly terse" from "inverted" without reading
     it, so the compression is declined and the ORIGINAL is sent — the same fail-safe
@@ -252,55 +249,6 @@ def _unfaithful_reason(before: str, after: str) -> Optional[str]:
 
 # A fenced code block: ``` or ~~~ opening a line (up to any indentation).
 _CODE_FENCE_RE = _re.compile(r"^[ \t]*(?:```|~~~)", _re.MULTILINE)
-
-
-# These run on client-supplied history inside the event loop, so each must stay linear. The
-# stack-frame indentation is spaces and tabs only: `^\s+` also matched newlines, so on a run
-# of blank lines every line start rescanned the rest of the message (quadratic).
-_LOG_ERROR_PATTERNS = [
-    _re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", _re.MULTILINE),   # timestamps
-    _re.compile(r"^\[?(INFO|DEBUG|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\]?", _re.MULTILINE),
-    _re.compile(r"Traceback \(most recent call last\)", _re.MULTILINE),
-    _re.compile(r"^[ \t]+at \w[\w.]+\([\w.]+:\d+\)", _re.MULTILINE),           # Java stack frames
-    _re.compile(r'^\d{2}:\d{2}:\d{2}\.\d+ \[', _re.MULTILINE),                # structured logs
-]
-
-
-def _is_log_error_content(text: str) -> bool:
-    """Return True if text looks like log output or an error/stack trace."""
-    return any(p.search(text) for p in _LOG_ERROR_PATTERNS)
-
-
-def _get_kompress_pipe(model: str) -> Optional[Any]:
-    """Lazy-load Kompress-v2-base pipeline; cache across requests (singleton)."""
-    global _kompress_pipe, _kompress_pipe_model, _kompress_loaded
-    if _kompress_loaded and _kompress_pipe_model == model:
-        return _kompress_pipe
-    _kompress_loaded = True
-    _kompress_pipe_model = model
-    try:
-        from transformers import pipeline  # type: ignore
-        _kompress_pipe = pipeline("text2text-generation", model=model)
-        logger.info("G01 Kompress pipeline loaded: %s", model)
-    except Exception as exc:
-        _kompress_pipe = None
-        logger.debug("G01 Kompress pipeline unavailable (%s): %s", model, exc)
-    return _kompress_pipe
-
-
-def _kompress_compress(text: str, model: str, max_new_tokens: int = 256) -> Optional[str]:
-    """Compress log/error text via Kompress-v2-base; returns None on failure."""
-    pipe = _get_kompress_pipe(model)
-    if pipe is None:
-        return None
-    try:
-        result = pipe(text, max_new_tokens=max_new_tokens, truncation=True)
-        if result and isinstance(result, list):
-            compressed = result[0].get("generated_text", "")
-            return compressed if compressed and len(compressed) < len(text) else None
-    except Exception as exc:
-        logger.debug("G01 Kompress compression failed: %s", exc)
-    return None
 
 
 class G01Compression:
@@ -373,11 +321,8 @@ class G01Compression:
         # Preserve digit tokens (dates/IDs/amounts) so compression can't silently
         # corrupt a tool argument (e.g. an incident date in a log-query window).
         force_reserve_digit: bool = cfg.get("force_reserve_digit", True)
-        kompress_enabled: bool = cfg.get("kompress_enabled", True)
-        kompress_model: str = cfg.get("kompress_model", "microsoft/Kompress-v2-base")
-        kompress_max_new_tokens: int = cfg.get("kompress_max_new_tokens", 256)
         # Deterministic regex prose fallback (zero-LLM, zero-latency) — engages only
-        # when neither LLMLingua nor Kompress reduced anything (e.g. sidecar down), so
+        # when LLMLingua reduced nothing (e.g. sidecar down), so
         # a compression outage degrades to *some* savings instead of pass-through.
         deterministic_fallback: bool = cfg.get("deterministic_fallback", False)
         
@@ -442,28 +387,19 @@ class G01Compression:
                     if llm_compressed and len(llm_compressed) < len(compressed):
                         compressed = llm_compressed
                         reduction_info.append("LLML2")
-                    elif model_steps and kompress_enabled and _is_log_error_content(compressed):
-                        # Step 2b: Kompress-v2-base fallback for log/error content when
-                        # LLMLingua sidecar is unavailable or produced no reduction
-                        k_compressed = _kompress_compress(compressed, kompress_model, kompress_max_new_tokens)
-                        if k_compressed and len(k_compressed) < len(compressed):
-                            compressed = k_compressed
-                            reduction_info.append("KMP")
 
                     # Step 2c: deterministic prose fallback (regex, zero-LLM). Only when
                     # the model-based paths reduced nothing — protects code/paths/idents
                     # byte-for-byte via prose_compress; never touches an already-reduced msg.
-                    if deterministic_fallback and not any(
-                        t in reduction_info for t in ("LLML2", "KMP")
-                    ):
+                    if deterministic_fallback and "LLML2" not in reduction_info:
                         det = _prose_compress_text(compressed)
                         if det and len(det) < len(compressed):
                             compressed = det
                             reduction_info.append("DET")
 
                     if compressed != content and not _is_faithful_compression(content, compressed):
-                        # Guarded here rather than per-compressor so LLMLingua, Kompress and
-                        # the deterministic fallback are all held to the same boundary, and
+                        # Guarded here rather than per-compressor so LLMLingua and the
+                        # deterministic fallback are both held to the same boundary, and
                         # so any future compressor is too (E26).
                         logger.warning(
                             "[%s] G01 refused an unfaithful compression of a %s message "
@@ -592,7 +528,7 @@ class G01Compression:
             tokens_after = count_messages_tokens(ctx.messages, ctx.model)
             ctx.savings.add_step(
                 GROUP,
-                "G01 prompt compression (layered + selective + LLMLingua-2 + Kompress fallback)",
+                "G01 prompt compression (layered + selective + LLMLingua-2)",
                 tokens_before,
                 tokens_after,
             )

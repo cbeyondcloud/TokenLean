@@ -23,6 +23,15 @@ date changes.
 
 ## 2026-10-21
 
+### G01's Kompress fallback is removed: it never ran — Bug fix
+`G1_compression` shipped `kompress_enabled: true` with `kompress_model: microsoft/Kompress-v2-base`, a
+fallback meant to compress log and error text when LLMLingua made no reduction. It could not run: that
+model id does not exist on Hugging Face, the code loaded it as a text-generation pipeline, and the real
+model (`chopratejas/kompress-v2-base`) is an extractive token classifier that needs the Headroom library,
+which TokenLean dropped on 2026-09-07. Each attempt only made one failed Hugging Face request per process.
+The code, the three `kompress_*` keys and their docs are removed; a leftover key in an existing config is
+ignored. What any request receives is unchanged.
+
 ### aiohttp 3.14.5 closes three advisories, two of them High — Bug fix
 The proxy and RouteLLM sidecar images pinned aiohttp 3.14.3, affected by GHSA-2g87-pp6c-29x5
 (unbounded memory/CPU use, High), GHSA-5wr8-gcqf-gqf3 (no initial request/header timeout in aiohttp's

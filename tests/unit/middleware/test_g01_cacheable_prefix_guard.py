@@ -96,7 +96,7 @@ def _crossing_floor(ctx):
 
 def _ctx(make_ctx, minimal_config, floor, **g01):
     cfg = {"enabled": True, "min_tokens_to_compress": 10, "compress_user_messages": True,
-           "kompress_enabled": False, "layered_composition_enabled": False,
+           "layered_composition_enabled": False,
            "selective_context_enabled": False, "deterministic_fallback": True}
     cfg.update(g01)
     minimal_config["groups"]["G1_compression"] = cfg
@@ -188,7 +188,7 @@ class TestGuardWhenEnabled:
         compression. The suffix is never cached, so its saving was never at stake —
         throwing it away paid for a discount it could not buy."""
         cfg = {"enabled": True, "min_tokens_to_compress": 10, "compress_user_messages": True,
-               "compress_system_prompt": True, "kompress_enabled": False,
+               "compress_system_prompt": True,
                "layered_composition_enabled": False, "selective_context_enabled": False,
                "deterministic_fallback": True, "preserve_cacheable_prefix": True}
         minimal_config["groups"]["G1_compression"] = cfg
@@ -364,7 +364,7 @@ class TestArmC:
         minimal_config["groups"]["G1_compression"] = {
             "enabled": True, "min_tokens_to_compress": 10, "min_chars_to_compress": 50,
             "compress_user_messages": True, "compress_system_prompt": True,
-            "kompress_enabled": False, "layered_composition_enabled": False,
+            "layered_composition_enabled": False,
             "selective_context_enabled": False, "deterministic_fallback": False,
             "preserve_cacheable_prefix": True,
             "compression_ratio_target": first_pass_ratio,

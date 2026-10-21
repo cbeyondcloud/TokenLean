@@ -574,7 +574,7 @@ class TestTheSnapshotSurvivesTheHandoff:
         minimal_config["groups"]["G1_compression"] = {
             "enabled": True, "min_tokens_to_compress": 10, "min_chars_to_compress": 50,
             "compress_system_prompt": True, "compress_user_messages": True,
-            "kompress_enabled": False, "layered_composition_enabled": False,
+            "layered_composition_enabled": False,
             "selective_context_enabled": False, "deterministic_fallback": False,
             "preserve_cacheable_prefix": True,
             "compression_ratio_target": first_pass_ratio,

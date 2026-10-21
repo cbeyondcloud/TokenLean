@@ -666,12 +666,10 @@ groups:
     selective_context_enabled: false
     selective_context_max_tokens: 4000
     build_time_compression: true
-    # Kompress-v2 fallback compression for logs/errors (applied when LLMLingua is not a fit)
-    kompress_enabled: true
-    kompress_model: microsoft/Kompress-v2-base
-    kompress_max_new_tokens: 256
+    # (kompress_enabled / kompress_model / kompress_max_new_tokens removed 2026-10-21: the
+    #  Kompress fallback never ran. A leftover kompress_* key in an existing config is ignored.)
     # Deterministic regex prose fallback (zero-LLM, zero-latency; prose_compress).
-    # Engages ONLY when neither LLMLingua nor Kompress reduced a message — so a
+    # Engages ONLY when LLMLingua has not reduced a message — so a
     # sidecar outage degrades to some savings instead of pass-through. Default off
     # (keeps the reproducible baseline byte-identical). Protects code/paths/idents.
     deterministic_fallback: false
