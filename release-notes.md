@@ -33,6 +33,13 @@ an HTTP client inside litellm and instructor. Both lockfiles now pin aiohttp 3.1
 this: a targeted bump through the sanctioned compile, instead of Dependabot's regeneration, which re-pins
 torch and the CUDA runtime.
 
+### certifi 2026.10.19 stops trusting emSign roots with compromised intermediates — Bug fix
+Every image pinned certifi 2026.7.22, which still trusts the emSign root CAs whose intermediate CA keys
+were compromised (GHSA-6q48-6c7w-9gw2, critical): a certificate issued with those keys would pass TLS
+verification for any outbound HTTPS call made through certifi's bundle (provider APIs, webhooks). All six
+lockfiles now pin certifi 2026.10.19, bumped with `compile-requirements.sh --upgrade-package certifi`; no
+other pin moves.
+
 ## 2026-10-18
 
 ### RouteLLM's `mf` router is no longer offered: its checkpoint has no licence — Bug fix
