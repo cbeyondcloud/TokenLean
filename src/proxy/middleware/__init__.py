@@ -73,6 +73,10 @@ class RequestContext:
     # usage_events.team read THIS, never params["x_team"], which stays a raw, caller-chosen
     # routing hint (G06 rules still match on it).
     team: str = "default"
+    # Fingerprint of the team config overlay applied to this request (tenancy.teams.
+    # overlay_tag); "" for none. G05 folds it into its cache keys so an answer produced under
+    # one team's overlay is never served to a request that ran under another.
+    team_overlay_tag: str = ""
     # Usage tags (billing.tags.extract_tags): the allow-listed request headers the caller
     # sent for attribution, stored as usage_events.tags. Caller-asserted: nothing selects
     # behaviour on them. None = no allow-listed header on the request.

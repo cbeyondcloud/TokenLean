@@ -28,7 +28,7 @@ A new JSONB column `usage_events.tags` records the request headers on an operato
 (`billing.metering.tags.headers`; by default the ten `X-Agentic-*` identity headers an agent framework
 sends), one key per header, so cost can be summed per run, step or agent with `tags->>'run_id'`. Any other
 header is ignored. Values are trimmed, capped at 256 characters and must be printable ASCII; a value
-that looks like a credential is dropped and counted, never stored. The allow-list is read from the global
+that looks like a credential (checked whole, before the cap) is dropped and counted, never stored. The allow-list is read from the global
 config only, so a tenant cannot widen it. Tags select nothing: they are attribution. Rows without
 allow-listed headers store NULL; `/admin/usage-export` returns the tags.
 - **OSS:** the tags column, allow-list, value checks and export field ship in the core proxy.
@@ -40,8 +40,10 @@ The team is written to a new `usage_events.team` column (additive; down script i
 `infra/migrations/down/`), returned by `/admin/usage-export`, used as the `team` metric label and by
 `rate_limit.per_team`. `teams.<team>.monthly_spend_cap_usd` gives a team its own monthly ceiling under
 the tenant's: over it, a 429 `team_spend_cap_exceeded` before any provider call. `teams.<team>.config`
-is merged over the tenant's config for that team's requests (`groups` and `proxy` only). Nothing
-changes for a deployment that binds no key to a team.
+is merged over the tenant's config for that team's requests (`groups` and `proxy` only; never trust &
+safety, loop control or limits, and an operator pin always wins). A team-bound key's usage export holds
+only its team's rows, and key rotation issues one new key per team. Nothing changes for a deployment
+that binds no key to a team.
 - **OSS:** team binding, team column, team caps and events, team overlays — all in the core proxy.
 
 ## 2026-10-21

@@ -14,7 +14,7 @@ from redis.exceptions import ResponseError
 from middleware import RequestContext
 from cache.redis_pool import get_redis as _get_redis
 from tenancy.resolver import DEFAULT_TEAM, team_tag
-from tenancy.teams import team_monthly_spend_cap
+from tenancy.teams import InvalidTeamCap, team_monthly_spend_cap
 from trial import trial_summary
 import events
 
@@ -379,7 +379,16 @@ class G00RateLimit:
         tenant_id = getattr(ctx, "tenant_id", "default")
         if tenant_id in set(scfg.get("exempt_tenants") or ["admin", "default"]):
             return
-        cap = team_monthly_spend_cap(ctx.config, tenant_id, team)
+        try:
+            cap = team_monthly_spend_cap(ctx.config, tenant_id, team)
+        except InvalidTeamCap:
+            # Set but unreadable: refused, never read as "no cap" (fail closed on config;
+            # Redis errors below still fail open, as the tenant cap does).
+            raise RateLimitExceeded(
+                retry_after=3600,
+                limit_type="team_spend_cap_exceeded",
+                scope=f"tenant={tenant_id},team={team_tag(team)},cap_invalid=true",
+            )
         if cap is None:
             return  # this team has no cap
         grace = float(scfg.get("grace_pct", 0) or 0)

@@ -577,7 +577,11 @@ async def usage_export(request: Request):
         # H1: non-admin keys may only export their OWN tenant — ignore any
         # client-supplied tenant_id (and never return the all-tenant set: without a tenant
         # the filter below would drop out, so that is refused).
-        if not is_admin_key(tenant_metadata):
+        # A team-bound key (owner decision 82) exports only its own team's rows of its own
+        # tenant, whatever the body or query string says — an admin key bound to a team too.
+        # A key with no team binding keeps the tenant (or, for admin, cross-tenant) view.
+        team_filter = key_team(tenant_metadata)
+        if team_filter or not is_admin_key(tenant_metadata):
             tenant_filter = _caller_tenant_id(tenant_metadata)
             if not tenant_filter:
                 raise HTTPException(status_code=403, detail="This proxy key is not bound to a tenant.")
@@ -604,6 +608,9 @@ async def usage_export(request: Request):
         if tenant_filter:
             sql += " AND tenant_id = $3"
             args.append(tenant_filter)
+            if team_filter:
+                sql += " AND team = $4"
+                args.append(team_filter)
         sql += " ORDER BY timestamp DESC"
 
         async with pool.acquire() as conn:
@@ -2181,6 +2188,10 @@ async def _serve_core(
                         else f"Monthly spend cap exceeded ({exc.scope}). "
                         "Raise the cap in the portal or wait for the next billing period."
                         if exc.limit_type == "spend_cap_exceeded"
+                        else f"The spend cap of this team is misconfigured ({exc.scope}). "
+                        "Ask your administrator to set it to a positive amount."
+                        if exc.limit_type == "team_spend_cap_exceeded"
+                        and "cap_invalid=" in exc.scope
                         else f"Monthly spend cap of this team exceeded ({exc.scope}). "
                         "Ask your administrator to raise the team's cap, or wait for the "
                         "next billing period."

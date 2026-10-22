@@ -143,10 +143,21 @@ A proxy key can be bound to a **team** of its tenant at issuance (`create_key(te
 with `gateway: true`, its `X-Team` header; else `default` (no team). The binding wins over
 any header. The team is written to `usage_events.team` and returned by `/admin/usage-export`,
 used as the `team` metric label (bounded by `G18_observability.label_values.team`), and
-selects `rate_limit.per_team` limits.
+selects `rate_limit.per_team` limits. A team-bound key's `/admin/usage-export` returns **only
+its own team's rows** of its own tenant, whatever the body or query string asks for; a key with
+no team binding keeps the whole-tenant view (an admin key, its cross-tenant view).
+
+Rotating keys: `rotate_tenant_keys_per_binding(tenant)` issues **one new key per binding** — the
+tenant's unbound keys and each team — each keeping its team, tier, trust flags and extra metadata
+(the tenant's IP allowlist and any suspension carry to all), and revokes every old key in one
+store write. `rotate_tenant_keys(tenant)` keeps its single-key result for a tenant whose keys share
+one binding, and refuses, changing nothing, for a tenant with several.
 
 A team's settings live under `teams.<team>` (in this file, or in the tenant's own
-`tenant_configs` overrides), with the operator's `tenants.<id>.teams.<team>` merged over them:
+`tenant_configs` overrides), with the operator's `tenants.<id>.teams.<team>` merged over them.
+**Quote team names in YAML**: an unquoted `4421` is read as a number (still matched by its text),
+but an unquoted `no`, `on`, `yes` or `off` is a boolean and never matches a team; every team key
+that is not text is named in a warning.
 
 ```yaml
 teams:
@@ -161,8 +172,8 @@ teams:
 
 | Key | Description |
 |---|---|
-| `monthly_spend_cap_usd` | The team's monthly USD cap, checked by G00 while `rate_limit.spend_cap.enabled` is on (same `grace_pct` and `exempt_tenants` as the tenant cap) against the team's own counter `t:<tenant>:team:<team>:spend:<YYYYMM>`. Over it: **429 `team_spend_cap_exceeded`** (`Retry-After: 86400`) before any provider call, and a `team_spend_cap.reached` event; `warn_pct` fires a one-shot `team_budget.threshold`. The tenant cap still applies to the team's requests. Absent, 0 or not a number = no team cap. |
-| `config` | An overlay deep-merged over the tenant's effective config for the team's requests, with the `CONFIG_OVERLAYS` rules (mappings merge, lists and scalars replace, a null changes nothing). Only the **`groups`** and **`proxy`** sections may change; any other section is ignored with a warning, so a team overlay cannot lift a cap, switch off a gate, change metering or add a provider. A team's setting is treated as the tenant's own choice (e.g. a G30/G31 `threshold` stays capped as a tenant's would be). |
+| `monthly_spend_cap_usd` | The team's monthly USD cap, checked by G00 while `rate_limit.spend_cap.enabled` is on (same `grace_pct` and `exempt_tenants` as the tenant cap) against the team's own counter `t:<tenant>:team:<team>:spend:<YYYYMM>`. Over it: **429 `team_spend_cap_exceeded`** (`Retry-After: 86400`) before any provider call, and a `team_spend_cap.reached` event; `warn_pct` fires a one-shot `team_budget.threshold`. The tenant cap still applies to the team's requests. Absent or `0` = no team cap. **Negative, NaN, infinite or not a number = invalid**: the team's requests are refused (429 `team_spend_cap_exceeded`, message "misconfigured", `Retry-After: 3600`) with a warning, never treated as no cap. |
+| `config` | An overlay deep-merged over the tenant's config for the team's requests, with the `CONFIG_OVERLAYS` rules (mappings merge, a null changes nothing). It is applied after the tenant's `tenant_configs` overrides and **before** the operator's `tenants.<id>.groups` overlay, so an operator pin always wins. Limits, each dropped entry named in a warning: only the **`groups`** and **`proxy`** sections may change (so a team cannot lift a cap, switch off a gate, change metering or add a provider); **never** the groups G00 (rate limiting), G17 (loop and budget control) or G29–G32 (trust & safety), under any spelling of their key; and never a mapping replaced by a scalar or list (`G5_cache: false` is dropped — every group block must be a mapping). A team's setting is treated as the tenant's own choice. G05 folds a fingerprint of the applied overlay into its cache keys, so an answer produced under one team's overlay is never served to a request under another overlay or none; teams without an overlay share the tenant's cache as before. |
 
 The `default` team never has settings, a cap or an overlay: a deployment that binds no key to a
 team and has no `teams:` block behaves exactly as before.
@@ -351,7 +362,7 @@ Both columns are additive (`ADD COLUMN IF NOT EXISTS`, applied by the app at sta
 | `tags.headers` | the ten `X-Agentic-*` identity headers | Allow-list, `header name: tag key` (header names match in any case; tag keys `[a-z][a-z0-9_]*`, at most 64 entries). Default: `X-Agentic-Team: team`, `X-Agentic-User: user`, `X-Agentic-Repo: repo`, `X-Agentic-Pipeline: pipeline`, `X-Agentic-Run-Id: run_id`, `X-Agentic-Step: step`, `X-Agentic-Agent: agent`, `X-Agentic-Parent-Agent: parent_agent`, `X-Agentic-Tier: tier`, `X-Agentic-Policy-Version: policy_version`. A value set here **replaces** the default list; `{}` records nothing. |
 | `tags.max_value_chars` | `256` | Longer values are cut to this length (at most `1024`). |
 
-Tag values are trimmed and must be printable ASCII; a value that looks like a credential (a provider or proxy key, a bearer/basic token, a JWT, credentials in a URL, a `password=…` pair, a private-key header) is **dropped, never stored**, and counted in `token_opt_usage_tags_dropped_total{reason="secret"}` (`reason="invalid"` for non-printable values). The settings are read from the global config only — a tenant's or team's overrides cannot change what is recorded — and an unreadable `tags` section records nothing. Tags are what the caller asserts: they never select a team, a limit, a route or a config (`usage_events.team` is the authenticated team, so the two may differ).
+Tag values are trimmed and must be printable ASCII; a value that looks like a credential (a provider or proxy key in any case, a bearer token — also URL-encoded as `Bearer%20…` — or a `Basic` value that decodes to `user:password`, a JWT, `user:password@` or a token as the user in a URL, a `password=…` pair, another secret-named key with a credential-shaped value, a private-key header) is **dropped, never stored**; the whole value is checked before it is cut to `max_value_chars`, so no prefix of a credential is kept. Detection looks for a credential-shaped body, not a keyword: `Basic analysis`, `token: refresh` and `ssh://git@github.com/org/repo` are kept. Dropped values are counted in `token_opt_usage_tags_dropped_total{reason="secret"}` (`reason="invalid"` for non-printable values). The settings are read from the global config only — a tenant's or team's overrides cannot change what is recorded — and an unreadable `tags` section records nothing. Tags are what the caller asserts: they never select a team, a limit, a route or a config (`usage_events.team` is the authenticated team, so the two may differ).
 
 **Observability / FinOps** (`portal.finops.*`) — tunes the Observability tab's spend forecast + anomaly detector:
 

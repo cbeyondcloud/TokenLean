@@ -50,7 +50,7 @@ def _redis(team_spent):
     return redis
 
 
-async def _post(body, key, team_spent=None, acompletion=None):
+async def _post(body, key, team_spent=None, acompletion=None, config=None):
     acompletion = acompletion or AsyncMock(return_value=c._LLM_RESPONSE_MOCK)
     redis = _redis(team_spent)
     add_to_spend = AsyncMock()
@@ -60,7 +60,7 @@ async def _post(body, key, team_spent=None, acompletion=None):
         patch("auth.api_key_manager._CACHE_LOADED_AT", 9999999999.0),
         patch("config_loader.load_config"),
         patch("config_loader.start_hot_reload"),
-        patch("config_loader.get_config", return_value=_config()),
+        patch("config_loader.get_config", return_value=config or _config()),
         patch("litellm.acompletion", acompletion),
         patch("auth.api_key_manager._access_llm_key_secret", return_value="sk-test-key"),
         patch("middleware.g05_cache.G05Cache.store_response", new_callable=AsyncMock),
@@ -123,3 +123,14 @@ async def test_the_team_overlay_applies_to_the_team_only():
     _, plain_call, _ = await _post(body, _PLAIN_KEY)
     assert team_call.await_args.kwargs["model"].endswith("gpt-4o")
     assert plain_call.await_args.kwargs["model"].endswith("gpt-4o-mini")
+
+
+@pytest.mark.asyncio
+async def test_a_misconfigured_team_cap_is_refused_and_says_so():
+    cfg = _config()
+    cfg["teams"]["payments"]["monthly_spend_cap_usd"] = -5
+    resp, acompletion, _ = await _post(_BODY, _TEAM_KEY, config=cfg)
+    assert resp.status_code == 429
+    err = resp.json()["error"]
+    assert err["code"] == "team_spend_cap_exceeded" and "misconfigured" in err["message"]
+    acompletion.assert_not_called()

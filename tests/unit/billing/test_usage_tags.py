@@ -100,8 +100,12 @@ class TestValues:
         "Basic dXNlcjpwYXNzd29yZA==",
         "https://deploy:" + "gh" + "p_" + "abcdefghijklmnopqrstuvwxyz0123456789"
         + "@github.com/acme/shop",
-        "https://user@github.com/acme/shop",
+        "https://deploy:hunter2@git.example/acme/shop",        # user:password in a URL
+        "https://" + "Ab3dEf6hIj9kLm2nOp5qRs8t" + "@github.com/acme/shop",  # token as user
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N",
+        "SK-" + "3f9a1c0b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e",   # upper-case prefix
+        "Bearer%20abcdef0123456789",                             # URL-encoded
+        "bearer+abcdef0123456789",
         "AK" + "IA" + "IOSFODNN7EXAMPLE",
         "gh" + "p_" + "abcdefghijklmnopqrstuvwxyz0123456789",
         "xo" + "xb-" + "1234567890-abcdefghij",
@@ -119,10 +123,20 @@ class TestValues:
         "builder@1.4.0", "planner@1.2.0", "dev@acme.test", "task-runner", "risk-review",
         "3f2b9c3e-8a51-4c1e-9d7a-2b9e0c4d5f61", "9fceb02d0ae598e95dc970b74767f19372d61af8",
         "policy-2026-10-22", "standard", "sk-short", "desk-booking-service-v2",
+        # Words that only look like a credential keyword: the body is what decides.
+        "Basic analysis", "basic assistant", "bearer analysis", "token: refresh",
+        "secret: rotation", "ssh://git@github.com/acme/payments",
+        "https://user@github.com/acme/shop", "TASK-1234567890123456789012",
     ])
     def test_ordinary_values_are_kept(self, value):
         assert not looks_like_secret(value)
         assert extract_tags({"x-agentic-repo": value}, {}) == {"repo": value}
+
+    @pytest.mark.parametrize("pad", [230, 240, 246, 250, 254])
+    def test_a_credential_straddling_the_cap_is_dropped_not_cut(self, pad):
+        # Scanned before the value is cut: otherwise a prefix of the key would be stored.
+        key = "sk-proj-" + "aB3dE5gH7jK9mN1pQ3sT5vW7yZ"
+        assert extract_tags({"x-agentic-step": "x" * pad + " " + key}, {}) is None
 
     def test_a_dropped_value_is_counted_by_reason(self):
         before = usage_tags.TAGS_DROPPED.labels(reason="secret")._value.get()

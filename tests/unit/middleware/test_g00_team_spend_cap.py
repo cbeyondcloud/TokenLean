@@ -187,3 +187,19 @@ class TestTheCounter:
                     raise ConnectionError("down")
             with patch("middleware.g00_rate_limit._get_redis", return_value=_Boom()):
                 await add_to_spend("t:acme:", 0.25, team="payments")
+
+
+class TestAnInvalidCap:
+    """A cap that is set but unreadable (negative, NaN, infinite, not a number) refuses the
+    team's requests: a broken cap is never read as "no cap" (review)."""
+
+    @pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), "lots"])
+    async def test_refused_without_reading_the_counter(self, captured, value):
+        ctx = _Ctx(config=_cfg(team_cap=value))
+        with pytest.raises(RateLimitExceeded) as ei:
+            await _run(ctx, _Redis(fail=True))          # not even Redis is needed
+        assert ei.value.limit_type == "team_spend_cap_exceeded"
+        assert "cap_invalid" in ei.value.scope
+
+    async def test_only_while_the_switch_is_on(self, captured):
+        await _run(_Ctx(config=_cfg(team_cap=-1, enabled=False)), _Redis())
