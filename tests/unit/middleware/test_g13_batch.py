@@ -672,6 +672,32 @@ class TestABatchedRequestsCostReachesTheSpendCap:
             assert await self._flush(self._item(), self._USAGE) == "completed"
         assert added == []
 
+    # ── ST-1: a team's batched request also counts against the team's cap ──────────────
+
+    async def test_the_queued_request_names_its_team_only_when_it_has_one(self, make_ctx):
+        from middleware.g13_batch import _accumulate
+        ctx = make_ctx([{"role": "user", "content": "hi"}])
+        ctx.tenant_id, ctx.redis_prefix = "acme", "t:acme:"
+        queued = []
+        for team, impersonator in (("payments", None), ("default", None), ("payments", "ops")):
+            ctx.team, ctx.impersonator_tenant_id = team, impersonator
+            redis = AsyncMock()
+            redis.xlen = AsyncMock(return_value=0)
+            with patch("middleware.g13_batch._get_redis", return_value=redis):
+                assert await _accumulate(ctx, "topic1") is True
+            queued.append(json.loads(redis.xadd.await_args.args[1]["payload"]).get("spend_team"))
+        # No key for the default team (the payload is as before), none for an admin key.
+        assert queued == ["payments", None, None]
+
+    async def test_the_answer_s_cost_is_added_to_the_team_s_counter_too(self, monkeypatch):
+        from middleware.g00_rate_limit import G00RateLimit
+        from savings.calculator import estimate_cost
+        added = self._spend_counter(monkeypatch)
+        assert await self._flush(self._item(spend_team="payments"), self._USAGE) == "completed"
+        cost = pytest.approx(estimate_cost(1200, 300, "gpt-4o-mini"))
+        assert added == [(G00RateLimit.spend_key("t:acme:"), cost),
+                         (G00RateLimit.team_spend_key("t:acme:", "payments"), cost)]
+
 
 class TestCompactJsonToToon:
     """Boundary tests for the lowered TOON array-length trigger threshold

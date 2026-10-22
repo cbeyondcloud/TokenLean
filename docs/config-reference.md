@@ -135,6 +135,38 @@ does not exist or cannot be read, and a lookup that misses the cache runs off th
 If Secret Manager cannot be reached, the read is retried within seconds and the last key it
 gave is still served. So a rotated or newly added platform key takes up to that long to apply.
 
+### teams — a team level under the tenant
+
+A proxy key can be bound to a **team** of its tenant at issuance (`create_key(team=...)`,
+`scripts/issue-key.sh issue --team NAME`; 1–64 characters of `A-Z a-z 0-9 . _ -`, not
+`default`). A request's team is, in order: the key's team binding; else, for a key issued
+with `gateway: true`, its `X-Team` header; else `default` (no team). The binding wins over
+any header. The team is written to `usage_events.team` and returned by `/admin/usage-export`,
+used as the `team` metric label (bounded by `G18_observability.label_values.team`), and
+selects `rate_limit.per_team` limits.
+
+A team's settings live under `teams.<team>` (in this file, or in the tenant's own
+`tenant_configs` overrides), with the operator's `tenants.<id>.teams.<team>` merged over them:
+
+```yaml
+teams:
+  payments:
+    monthly_spend_cap_usd: 50      # the team's own monthly USD ceiling
+    config:                        # merged over the tenant's config for this team's requests
+      groups:
+        G5_cache: {cache_scope: tenant+model}
+      proxy:
+        default_model: gpt-4o-mini
+```
+
+| Key | Description |
+|---|---|
+| `monthly_spend_cap_usd` | The team's monthly USD cap, checked by G00 while `rate_limit.spend_cap.enabled` is on (same `grace_pct` and `exempt_tenants` as the tenant cap) against the team's own counter `t:<tenant>:team:<team>:spend:<YYYYMM>`. Over it: **429 `team_spend_cap_exceeded`** (`Retry-After: 86400`) before any provider call, and a `team_spend_cap.reached` event; `warn_pct` fires a one-shot `team_budget.threshold`. The tenant cap still applies to the team's requests. Absent, 0 or not a number = no team cap. |
+| `config` | An overlay deep-merged over the tenant's effective config for the team's requests, with the `CONFIG_OVERLAYS` rules (mappings merge, lists and scalars replace, a null changes nothing). Only the **`groups`** and **`proxy`** sections may change; any other section is ignored with a warning, so a team overlay cannot lift a cap, switch off a gate, change metering or add a provider. A team's setting is treated as the tenant's own choice (e.g. a G30/G31 `threshold` stays capped as a tenant's would be). |
+
+The `default` team never has settings, a cap or an overlay: a deployment that binds no key to a
+team and has no `teams:` block behaves exactly as before.
+
 ### rate_limit extras
 
 | Parameter | Default | Description |
@@ -336,7 +368,7 @@ Request throttling at the gate (token bucket). Lives at the top level, not under
 | `default.requests_per_minute` | `60` | Per-minute limit applied to all callers without an override |
 | `default.requests_per_hour` | `1000` | Per-hour limit applied to all callers without an override |
 | `per_user.<id>.requests_per_minute` / `.requests_per_hour` | *(per user)* | Override limits for a specific proxy key (matched on the key-bound principal, never an `X-User-ID` override) |
-| `per_team.<id>.requests_per_minute` / `.requests_per_hour` | *(per team)* | Override limits for a team. Matches **only a gateway key's team** — `X-Team` is trusted only from a key issued with `gateway: true`; every other key is team `default` |
+| `per_team.<id>.requests_per_minute` / `.requests_per_hour` | *(per team)* | Override limits for a team. Matches only an **authenticated** team: the team a key is bound to (see [teams](#teams--a-team-level-under-the-tenant)), or a gateway key's `X-Team` — `X-Team` is trusted only from a key issued with `gateway: true`; every other key is team `default` |
 
 > **Bucket identity.** A rate-limit bucket is keyed on the authenticated identity — tenant + key-bound principal + team — never on a client-chosen header. Sending a different `X-Team` or `X-User-ID` per request cannot open a fresh bucket, claim another team's limit, or split your own. A customer's API gateway that legitimately stamps a team per request is issued a `gateway` key, which gets one bucket per team.
 
@@ -940,7 +972,7 @@ Agent-architecture enforcement — bounds system-prompt size and tool count.
 | `langfuse_host` | `http://langfuse-svc` | **Not read by the proxy.** The Langfuse endpoint comes from the `LANGFUSE_HOST` environment variable (the local compose stack sets `http://langfuse:3000`); keys from `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`. Setting this key changes nothing |
 | `prometheus_enabled` | `true` | Expose `/metrics` Prometheus counters |
 | `capture_trace_content` | `false` | Store the raw prompt and response in Langfuse traces (all tenants share one Langfuse project). A tenant's override wins. Even when on, a request whose PII G29 or G31 found and left in place (`flag`, or a `block`) is traced without its text, and with it off spans keep only their counts |
-| `label_values.team` / `label_values.feature` | *(unset)* | Allowlist for the `team` / `feature` metric label values. A list bounds cardinality: only `default` and the listed values keep their own label; anything else is folded to `other`. `"*"` keeps every value as-is. Unset, `feature` (any caller's `X-Feature`) keeps only `default`, and `team`, already the gateway-verified team, keeps its value. |
+| `label_values.team` / `label_values.feature` | *(unset)* | Allowlist for the `team` / `feature` metric label values. A list bounds cardinality: only `default` and the listed values keep their own label; anything else is folded to `other`. `"*"` keeps every value as-is. Unset, `feature` (any caller's `X-Feature`) keeps only `default`, and `team`, already the authenticated team (the key's team binding or a gateway's `X-Team`), keeps its value. |
 | `openllmetry_enabled` | `false` | Enable OTLP auto-instrumentation (set OTLP endpoint first). Needs the `traceloop-sdk` package, which the default image does not include — install it in your image, or the proxy logs a warning and leaves the feature off. Separate from Langfuse tracing (`langfuse_enabled`) |
 | `et_weights.input` | `1.0` | ET metric input weight |
 | `et_weights.cache_read` | `0.1` | ET metric cache-read weight |
@@ -1270,7 +1302,9 @@ outlive a policy change. Per-tenant via `tenants.<id>.groups.G32_tool_eligibilit
 Core signal sites emit **PII-free** events through the OSS `events.py` seam; the **[Enterprise]**
 delivery product delivers them to a tenant's registered HTTPS endpoints (portal `/portal/webhooks`).
 On an OSS/self-host deploy no dispatcher is installed, so emission is a no-op. Event types:
-`spend_cap.reached`, `budget.threshold`, `guardrail.block`, `pii.detected`. Delivery is
+`spend_cap.reached`, `budget.threshold`, `guardrail.block`, `pii.detected`, `trial.threshold`,
+`trial.expired`, `team_spend_cap.reached`, `team_budget.threshold` (the last two carry the
+`team`; see [teams](#teams--a-team-level-under-the-tenant)). Delivery is
 HMAC-SHA256 signed (`X-TokenLean-Signature: sha256=<hex>` over the raw body, per-endpoint secret
 shown once at registration, stored Fernet-encrypted) with bounded exponential-backoff retry and a
 Redis dead-letter on final failure.

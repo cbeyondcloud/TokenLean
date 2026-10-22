@@ -55,6 +55,10 @@ ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS trial BOOLEAN NOT NULL DEFAULT
 -- The tenant of an admin key that sent the request as this tenant (X-Tenant-ID); such a row
 -- is never billable. Empty for the tenant's own traffic.
 ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS impersonated_by TEXT NOT NULL DEFAULT '';
+-- ST-1: the request's trusted team ('default' = no team; '' = written before this column).
+-- Additive: code that does not know the column keeps inserting. Down:
+-- infra/migrations/down/usage_events_team_tags.sql.
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS team TEXT NOT NULL DEFAULT '';
 -- #34: provider prompt-cache accounting — the half of cache billing (writes) that was
 -- previously reported nowhere, plus its cost split. NULLABLE with no DEFAULT on purpose:
 -- "the provider reported nothing" must stay distinguishable from "it reported zero".

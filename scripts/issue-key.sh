@@ -3,7 +3,8 @@
 # issue-key.sh — Issue or revoke proxy API keys stored in Secret Manager
 # =============================================================================
 # Usage:
-#   ./scripts/issue-key.sh issue  --tenant <id> [--tier free|enterprise] [--admin] [--gateway] [--project ID]
+#   ./scripts/issue-key.sh issue  --tenant <id> [--tier free|enterprise] [--admin] [--gateway]
+#                                 [--team NAME] [--project ID]
 #   ./scripts/issue-key.sh revoke --tenant <id>  [--project ID]
 #   ./scripts/issue-key.sh list                  [--project ID]
 #   (issue/revoke also take --backend blob and --region R — see "Key store" below)
@@ -11,6 +12,9 @@
 #   --admin    key may impersonate another tenant via X-Tenant-ID (operator/benchmark).
 #   --gateway  key is a customer API gateway: its X-Team header is trusted (selects the
 #              rate-limit bucket + team metric label). Every other key's X-Team is ignored.
+#   --team     bind the key to a team of the tenant (1-64 of A-Z a-z 0-9 . _ -, not
+#              "default"): its requests carry that team (usage_events.team, team spend cap,
+#              team config overlay), whatever X-Team says.
 #
 # Key store: this script writes ONLY the Secret Manager blob. issue/revoke first read the
 # deployed Cloud Run service (PROXY_SERVICE_NAME, default token-proxy; --region or
@@ -20,7 +24,8 @@
 #
 # The proxy key secret in Secret Manager is a JSON object mapping the SHA-256 of
 # each raw key to its tenant metadata (new format):
-#   { "<sha256_of_key>": {"tenant_id": "...", "tier": "...", "admin"?: true, "gateway"?: true}, ... }
+#   { "<sha256_of_key>": {"tenant_id": "...", "tier": "...", "admin"?: true, "gateway"?: true,
+#                          "team"?: "..."}, ... }
 # Legacy string entries ({ "<hash>": "<user_id>" }) are still accepted by the
 # proxy but resolve to the "default" tenant — always issue new-format keys.
 #
@@ -43,6 +48,7 @@ TENANT_ID=""
 TIER="free"
 ADMIN="false"
 GATEWAY="false"
+TEAM=""
 PROJECT_ID=""
 SECRET_NAME="${PROXY_KEYS_SECRET_NAME:-token-proxy-api-keys}"
 BACKEND=""
@@ -63,6 +69,7 @@ while [[ $# -gt 0 ]]; do
     --tier)    TIER="$2";       shift 2 ;;
     --admin)   ADMIN="true";    shift ;;
     --gateway) GATEWAY="true";  shift ;;
+    --team)    TEAM="$2";       shift 2 ;;
     --project) PROJECT_ID="$2"; shift 2 ;;
     --secret)  SECRET_NAME="$2"; shift 2 ;;
     --backend) BACKEND="$2";    shift 2 ;;
@@ -172,6 +179,12 @@ cmd_issue() {
     free|enterprise) ;;
     *) error "--tier must be free|enterprise (got '${TIER}')" ;;
   esac
+  # Same rule as the proxy's create_key (tenancy.teams.valid_team_name).
+  if [[ -n "$TEAM" ]]; then
+    if [[ "$TEAM" == "default" || ! "$TEAM" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+      error "--team must be 1-64 characters of A-Z a-z 0-9 . _ - and not 'default' (got '${TEAM}')"
+    fi
+  fi
   require_blob_backend
 
   local raw_key
@@ -192,9 +205,9 @@ print(any(owner(v) == t for v in d.values()))" 2>/dev/null | grep -q "True"; the
     warn "Tenant '${tenant}' already has a key. Issuing a new one (old key remains valid until revoked)."
   fi
 
-  # Add new key hash → {tenant_id, tier, admin?, gateway?} mapping (new format).
+  # Add new key hash → {tenant_id, tier, admin?, gateway?, team?} mapping (new format).
   local updated_json
-  updated_json=$(echo "$existing_json" | KEY_HASH="$key_hash" TENANT="$tenant" TIER="$TIER" ADMIN="$ADMIN" GATEWAY="$GATEWAY" python3 -c "
+  updated_json=$(echo "$existing_json" | KEY_HASH="$key_hash" TENANT="$tenant" TIER="$TIER" ADMIN="$ADMIN" GATEWAY="$GATEWAY" TEAM="$TEAM" python3 -c "
 import os, sys, json, datetime
 d = json.load(sys.stdin)
 meta = {
@@ -208,12 +221,15 @@ if os.environ.get('ADMIN') == 'true':
 # request); every other key's X-Team is ignored. Trust flag — issuance only.
 if os.environ.get('GATEWAY') == 'true':
     meta['gateway'] = True
+# The key's team binding: it outranks any X-Team the caller sends.
+if os.environ.get('TEAM'):
+    meta['team'] = os.environ['TEAM']
 d[os.environ['KEY_HASH']] = meta
 print(json.dumps(d))
 ")
 
   store_keys_json "$updated_json"
-  success "Key issued for tenant: ${tenant} (tier=${TIER}, admin=${ADMIN}, gateway=${GATEWAY})"
+  success "Key issued for tenant: ${tenant} (tier=${TIER}, admin=${ADMIN}, gateway=${GATEWAY}${TEAM:+, team=${TEAM}})"
   echo ""
   echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
   echo -e "${GREEN}║  Proxy API Key — share this with the developer       ║${NC}"

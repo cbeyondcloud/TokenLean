@@ -75,6 +75,10 @@ class UsageEvent:
     # The tenant of the admin key that sent this request as tenant_id (X-Tenant-ID), empty
     # for the tenant's own traffic. Such a row is never billable (main._record_outcome).
     impersonated_by: str = ""
+    # ST-1: the request's trusted team (the key's team binding, else a gateway key's
+    # X-Team, else "default"). '' on rows written before the column existed. Observability
+    # and per-team rollups; never billed.
+    team: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -118,6 +122,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
     agent_id        TEXT        NOT NULL DEFAULT '',
     trial           BOOLEAN     NOT NULL DEFAULT false,
     impersonated_by TEXT        NOT NULL DEFAULT '',
+    team            TEXT        NOT NULL DEFAULT '',
     cache_read_tokens  INTEGER,
     cache_write_tokens INTEGER,
     cost_cache_read_usd  NUMERIC(12,6),
@@ -171,6 +176,10 @@ ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS trial BOOLEAN NOT NULL DEFAULT
 -- The tenant of an admin key that sent the request as this tenant (X-Tenant-ID); such a row
 -- is never billable. Empty for the tenant's own traffic.
 ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS impersonated_by TEXT NOT NULL DEFAULT '';
+-- ST-1: the request's trusted team ('default' = no team; '' = written before this column).
+-- Additive: code that does not know the column keeps inserting. Down:
+-- infra/migrations/down/usage_events_team_tags.sql.
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS team TEXT NOT NULL DEFAULT '';
 -- #34: provider prompt-cache accounting. Deliberately NULLABLE with no DEFAULT — a row
 -- written before this shipped, or by a provider that reports no cache counts, must stay
 -- distinguishable from one that genuinely saw zero cache activity.

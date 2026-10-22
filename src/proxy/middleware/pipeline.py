@@ -3,7 +3,7 @@ import os
 import time
 from typing import Any, Awaitable, Dict, Optional, Tuple
 
-from config_loader import get_config
+from config_loader import deep_merge as config_deep_merge, get_config
 from middleware import RequestContext, apply_operator_overlay
 from middleware import cache_floor
 from middleware.g00_rate_limit import G00RateLimit
@@ -11,6 +11,7 @@ from protocols.base import routing_header_params
 from providers import get_adapter
 from tenancy.resolver import apply_caller_identity, resolve_tenant
 from tenancy.config import TenantConfigLoader, deep_merge
+from tenancy.teams import apply_team_overlay
 from tracing import otel
 from middleware.g01_compression import G01Compression
 from middleware.g02_template_registry import G02TemplateRegistry
@@ -253,6 +254,14 @@ class OptimisationPipeline:
         # Applied AFTER the Postgres overlay so the operator path keeps winning, exactly as
         # resolve_group_config already made it win for the groups that used it.
         ctx.config = apply_operator_overlay(ctx.config, ctx.tenant_id)
+        # Team overlay (ST-1): `teams.<team>.config`, merged last for the team's requests. A
+        # team setting counts as the tenant's own choice (tenant_config_overrides), so the
+        # groups that cap or defer to a tenant's choice treat it the same way. No team or no
+        # overlay: the same config object, nothing copied.
+        ctx.config, team_overlay = apply_team_overlay(ctx.config, ctx.tenant_id, ctx.team)
+        if team_overlay:
+            ctx.tenant_config_overrides = config_deep_merge(
+                ctx.tenant_config_overrides or {}, team_overlay)
 
         # Per-tenant default model: when the request omitted `model`, honour the tenant's
         # proxy.default_model / fallback_request_model from the now-merged ctx.config. This

@@ -21,6 +21,19 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-22
+
+### Teams under a tenant: a key bound to a team, team spend caps and team config — Enhancement (OSS)
+A proxy key can now be bound to a team of its tenant at issuance (`issue-key.sh --team NAME`,
+`create_key(team=...)`). The binding wins over any `X-Team` header, so callers cannot pick their team.
+The team is written to a new `usage_events.team` column (additive; down script in
+`infra/migrations/down/`), returned by `/admin/usage-export`, used as the `team` metric label and by
+`rate_limit.per_team`. `teams.<team>.monthly_spend_cap_usd` gives a team its own monthly ceiling under
+the tenant's: over it, a 429 `team_spend_cap_exceeded` before any provider call. `teams.<team>.config`
+is merged over the tenant's config for that team's requests (`groups` and `proxy` only). Nothing
+changes for a deployment that binds no key to a team.
+- **OSS:** team binding, team column, team caps and events, team overlays — all in the core proxy.
+
 ## 2026-10-21
 
 ### G01's Kompress fallback is removed: it never ran — Bug fix

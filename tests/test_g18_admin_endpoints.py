@@ -251,6 +251,23 @@ class TestUsageExport:
         assert "nova-med" in args
 
     @pytest.mark.asyncio
+    async def test_usage_export_includes_the_team(self, client, monkeypatch):
+        """ST-1: each record names its team ('default' for none, '' before the column)."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
+        pool = _FakePool([{"tenant_id": "nova-med", "request_id": "req-1", "team": "payments"}])
+
+        async def _fake_get_pool(_dsn):
+            return pool
+
+        with patch("cache.pg_pool.get_pg_pool", _fake_get_pool):
+            response = await client.post("/admin/usage-export", json={},
+                                         headers={"Authorization": "Bearer admin-key"})
+        assert response.status_code == 200
+        sql, _args = pool.conn.fetched_args
+        assert ", team" in sql.split("FROM")[0]
+        assert json.loads(response.text.splitlines()[0])["team"] == "payments"
+
+    @pytest.mark.asyncio
     async def test_a_non_admin_export_is_always_its_own_tenant(self, client, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
         pool = _FakePool([])

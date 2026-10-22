@@ -32,8 +32,11 @@ GUARDRAIL_BLOCK = "guardrail.block"           # G30/G31 injection block (content
 PII_DETECTED = "pii.detected"                 # G29/G31 PII flagged / masked / blocked
 TRIAL_THRESHOLD = "trial.threshold"           # free trial crossed a warn %% (days/requests)
 TRIAL_EXPIRED = "trial.expired"               # free trial exhausted → requests now 402
+TEAM_SPEND_CAP_REACHED = "team_spend_cap.reached"  # a team's monthly USD cap hit → refused
+TEAM_BUDGET_THRESHOLD = "team_budget.threshold"    # a team's spend crossed a warn %% of its cap
 
-# All event types a tenant may subscribe a webhook endpoint to.
+# All event types a tenant may subscribe a webhook endpoint to. Append only: the strings
+# and their order are part of the public webhook contract.
 ALL_EVENT_TYPES = (
     SPEND_CAP_REACHED,
     BUDGET_THRESHOLD,
@@ -41,6 +44,8 @@ ALL_EVENT_TYPES = (
     PII_DETECTED,
     TRIAL_THRESHOLD,
     TRIAL_EXPIRED,
+    TEAM_SPEND_CAP_REACHED,
+    TEAM_BUDGET_THRESHOLD,
 )
 
 

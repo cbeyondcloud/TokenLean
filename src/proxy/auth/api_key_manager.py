@@ -317,13 +317,29 @@ def is_gateway_key(metadata: Optional[dict]) -> bool:
 
     A gateway stamps ``X-Team`` on every request, overwriting whatever the calling app
     sent, so only such a key's ``X-Team`` may select a G00 bucket, a ``per_team`` limit or
-    a team metric label (``tenancy.resolver.resolve_team``); any other key is team
-    ``"default"``. Set at issuance only (``create_key(gateway=True)`` /
+    a team metric label (``tenancy.resolver.resolve_team``); any other key is its bound
+    team (``key_team``) or ``"default"``. A team binding outranks a gateway's ``X-Team``.
+    Set at issuance only (``create_key(gateway=True)`` /
     ``issue-key.sh --gateway``) — never through ``create_key(extra=…)``. Strictly a JSON
     ``true``: a trust flag must not be switched on by a stray truthy string. Legacy
     string-format keys (metadata is None) are never gateway keys.
     """
     return bool(isinstance(metadata, dict) and metadata.get("gateway") is True)
+
+
+def key_team(metadata: Optional[dict]) -> Optional[str]:
+    """The team a validated key is bound to (ST-1), or ``None``.
+
+    Set at issuance only (``create_key(team=...)``), never through ``extra``: the team
+    selects a spend cap and a config overlay (``tenancy.teams``), and it outranks a gateway
+    key's ``X-Team`` (``tenancy.resolver.resolve_team``). Any non-blank string is returned
+    stripped, so a key edited into the store by hand still binds; issuance is what keeps
+    names to the safe set. Legacy string-format keys (metadata is None) have no team.
+    """
+    team = metadata.get("team") if isinstance(metadata, dict) else None
+    if not isinstance(team, str) or not team.strip():
+        return None
+    return team.strip()
 
 
 def is_suspended(metadata: Optional[dict]) -> bool:
@@ -633,6 +649,7 @@ def create_key(
     extra: Optional[dict] = None,
     *,
     gateway: bool = False,
+    team: Optional[str] = None,
 ) -> Tuple[str, str, dict]:
     """Create a proxy key for a tenant, persist it, refresh the cache.
 
@@ -643,17 +660,23 @@ def create_key(
     per-tenant X-User-ID allowlist — WS25); reserved keys are not overridable.
     ``gateway`` marks the key as a customer API gateway's (see ``is_gateway_key``); like
     ``admin`` it is a trust flag, so it is reserved in ``extra`` and set only here.
+    ``team`` binds the key to a team of the tenant (see ``key_team``): 1-64 characters of
+    ``A-Z a-z 0-9 . _ -``, not ``default``. Reserved in ``extra`` for the same reason.
     """
+    from tenancy.teams import valid_team_name
+
     tenant_id = (tenant_id or "").strip()
     if not tenant_id:
         raise ValueError("tenant_id is required")
+    if team is not None and not valid_team_name(team):
+        raise ValueError("team must be 1-64 characters of A-Z a-z 0-9 . _ - and not 'default'")
     raw = raw_key or f"{_KEY_PREFIX}{secrets.token_hex(24)}"
     key_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     metadata: dict = {}
     if isinstance(extra, dict):
         metadata.update({k: v for k, v in extra.items()
                          if k not in ("tenant_id", "tier", "created_at", "admin", "suspended",
-                                      "contract_inactive", "ip_allowlist", "gateway")})
+                                      "contract_inactive", "ip_allowlist", "gateway", "team")})
     metadata.update({
         "tenant_id": tenant_id,
         "tier": (tier or "free").strip().lower(),
@@ -663,6 +686,8 @@ def create_key(
         metadata["admin"] = True
     if gateway:
         metadata["gateway"] = True
+    if team is not None:
+        metadata["team"] = team
 
     def add(store):
         if key_hash in store:

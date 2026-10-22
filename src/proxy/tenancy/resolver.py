@@ -16,9 +16,9 @@ Resolution order:
 The resolver is synchronous so it can be called from both async FastAPI request
 handlers and sync test helpers.
 
-The same rule governs the TEAM (``X-Team``): honoured only for keys flagged
-``gateway`` (``resolve_team``), and every identity G00/G18 act on is stamped onto the
-request context once, by ``apply_caller_identity``.
+The same rule governs the TEAM: the team a key is bound to at issuance wins; otherwise
+``X-Team`` is honoured only for keys flagged ``gateway`` (``resolve_team``). Every identity
+G00/G18 act on is stamped onto the request context once, by ``apply_caller_identity``.
 """
 import hashlib
 import logging
@@ -115,12 +115,18 @@ DEFAULT_TEAM = "default"
 _MAX_TEAM_TAG_CHARS = 64
 
 
-def resolve_team(header_team: Optional[str], key_is_gateway: bool) -> str:
-    """The request's trusted team: a gateway key's ``X-Team`` value, else ``"default"``.
+def resolve_team(header_team: Optional[str], key_is_gateway: bool,
+                 key_team: Optional[str] = None) -> str:
+    """The request's trusted team: the team the key is bound to (ST-1), else a gateway key's
+    ``X-Team`` value, else ``"default"``.
 
-    Pass the HEADER (the gateway's stamp), never a JSON body field — a body passes
-    through a gateway untouched, so a body ``x_team`` is still the app's choice.
+    The binding is set at key issuance (``api_key_manager.key_team``) and wins over any
+    header, a gateway's included. Pass the HEADER (the gateway's stamp), never a JSON body
+    field — a body passes through a gateway untouched, so a body ``x_team`` is still the
+    app's choice.
     """
+    if isinstance(key_team, str) and key_team.strip():
+        return key_team.strip()
     if not key_is_gateway:
         return DEFAULT_TEAM
     team = (header_team or "").strip()
@@ -156,7 +162,8 @@ def apply_caller_identity(ctx, headers: Dict[str, str]) -> None:
       the user for a legacy key), captured BEFORE any X-User-ID override: an allow-listed
       override is still the caller's choice, so it must never select a rate-limit bucket.
       ``ctx.user_id`` stays the attribution id;
-    * ``ctx.team`` — :func:`resolve_team`.
+    * ``ctx.team`` — :func:`resolve_team`, from the key's team binding (``_auth_team``) and
+      the ``X-Team`` header.
 
     ``headers`` must be lower-cased.
     """
@@ -164,7 +171,8 @@ def apply_caller_identity(ctx, headers: Dict[str, str]) -> None:
     ctx.is_gateway_key = bool(params.get("_auth_gateway", False))
     ctx.key_principal = str(params.get("_auth_principal") or params.get("_auth_tenant_id")
                             or getattr(ctx, "user_id", "") or "")
-    ctx.team = resolve_team(headers.get("x-team"), ctx.is_gateway_key)
+    ctx.team = resolve_team(headers.get("x-team"), ctx.is_gateway_key,
+                            key_team=params.get("_auth_team"))
 
 
 def register_tenant(api_key_hash: str, ctx: TenantContext) -> None:

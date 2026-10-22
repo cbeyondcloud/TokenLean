@@ -36,6 +36,7 @@ litellm.drop_params = True
 from auth.api_key_manager import (
     validate_proxy_key, is_admin_key, is_gateway_key, is_suspended,
     is_contract_inactive, get_ip_allowlist, key_cached_and_fresh, key_store_backend_installed,
+    key_team,
 )
 from net.client_ip import ClientIPMiddleware, request_client_ip
 from net.ip_allowlist import ip_allowed
@@ -595,7 +596,8 @@ async def usage_export(request: Request):
         sql = (
             "SELECT tenant_id, request_id, timestamp, baseline_tokens, optimised_tokens, "
             "proxy_optimised_tokens, provider_prompt_tokens, "
-            "tokens_saved, cost_saved_usd, groups_applied, pricing_tier, model, routed_model "
+            "tokens_saved, cost_saved_usd, groups_applied, pricing_tier, model, routed_model, "
+            "team "
             "FROM usage_events WHERE timestamp >= $1 AND timestamp <= $2"
         )
         args = [start_dt, end_dt]
@@ -1388,7 +1390,9 @@ def _bump_spend_counter(ctx) -> None:
     if cost <= 0:
         return
     try:
-        _after_response(add_to_spend(counter_prefix(ctx), cost), "spend-counter")
+        # A team's request also adds to the team's counter (ST-1, G00's team spend cap).
+        _after_response(add_to_spend(counter_prefix(ctx), cost, team=getattr(ctx, "team", None)),
+                        "spend-counter")
     except RuntimeError:
         pass
 
@@ -2091,6 +2095,8 @@ async def _serve_core(
     params["_auth_tier"] = meta.get("tier", "free")
     params["_auth_admin"] = bool(meta.get("admin", False))
     params["_auth_gateway"] = is_gateway_key(tenant_metadata)
+    # The team the key is bound to (ST-1), "" for none: it outranks a gateway's X-Team.
+    params["_auth_team"] = key_team(tenant_metadata) or ""
     # G00 rate-limits on the key-bound identity, never an X-User-ID override (which the
     # caller chooses within its allowlist). _authenticate records it before any override.
     params["_auth_principal"] = str(
@@ -2172,12 +2178,17 @@ async def _serve_core(
                         else f"Monthly spend cap exceeded ({exc.scope}). "
                         "Raise the cap in the portal or wait for the next billing period."
                         if exc.limit_type == "spend_cap_exceeded"
+                        else f"Monthly spend cap of this team exceeded ({exc.scope}). "
+                        "Ask your administrator to raise the team's cap, or wait for the "
+                        "next billing period."
+                        if exc.limit_type == "team_spend_cap_exceeded"
                         else f"Rate limit exceeded: {exc.limit_type} for {exc.scope}"
                     ),
                     "type": "rate_limit_exceeded",
                     "code": (
                         exc.limit_type
-                        if exc.limit_type in ("quota_exceeded", "spend_cap_exceeded")
+                        if exc.limit_type in ("quota_exceeded", "spend_cap_exceeded",
+                                              "team_spend_cap_exceeded")
                         else "rate_limit_exceeded"
                     ),
                 }
