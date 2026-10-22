@@ -16,3 +16,25 @@ billing:
     # in-dashboard latency-percentile + error-rate panels have data. These rows are
     # EXCLUDED from the request-count invoice. Set false to restore the old 2xx-only write.
     persist_all_outcomes: true
+    # Usage tags: allow-listed request headers stored as a JSONB object in
+    # usage_events.tags, so a caller can attribute cost to its own dimensions (run, step,
+    # agent, ...). Only the headers listed below are recorded; any other header is ignored.
+    # Values are trimmed, cut to max_value_chars, must be printable ASCII, and a value that
+    # looks like a credential is dropped (counted in token_opt_usage_tags_dropped_total).
+    # Read from this global config only: a tenant cannot change what is recorded. The tags
+    # are caller-asserted and select nothing (usage_events.team is the authenticated team).
+    # `headers` replaces the default list below entirely; `{}` records nothing.
+    tags:
+      enabled: true
+      max_value_chars: 256          # at most 1024
+      headers:                      # request header -> tag key ([a-z][a-z0-9_]*)
+        X-Agentic-Team: team
+        X-Agentic-User: user
+        X-Agentic-Repo: repo
+        X-Agentic-Pipeline: pipeline
+        X-Agentic-Run-Id: run_id
+        X-Agentic-Step: step
+        X-Agentic-Agent: agent
+        X-Agentic-Parent-Agent: parent_agent
+        X-Agentic-Tier: tier
+        X-Agentic-Policy-Version: policy_version

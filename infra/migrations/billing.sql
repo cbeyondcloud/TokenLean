@@ -59,6 +59,9 @@ ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS impersonated_by TEXT NOT NULL 
 -- Additive: code that does not know the column keeps inserting. Down:
 -- infra/migrations/down/usage_events_team_tags.sql.
 ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS team TEXT NOT NULL DEFAULT '';
+-- ST-2: usage tags, the allow-listed request headers the caller sent for attribution
+-- (billing/tags.py). NULLABLE with no DEFAULT: NULL = the request carried none. Same down.
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS tags JSONB;
 -- #34: provider prompt-cache accounting — the half of cache billing (writes) that was
 -- previously reported nowhere, plus its cost split. NULLABLE with no DEFAULT on purpose:
 -- "the provider reported nothing" must stay distinguishable from "it reported zero".

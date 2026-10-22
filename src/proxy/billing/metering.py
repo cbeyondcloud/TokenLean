@@ -132,6 +132,8 @@ class UsageMeter:
             impersonated_by=getattr(ctx, "impersonator_tenant_id", None) or "",
             # ST-1: the trusted team. A gateway's X-Team is free text, so it is capped.
             team=str(getattr(ctx, "team", "") or "")[:_MAX_TEAM_CHARS],
+            # ST-2: the allow-listed request headers (billing/tags.py), already vetted.
+            tags=dict(getattr(ctx, "usage_tags", None) or {}) or None,
             # #34 — provider prompt-cache accounting. Passed through as-is so a None
             # (provider reported nothing) persists as SQL NULL rather than a 0 that would
             # read as "this call did no cache work".
@@ -155,10 +157,10 @@ class UsageMeter:
                  group_savings, status_code, billable, total_duration_ms, llm_duration_ms,
                  agent_id, trial,
                  cache_read_tokens, cache_write_tokens,
-                 cost_cache_read_usd, cost_cache_write_usd, impersonated_by, team)
+                 cost_cache_read_usd, cost_cache_write_usd, impersonated_by, team, tags)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
                     $16,$17,$18,$19,$20,$21,$22,$23,$24,
-                    $25::jsonb,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)
+                    $25::jsonb,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38::jsonb)
             ON CONFLICT (request_id) DO NOTHING
         """
         try:
@@ -183,6 +185,7 @@ class UsageMeter:
                     event.cache_read_tokens, event.cache_write_tokens,
                     event.cost_cache_read_usd, event.cost_cache_write_usd,
                     event.impersonated_by, event.team,
+                    json.dumps(event.tags) if event.tags else None,
                 )
         except Exception as exc:
             logger.warning("UsageMeter: Postgres insert failed: %s", exc)

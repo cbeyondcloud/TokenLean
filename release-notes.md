@@ -23,6 +23,16 @@ date changes.
 
 ## 2026-10-22
 
+### Usage tags: attribute cost to a run, a step or an agent from allow-listed headers — Enhancement (OSS)
+A new JSONB column `usage_events.tags` records the request headers on an operator allow-list
+(`billing.metering.tags.headers`; by default the ten `X-Agentic-*` identity headers an agent framework
+sends), one key per header, so cost can be summed per run, step or agent with `tags->>'run_id'`. Any other
+header is ignored. Values are trimmed, capped at 256 characters and must be printable ASCII; a value
+that looks like a credential is dropped and counted, never stored. The allow-list is read from the global
+config only, so a tenant cannot widen it. Tags select nothing: they are attribution. Rows without
+allow-listed headers store NULL; `/admin/usage-export` returns the tags.
+- **OSS:** the tags column, allow-list, value checks and export field ship in the core proxy.
+
 ### Teams under a tenant: a key bound to a team, team spend caps and team config — Enhancement (OSS)
 A proxy key can now be bound to a team of its tenant at issuance (`issue-key.sh --team NAME`,
 `create_key(team=...)`). The binding wins over any `X-Team` header, so callers cannot pick their team.

@@ -79,6 +79,10 @@ class UsageEvent:
     # X-Team, else "default"). '' on rows written before the column existed. Observability
     # and per-team rollups; never billed.
     team: str = ""
+    # ST-2: usage tags — the allow-listed request headers the caller sent for attribution
+    # (billing/tags.py), e.g. {"run_id": ..., "step": ..., "agent": ...}. None (SQL NULL)
+    # when the request carried none. Caller-asserted, observability only; never billed.
+    tags: Optional[Dict[str, str]] = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -123,6 +127,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
     trial           BOOLEAN     NOT NULL DEFAULT false,
     impersonated_by TEXT        NOT NULL DEFAULT '',
     team            TEXT        NOT NULL DEFAULT '',
+    tags            JSONB,
     cache_read_tokens  INTEGER,
     cache_write_tokens INTEGER,
     cost_cache_read_usd  NUMERIC(12,6),
@@ -180,6 +185,9 @@ ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS impersonated_by TEXT NOT NULL 
 -- Additive: code that does not know the column keeps inserting. Down:
 -- infra/migrations/down/usage_events_team_tags.sql.
 ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS team TEXT NOT NULL DEFAULT '';
+-- ST-2: usage tags, the allow-listed request headers the caller sent for attribution
+-- (billing/tags.py). NULLABLE with no DEFAULT: NULL = the request carried none. Same down.
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS tags JSONB;
 -- #34: provider prompt-cache accounting. Deliberately NULLABLE with no DEFAULT — a row
 -- written before this shipped, or by a provider that reports no cache counts, must stay
 -- distinguishable from one that genuinely saw zero cache activity.

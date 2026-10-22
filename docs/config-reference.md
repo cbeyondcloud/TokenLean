@@ -334,15 +334,24 @@ Token-savings **estimate** tuning. Reporting only — none of this affects the r
 - `provider_prompt_tokens` — provider-reported prompt tokens from the response `usage` (`z`), when the provider returns them.
 - `group_savings` — per-G-group realised token savings as JSONB (`{"G05": 3400, ...}`), non-zero steps only. Powers the portal's "savings by optimisation" view without querying the Langfuse traces blob.
 - `status_code`, `total_duration_ms`, `llm_duration_ms`, `billable` — reliability/latency observability. A non-2xx outcome is persisted as a `billable=false` row so the in-dashboard latency-percentile + error-rate panels have data; **`billable=false` rows are excluded from the request-count invoice** (invoice/quota SQL filters `COALESCE(billable, true)`).
+- `team` — the request's authenticated team (see [teams](#teams--a-team-level-under-the-tenant)): `default` for no team, `''` on rows written before the column existed.
+- `tags` — the request's **usage tags** as JSONB (`{"run_id": "…", "step": "…", "agent": "…"}`), `NULL` when the request carried none (see `billing.metering.tags` below). Query a key with `tags->>'run_id'`.
+
+Both columns are additive (`ADD COLUMN IF NOT EXISTS`, applied by the app at startup and by `infra/migrations/billing.sql`); an older release keeps inserting rows unchanged. To remove them after rolling back, run `infra/migrations/down/usage_events_team_tags.sql` by hand.
 
 (`x` = `baseline_tokens`. Billing is the request **count**, not tokens — see the two-track model in [request-flow-diagram.md](request-flow-diagram.md).)
 
-**Metering toggles** (`billing.metering.*`, both default `true`):
+**Metering toggles** (`billing.metering.*`):
 
 | Parameter | Default | Description |
 |---|---|---|
 | `group_savings_enabled` | `true` | Persist the per-group `group_savings` JSONB on each row (C1). Set `false` to drop the extra write. |
 | `persist_all_outcomes` | `true` | Persist an observability-only row for non-2xx outcomes (C2). Set `false` to restore the pre-C2 2xx-only write. Never affects billed request counts either way. |
+| `tags.enabled` | `true` | Record **usage tags**: each request header on the `tags.headers` allow-list becomes one key of `usage_events.tags`; every other header is ignored. |
+| `tags.headers` | the ten `X-Agentic-*` identity headers | Allow-list, `header name: tag key` (header names match in any case; tag keys `[a-z][a-z0-9_]*`, at most 64 entries). Default: `X-Agentic-Team: team`, `X-Agentic-User: user`, `X-Agentic-Repo: repo`, `X-Agentic-Pipeline: pipeline`, `X-Agentic-Run-Id: run_id`, `X-Agentic-Step: step`, `X-Agentic-Agent: agent`, `X-Agentic-Parent-Agent: parent_agent`, `X-Agentic-Tier: tier`, `X-Agentic-Policy-Version: policy_version`. A value set here **replaces** the default list; `{}` records nothing. |
+| `tags.max_value_chars` | `256` | Longer values are cut to this length (at most `1024`). |
+
+Tag values are trimmed and must be printable ASCII; a value that looks like a credential (a provider or proxy key, a bearer/basic token, a JWT, credentials in a URL, a `password=…` pair, a private-key header) is **dropped, never stored**, and counted in `token_opt_usage_tags_dropped_total{reason="secret"}` (`reason="invalid"` for non-printable values). The settings are read from the global config only — a tenant's or team's overrides cannot change what is recorded — and an unreadable `tags` section records nothing. Tags are what the caller asserts: they never select a team, a limit, a route or a config (`usage_events.team` is the authenticated team, so the two may differ).
 
 **Observability / FinOps** (`portal.finops.*`) — tunes the Observability tab's spend forecast + anomaly detector:
 

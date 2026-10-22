@@ -597,7 +597,7 @@ async def usage_export(request: Request):
             "SELECT tenant_id, request_id, timestamp, baseline_tokens, optimised_tokens, "
             "proxy_optimised_tokens, provider_prompt_tokens, "
             "tokens_saved, cost_saved_usd, groups_applied, pricing_tier, model, routed_model, "
-            "team "
+            "team, tags "
             "FROM usage_events WHERE timestamp >= $1 AND timestamp <= $2"
         )
         args = [start_dt, end_dt]
@@ -619,6 +619,9 @@ async def usage_export(request: Request):
             cost = record.get("cost_saved_usd")
             if cost is not None:
                 record["cost_saved_usd"] = float(cost)
+            # JSONB comes back from asyncpg as text: export the usage tags as an object.
+            if isinstance(record.get("tags"), str):
+                record["tags"] = json.loads(record["tags"])
             lines.append(json.dumps(record, separators=(",", ":")))
 
         if not lines:

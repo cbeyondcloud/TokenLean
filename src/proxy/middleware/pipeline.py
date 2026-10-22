@@ -3,6 +3,7 @@ import os
 import time
 from typing import Any, Awaitable, Dict, Optional, Tuple
 
+from billing.tags import extract_tags
 from config_loader import deep_merge as config_deep_merge, get_config
 from middleware import RequestContext, apply_operator_overlay
 from middleware import cache_floor
@@ -230,6 +231,10 @@ class OptimisationPipeline:
         # The key-bound principal + the trusted team (gateway keys only) that G00 limits
         # and G18 labels read — never a header a caller can choose freely.
         apply_caller_identity(ctx, headers)
+        # Usage tags (ST-2): the allow-listed request headers, for usage_events.tags. Read
+        # here, while ctx.config is still the global config, so no tenant or team overlay
+        # can change what is recorded. Attribution only: nothing selects behaviour on them.
+        ctx.usage_tags = extract_tags(headers, ctx.config)
         # I6: record actor→target when an admin key impersonates another tenant
         header_tenant = headers.get("x-tenant-id", "").strip()
         if key_is_admin and header_tenant and header_tenant != (key_tenant_id or ""):

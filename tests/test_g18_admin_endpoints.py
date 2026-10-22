@@ -268,6 +268,24 @@ class TestUsageExport:
         assert json.loads(response.text.splitlines()[0])["team"] == "payments"
 
     @pytest.mark.asyncio
+    async def test_usage_export_includes_the_tags_as_an_object(self, client, monkeypatch):
+        """ST-2: asyncpg returns JSONB as text; the record carries it as an object."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
+        pool = _FakePool([{"request_id": "req-1", "tags": '{"run_id": "r1"}'},
+                          {"request_id": "req-2", "tags": None}])
+
+        async def _fake_get_pool(_dsn):
+            return pool
+
+        with patch("cache.pg_pool.get_pg_pool", _fake_get_pool):
+            response = await client.post("/admin/usage-export", json={},
+                                         headers={"Authorization": "Bearer admin-key"})
+        assert response.status_code == 200
+        assert ", tags" in pool.conn.fetched_args[0].split("FROM")[0]
+        first, second = (json.loads(line) for line in response.text.splitlines())
+        assert first["tags"] == {"run_id": "r1"} and second["tags"] is None
+
+    @pytest.mark.asyncio
     async def test_a_non_admin_export_is_always_its_own_tenant(self, client, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
         pool = _FakePool([])

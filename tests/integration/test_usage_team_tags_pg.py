@@ -27,7 +27,7 @@ _MIGRATIONS = Path(__file__).resolve().parents[2] / "infra" / "migrations"
 _OLD_INSERT = ("INSERT INTO usage_events (tenant_id, request_id) VALUES ($1, $2)")
 
 
-def _ctx(request_id, team):
+def _ctx(request_id, team, tags=None):
     from middleware import RequestContext
     from savings.models import SavingsRecord
     savings = SavingsRecord(request_id=request_id, user_id="u1",
@@ -38,6 +38,7 @@ def _ctx(request_id, team):
                          config={"groups": {}}, savings=savings, tenant_id="ACME-PRD-01",
                          pricing_tier="free")
     ctx.team = team
+    ctx.usage_tags = tags
     return ctx
 
 
@@ -52,12 +53,14 @@ async def _exercise():
             await conn.execute((_MIGRATIONS / "billing.sql").read_text(encoding="utf-8"))
             await conn.execute(USAGE_EVENTS_DDL)
             await conn.execute(USAGE_EVENTS_DDL)
-        await UsageMeter(db_pool=pool).record(_ctx("req-team", "payments"), {})
+        await UsageMeter(db_pool=pool).record(
+            _ctx("req-team", "payments", {"run_id": "run-42", "step": "plan"}), {})
         await UsageMeter(db_pool=pool).record(_ctx("req-none", "default"), {})
         async with pool.acquire() as conn:
             await conn.execute(_OLD_INSERT, "ACME-PRD-01", "req-old-release")
             rows = {r["request_id"]: dict(r) for r in await conn.fetch(
-                "SELECT request_id, team FROM usage_events")}
+                "SELECT request_id, team, tags->>'run_id' AS run_id, tags IS NULL AS no_tags "
+                "FROM usage_events")}
             await conn.execute((_MIGRATIONS / "down" / "usage_events_team_tags.sql")
                                .read_text(encoding="utf-8"))
             await conn.execute(_OLD_INSERT, "ACME-PRD-01", "req-after-down")
@@ -74,7 +77,10 @@ async def _exercise():
 def test_the_columns_are_additive_and_reversible():
     rows, cols, count = asyncio.run(_exercise())
     assert rows["req-team"]["team"] == "payments"
+    assert rows["req-team"]["run_id"] == "run-42"         # JSONB, queryable per key
     assert rows["req-none"]["team"] == "default"
+    assert rows["req-none"]["no_tags"] is True            # no tags: NULL
     assert rows["req-old-release"]["team"] == ""          # an older release's row
-    assert "team" not in cols                             # the down script removed it
+    assert rows["req-old-release"]["no_tags"] is True
+    assert not {"team", "tags"} & cols                    # the down script removed both
     assert count == 4                                     # and nothing else was lost
