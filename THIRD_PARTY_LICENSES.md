@@ -34,7 +34,7 @@ redistributed as part of** the Apache-2.0 Work.
 | Jaeger | Distributed tracing (OTLP) | Apache-2.0 | Service (network) |
 | **Grafana** | Dashboards | **AGPL-3.0** | **Service only — see note** |
 | Langfuse (server) | LLM observability backend | MIT, except its `ee/` directories (Langfuse's enterprise license) | Service (network) |
-| Apache Tika (`tika-sidecar`) | Document text extraction (G03) | Apache-2.0 | Service (HTTP sidecar) |
+| Apache Tika (`tika-sidecar`) | Document text extraction (G03) | Apache-2.0 (its image runs OpenJDK 21: GPL-2.0 with the Classpath Exception) | Service (HTTP sidecar) |
 | LLMLingua / LLMLingua-2 (`llmlingua-sidecar`) | Prompt compression (G01) | MIT | Service (HTTP sidecar) |
 | RouteLLM (`routellm-sidecar`) | Model routing (G06) | Apache-2.0 | Service (HTTP sidecar) |
 
@@ -53,6 +53,19 @@ redistributed as part of** the Apache-2.0 Work.
 > Grafana's own code would oblige publishing those changes. Dashboards in `dashboard/` are JSON definitions authored for
 > this project and are covered by this repo's Apache-2.0 license. Operators who
 > self-host Grafana are responsible for their own Grafana compliance.
+
+### Packages installed into the images
+
+Each Python image starts from `python:3.11-slim` (PSF-2.0 for Python; its Debian packages carry
+their own licences, as in any container image). The Dockerfiles add:
+
+| Package | Image(s) | License | Notes |
+|---|---|---|---|
+| `build-essential` / `gcc` | proxy (removed after the build), doc-pipeline, llmlingua-sidecar, routellm-sidecar | GPL-3.0+ with the GCC Runtime Library Exception | Build tools for native wheels; nothing links to them |
+| `curl` | proxy | curl licence (MIT-style) | Health check |
+| `libmagic1` | doc-pipeline | BSD-2-Clause | File-type detection |
+| `poppler-utils` | doc-pipeline | **GPL-2.0 / GPL-3.0** | Run as a separate program (`pdftotext`, `pdfinfo`), not linked. If you distribute the image, the usual Debian source availability applies |
+| `tesseract-ocr` | doc-pipeline | Apache-2.0 | OCR |
 
 ---
 
@@ -73,6 +86,36 @@ card, or by the LICENSE file in its repository; checked 2026-10-04.
 | `routellm/causal_llm_gpt4_augmented` | `routellm-sidecar`: `causal_llm` router, only when configured | Apache-2.0 **and the Meta Llama 3 Community License** — outside the rule | Its repository ships an Apache-2.0 LICENSE, but its config names `meta-llama/Meta-Llama-3-8B` as the base model |
 | RouteLLM arena datasets | `routellm-sidecar`: `sw_ranking` router, only when configured (with an OpenAI key) | Apache-2.0 for `lmsys/lmsys-arena-human-preference-55k` and `routellm/gpt4_judge_battles`; none declared for their two embedding datasets — outside the rule | |
 | spaCy `en_core_web_lg` | presidio-analyzer's default model (G29, only with `use_presidio: true`) | MIT | |
+
+---
+
+## Build, deploy and CI tooling (used, not shipped)
+
+| Tool | License | Notes |
+|---|---|---|
+| Terraform CLI (`infra/`, `required_version >= 1.8`; called by `scripts/gcp/gcp-deploy.sh`) | **BUSL-1.1** (source-available, not OSI open source, from 1.6) | Deploying your own infrastructure with it is permitted. [OpenTofu](https://opentofu.org) (MPL-2.0) is the open-source drop-in and satisfies `>= 1.8` |
+| Terraform providers `hashicorp/google`, `hashicorp/random`, `hashicorp/tls` | MPL-2.0 | |
+| GitHub Actions `actions/checkout`, `actions/setup-python` (SHA-pinned in `ci.yml`) | MIT | CI only |
+| Google Cloud SDK (`gcloud`, `gsutil`), Cloud SQL Auth Proxy, `gcr.io/cloud-builders/gcloud` | Apache-2.0 | GCP deploy |
+| Docker Engine / Docker Compose | Apache-2.0 | Local stack |
+| pip-tools | BSD-3-Clause | `scripts/compile-requirements.sh` |
+
+## Starter templates (`src/templates/`)
+
+| Dependency | Template | License |
+|---|---|---|
+| `com.openai:openai-java` | Java | Apache-2.0 |
+| `com.fasterxml.jackson.core:jackson-databind` | Java | Apache-2.0 |
+| `org.apache.maven.plugins:maven-jar-plugin` | Java (build) | Apache-2.0 |
+| `github.com/sashabaranov/go-openai` | Go | Apache-2.0 |
+| `openai` (Python SDK) | Python | Apache-2.0 |
+
+## Benchmark datasets (`examples/benchmark/`)
+
+The public A/B benchmark bundles items from recognised datasets under their own licences, which
+coexist with (and are not overridden by) this repo's code licence. Notably **HotpotQA is CC BY-SA
+4.0**, so `public_dataset.jsonl` built from it is CC BY-SA 4.0. Full list, revisions and attribution:
+[examples/benchmark/DATA_LICENSES.md](examples/benchmark/DATA_LICENSES.md).
 
 ---
 
