@@ -112,7 +112,7 @@ class TestItDoesNotOverRefuse:
 
 class TestItGuardsEveryCompressorNotJustLLMLingua:
     def test_the_check_sits_at_the_single_acceptance_point(self):
-        """LLMLingua, the Kompress fallback and the deterministic prose fallback all write
+        """LLMLingua and the deterministic prose fallback both write
         into the same `compressed` variable. Guarding there rather than per-compressor is
         what makes a future compressor safe by default (Gate 9.2: generic and permanent)."""
         import inspect

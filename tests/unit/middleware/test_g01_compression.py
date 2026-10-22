@@ -228,147 +228,6 @@ class TestG01Compression:
         assert len(ctx.savings.step_savings) == 0
 
 
-# ─── T14: Kompress-v2-base fallback ─────────────────────────────────────────
-
-class TestKompressV2Fallback:
-
-    def test_is_log_error_content_detects_timestamps(self):
-        from middleware.g01_compression import _is_log_error_content
-        log = "2024-01-15 12:34:56 INFO Starting service\n2024-01-15 12:34:57 DEBUG Connected"
-        assert _is_log_error_content(log) is True
-
-    def test_is_log_error_content_detects_level_prefixes(self):
-        from middleware.g01_compression import _is_log_error_content
-        assert _is_log_error_content("[ERROR] Connection refused") is True
-        assert _is_log_error_content("WARN: disk usage high") is True
-
-    def test_is_log_error_content_detects_traceback(self):
-        from middleware.g01_compression import _is_log_error_content
-        tb = "Traceback (most recent call last):\n  File 'app.py', line 42\nValueError: bad value"
-        assert _is_log_error_content(tb) is True
-
-    def test_is_log_error_content_natural_language_returns_false(self):
-        from middleware.g01_compression import _is_log_error_content
-        prose = "Please summarise the following document for a business audience."
-        assert _is_log_error_content(prose) is False
-
-    def test_kompress_compress_returns_none_when_transformers_unavailable(self):
-        from unittest.mock import patch
-        from middleware.g01_compression import _kompress_compress
-        import middleware.g01_compression as mod
-
-        with patch.object(mod, "_kompress_loaded", False), \
-             patch.object(mod, "_kompress_pipe", None), \
-             patch("builtins.__import__", side_effect=ImportError("no transformers")):
-            # Reset load state so _get_kompress_pipe tries again
-            mod._kompress_loaded = False
-            result = _kompress_compress("ERROR: test", "microsoft/Kompress-v2-base")
-        assert result is None
-        # Restore state so other tests are unaffected
-        mod._kompress_loaded = False
-        mod._kompress_pipe = None
-        mod._kompress_pipe_model = None
-
-    def test_kompress_compress_uses_pipeline_result(self):
-        from unittest.mock import MagicMock, patch
-        from middleware.g01_compression import _kompress_compress
-        import middleware.g01_compression as mod
-
-        mock_pipe = MagicMock(return_value=[{"generated_text": "compressed"}])
-        original_text = "ERROR: connection refused\n" * 20  # longer than "compressed"
-
-        with patch.object(mod, "_kompress_pipe", mock_pipe), \
-             patch.object(mod, "_kompress_loaded", True), \
-             patch.object(mod, "_kompress_pipe_model", "microsoft/Kompress-v2-base"):
-            result = _kompress_compress(original_text, "microsoft/Kompress-v2-base")
-
-        assert result == "compressed"
-        mock_pipe.assert_called_once()
-
-    def test_kompress_not_called_for_natural_language(self):
-        """Kompress fallback must NOT run for non-log content."""
-        from unittest.mock import patch, MagicMock
-        import middleware.g01_compression as mod
-
-        mock_pipe = MagicMock()
-
-        with patch.object(mod, "_kompress_pipe", mock_pipe), \
-             patch.object(mod, "_kompress_loaded", True):
-            from middleware.g01_compression import _is_log_error_content, _kompress_compress
-            prose = "You are a helpful assistant that summarises documents."
-            # Simulate what process_request does: only call Kompress if _is_log_error_content
-            if _is_log_error_content(prose):
-                _kompress_compress(prose, "microsoft/Kompress-v2-base")
-
-        mock_pipe.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_kompress_fallback_fires_when_sidecar_down(self, make_ctx):
-        """When LLMLingua sidecar is down and content is log/error, Kompress compresses."""
-        log_content = "2024-01-15T10:00:00 ERROR db connection pool exhausted\n" * 15
-        messages = [{"role": "system", "content": log_content}, {"role": "user", "content": "summarise"}]
-        ctx = make_ctx(messages)
-        ctx.config["groups"]["G1_compression"].update({
-            "min_tokens_to_compress": 1,
-            "min_chars_to_compress": 1,
-            "kompress_enabled": True,
-            "kompress_model": "microsoft/Kompress-v2-base",
-            "compress_system_prompt": True,  # opt in (system preserved by default)
-        })
-
-        import middleware.g01_compression as mod
-        mock_pipe = MagicMock(return_value=[{"generated_text": "db pool exhausted (compressed)"}])
-
-        with patch("httpx.AsyncClient") as mock_http:
-            # Sidecar unavailable
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(side_effect=Exception("sidecar down"))
-            mock_http.return_value = mock_client
-
-            with patch.object(mod, "_kompress_pipe", mock_pipe), \
-                 patch.object(mod, "_kompress_loaded", True), \
-                 patch.object(mod, "_kompress_pipe_model", "microsoft/Kompress-v2-base"):
-                from middleware.g01_compression import G01Compression
-                ctx = await G01Compression().process_request(ctx)
-
-        assert ctx.messages[0]["content"] == "db pool exhausted (compressed)"
-        step = ctx.savings.step_savings[0]
-        assert step.group == "G01"
-
-    @pytest.mark.asyncio
-    async def test_kompress_disabled_via_config(self, make_ctx):
-        """kompress_enabled=False prevents Kompress from running even for log content."""
-        log_content = "2024-01-15T10:00:00 ERROR crash\n" * 15
-        messages = [{"role": "system", "content": log_content}, {"role": "user", "content": "ok"}]
-        ctx = make_ctx(messages)
-        ctx.config["groups"]["G1_compression"].update({
-            "min_tokens_to_compress": 1,
-            "min_chars_to_compress": 1,
-            "kompress_enabled": False,
-        })
-
-        import middleware.g01_compression as mod
-        mock_pipe = MagicMock(return_value=[{"generated_text": "should not appear"}])
-
-        with patch("httpx.AsyncClient") as mock_http:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(side_effect=Exception("sidecar down"))
-            mock_http.return_value = mock_client
-
-            with patch.object(mod, "_kompress_pipe", mock_pipe), \
-                 patch.object(mod, "_kompress_loaded", True), \
-                 patch.object(mod, "_kompress_pipe_model", "microsoft/Kompress-v2-base"):
-                from middleware.g01_compression import G01Compression
-                ctx = await G01Compression().process_request(ctx)
-
-        mock_pipe.assert_not_called()
-        # Content unchanged because both sidecar and Kompress are disabled/down
-        assert ctx.messages[0]["content"] == log_content
-
 
 # ─── 5e: digit preservation (force_reserve_digit) ───────────────────────────
 #
@@ -499,7 +358,6 @@ def _g01_cfg(ctx, **extra):
         "min_chars_to_compress": 50,
         "layered_composition_enabled": False,
         "selective_context_enabled": False,
-        "kompress_enabled": False,
         **extra,
     })
 
@@ -635,3 +493,39 @@ def test_the_template_ships_layered_composition_off():
     template = Path(__file__).resolve().parents[3] / "config" / "config.yaml.template"
     cfg = yaml.safe_load(template.read_text(encoding="utf-8"))
     assert cfg["groups"]["G1_compression"]["layered_composition_enabled"] is False
+
+
+# ─── #151: the Kompress fallback is removed (2026-10-21) ──────────────────────
+
+class TestKompressFallbackIsGone:
+    """It never ran: `microsoft/Kompress-v2-base` does not exist, it was loaded as a
+    text2text-generation pipeline, and the real model (chopratejas/kompress-v2-base) is an
+    extractive token classifier that needs the Headroom library, removed 2026-09-07."""
+
+    def test_the_code_path_is_deleted_not_stubbed(self):
+        import middleware.g01_compression as mod
+        for name in ("_kompress_compress", "_get_kompress_pipe", "_kompress_pipe",
+                     "_is_log_error_content", "_LOG_ERROR_PATTERNS"):
+            assert not hasattr(mod, name), name
+
+    def test_the_template_ships_no_kompress_key(self):
+        import pathlib
+        import yaml
+        root = pathlib.Path(__file__).resolve().parents[3]
+        g1 = yaml.safe_load((root / "config" / "config.yaml.template")
+                            .read_text(encoding="utf-8"))["groups"]["G1_compression"]
+        assert not [k for k in g1 if k.startswith("kompress")]
+
+    async def test_a_leftover_kompress_key_is_ignored(self, make_ctx):
+        """An existing config that still carries the keys must keep working unchanged."""
+        from middleware.g01_compression import G01Compression
+        content = "2026-10-21 10:00:00 ERROR worker failed\n" * 40
+        ctx = make_ctx([{"role": "user", "content": "q"},
+                        {"role": "assistant", "content": content}])
+        ctx.config["groups"]["G1_compression"] = {
+            "enabled": True, "kompress_enabled": True,
+            "kompress_model": "microsoft/Kompress-v2-base", "kompress_max_new_tokens": 256,
+            "sidecar_url": "http://127.0.0.1:9/compress", "layered_composition_enabled": False,
+            "selective_context_enabled": False}
+        out = await G01Compression().process_request(ctx)
+        assert out.messages[1]["content"] == content

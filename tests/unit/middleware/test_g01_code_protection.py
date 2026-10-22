@@ -1,10 +1,9 @@
 """G01 must not hand the model back a corrupted copy of its own code.
 
 G01 sends assistant history to LLMLingua-2, which keeps about half the word tokens and drops
-the rest; only punctuation and digits are forced to stay. Kompress rewrites log and error
-text with a seq2seq model. Neither can tell `fetch_user` or `/v2/users/` from filler, so in a
-coding chat the model was editing code it never wrote. Now a message holding a fenced code
-block never reaches those compressors, and any compression that changes code, a URL, a
+the rest; only punctuation and digits are forced to stay. It cannot tell `fetch_user` or
+`/v2/users/` from filler, so in a coding chat the model was editing code it never wrote. Now a
+message holding a fenced code block never reaches the compressor, and any compression that changes code, a URL, a
 path, an identifier or a version number is refused, and the original is sent. The
 compressors are stubbed: what matters is what G01 accepts from them.
 """
@@ -83,7 +82,7 @@ class TestTheGuard:
 def _ctx(make_ctx, minimal_config, content, **cfg):
     minimal_config["groups"]["G1_compression"] = {
         "enabled": True, "min_tokens_to_compress": 10, "min_chars_to_compress": 50,
-        "kompress_enabled": False, "layered_composition_enabled": False,
+        "layered_composition_enabled": False,
         "selective_context_enabled": False, "deterministic_fallback": False, **cfg}
     return make_ctx([{"role": "user", "content": "Add error handling to that function."},
                      {"role": "assistant", "content": content},
@@ -118,7 +117,7 @@ class TestTheRequestPath:
         assert sidecar.sent == []
         assert out.messages[1]["content"] == FENCED
 
-    async def test_nor_kompress_nor_the_selective_pruner(
+    async def test_nor_the_selective_pruner(
             self, make_ctx, minimal_config, monkeypatch):
         calls = []
 
@@ -129,11 +128,9 @@ class TestTheRequestPath:
 
         log_with_code = "2026-09-27 10:15:02 ERROR a traceback follows\n" + FENCED
         monkeypatch.setattr(g01, "_call_llmlingua", _Sidecar(lambda text: text))
-        monkeypatch.setattr(g01, "_kompress_compress",
-                            lambda text, model, n: calls.append("kompress") or text[:40])
         monkeypatch.setattr(G01Compression, "_get_selective_pruner", lambda self, cfg: _Pruner())
         out = await G01Compression().process_request(
-            _ctx(make_ctx, minimal_config, log_with_code, kompress_enabled=True))
+            _ctx(make_ctx, minimal_config, log_with_code))
         assert calls == []
         assert out.messages[1]["content"] == log_with_code
 
@@ -164,20 +161,6 @@ class TestTheRequestPath:
         monkeypatch.setattr(g01, "_call_llmlingua", _Sidecar(lambda text: shorter))
         out = await G01Compression().process_request(_ctx(make_ctx, minimal_config, CODE_TURN))
         assert out.messages[1]["content"] == shorter
-
-    async def test_a_kompress_rewrite_of_a_log_path_is_refused(
-            self, make_ctx, minimal_config, monkeypatch, caplog):
-        log = ("2026-09-27 10:15:02 ERROR worker failed reading /var/lib/proxy/queue/batch-7.json "
-               "because the retry budget was spent, skipping this batch for now")
-        monkeypatch.setattr(g01, "_call_llmlingua", _Sidecar(lambda text: text))  # no reduction
-        monkeypatch.setattr(g01, "_kompress_compress",
-                            lambda text, model, n: "2026-09-27 10:15:02 ERROR worker failed "
-                                                   "reading /var/lib/queue/batch.json")
-        with caplog.at_level(logging.WARNING, logger=g01.logger.name):
-            out = await G01Compression().process_request(
-                _ctx(make_ctx, minimal_config, log, kompress_enabled=True))
-        assert out.messages[1]["content"] == log
-        assert "code, a URL, a path or an identifier was changed" in caplog.text
 
     async def test_the_regex_fallback_still_compresses_prose_around_code(
             self, make_ctx, minimal_config, monkeypatch):

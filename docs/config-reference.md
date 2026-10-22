@@ -324,9 +324,9 @@ Request throttling at the gate (token bucket). Lives at the top level, not under
 | `compress_system_prompt` | `false` | ⚠ Opt-in: compress the system prompt (keep off — losing system policy/facts degrades answers) |
 | `layered_composition_enabled` | `false` | Compose a system prompt from `layers` (`base`, `role`, `task`, `dynamic`), for system messages that ask for it. A message asks by carrying a `layer_context` object, whose keys fill the layers' `{placeholders}`, and its content is **replaced** by the composed prompt. No other message is changed, and G01 removes the `layer_context` field before the provider call. |
 
-Also in the template: `min_chars_to_compress` (100), `reduction_threshold` (0.95), `selective_context_enabled` (false) / `selective_context_max_tokens` (4000), `force_reserve_digit` (true, protects IDs/dates), the Kompress-v2 fallback `kompress_enabled` (true) / `kompress_model` / `kompress_max_new_tokens` (256), and `deterministic_fallback` (false — a zero-LLM regex prose compressor that engages only when neither LLMLingua nor Kompress reduced a message, e.g. sidecar down; protects code/paths/identifiers byte-for-byte).
+Also in the template: `min_chars_to_compress` (100), `reduction_threshold` (0.95), `selective_context_enabled` (false) / `selective_context_max_tokens` (4000), `force_reserve_digit` (true, protects IDs/dates), and `deterministic_fallback` (false — a zero-LLM regex prose compressor that engages only when LLMLingua reduced nothing, e.g. sidecar down; protects code/paths/identifiers byte-for-byte).
 
-**What compression never changes.** A message containing a fenced code block (a line opening with ```` ``` ```` or `~~~`) is not sent to LLMLingua, Kompress or Selective Context; the deterministic fallback, which keeps code byte-for-byte, may still shorten the prose around it. Any compression is refused, and the original message sent, if it drops a negation or a scope word (`not`, `never`, `only`, `up to`, `except`, …) or if it changes or moves inline code, a URL, a file path, an identifier (`snake_case`, `camelCase`, `name(args)`, `a.b.c`) or a version number. Each refusal is logged as a warning naming the reason.
+**What compression never changes.** A message containing a fenced code block (a line opening with ```` ``` ```` or `~~~`) is not sent to LLMLingua or Selective Context; the deterministic fallback, which keeps code byte-for-byte, may still shorten the prose around it. Any compression is refused, and the original message sent, if it drops a negation or a scope word (`not`, `never`, `only`, `up to`, `except`, …) or if it changes or moves inline code, a URL, a file path, an identifier (`snake_case`, `camelCase`, `name(args)`, `a.b.c`) or a version number. Each refusal is logged as a warning naming the reason.
 
 #### Prefix-cache floor (operator-only, default off)
 
@@ -1296,7 +1296,6 @@ for reference (all now appear in their group's section above):
 
 | Group | Key | Default | Effect |
 |---|---|---|---|
-| `G1_compression` | `kompress_enabled` / `kompress_model` / `kompress_max_new_tokens` | `true` / `microsoft/Kompress-v2-base` / `256` | Kompress-v2 fallback compression for logs/errors |
 | `G4_bypass` | `db_cache_ttl_seconds` | `60` | DB-rule cache TTL (was a hardcoded constant) |
 | `G10_memory` | `skills_qdrant_enabled` | `true` | `false` → non-Qdrant skill-injection fallback |
 | `G11_output` | `fallback_max_tokens` | `null` | Optional static `max_tokens` cap while no completion-size evidence exists (replaces the removed input-derived heuristic + `absolute_default_max_tokens`) |
