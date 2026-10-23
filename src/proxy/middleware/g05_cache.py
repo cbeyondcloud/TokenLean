@@ -267,10 +267,19 @@ def _is_multiturn_continuation(ctx) -> bool:
     )
 
 
+def l2_enabled(g5_cfg: Dict) -> bool:
+    """``G5_cache.l2_enabled`` (default true): false turns the semantic tier off for every
+    request — no lookup, no store, no embedding — while L1 exact-match caching stays. Read
+    like ``x_cache_semantic``: false / 0 / no / off (any case) mean off."""
+    val = (g5_cfg or {}).get("l2_enabled", True)
+    return str(val).strip().lower() not in ("false", "0", "no", "off")
+
+
 def _semantic_cache_disabled(ctx) -> bool:
     """Whether L2 *semantic* caching must be skipped for this request.
 
-    L1 exact-match caching is unaffected. Two triggers:
+    L1 exact-match caching is unaffected. Skipped for every request when
+    ``G5_cache.l2_enabled`` is false; otherwise two triggers:
       * **Explicit opt-out** via ``x_cache_semantic=false`` — exact-only caching
         for callers that want it (and how the benchmark keeps per-group savings
         attributable / avoids over-matching when a long, >embedding-window system
@@ -279,11 +288,14 @@ def _semantic_cache_disabled(ctx) -> bool:
         — a fuzzy semantic match across continuations can return another turn's
         answer. Gated by ``G5_cache.semantic_skip_multiturn`` (default on).
     """
+    cfg = (getattr(ctx, "config", {}) or {}).get("groups", {}).get("G5_cache", {})
+    if not l2_enabled(cfg):
+        return True
+
     val = getattr(ctx, "params", {}).get("x_cache_semantic", True)
     if str(val).lower() in ("false", "0", "no"):
         return True
 
-    cfg = (getattr(ctx, "config", {}) or {}).get("groups", {}).get("G5_cache", {})
     if cfg.get("semantic_skip_multiturn", True) and _is_multiturn_continuation(ctx):
         return True
     return False

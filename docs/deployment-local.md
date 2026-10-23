@@ -22,6 +22,11 @@ The local deployment runs the entire optimisation stack (G0–G28, G27 reserved 
 | **G18 Dashboards** | `grafana/grafana-oss:10.4.0` | 3000 | Grafana dashboards (optional profile) |
 | **Config** | Local volume mount | - | `config/config.yaml` |
 
+> **Only need the gateway?** [`deploy/lite/`](../deploy/lite/README.md) runs the proxy with the
+> LITE profile (every prompt-, model- or answer-changing optimisation off) on Postgres + Redis
+> alone, with up/down/smoke scripts for bash and PowerShell, Docker or Podman. It runs alongside
+> this stack (project `tokenlean-lite`, port 4100).
+
 ---
 
 ## Prerequisites

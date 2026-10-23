@@ -409,6 +409,7 @@ The engine is OSS in every tier. The managed **Agents console** (declare/govern 
 | `./scripts/gcp/start-gcp.sh` | Resume GCP from paused state | ~5 min |
 | `./scripts/local/deploy-local.sh --seed` | Deploy locally via Docker (zero GCP cost). Langfuse starts only when tracing is on (`langfuse_enabled`, or `--with-tracing`); Grafana with `--with-grafana` | ~5 min |
 | `./scripts/local/stop-local.sh` | Stop local Docker stack, every compose profile's services | ~10 sec |
+| `deploy/lite/local/up.sh` · `up.ps1` | **LITE** stack: proxy (LITE profile) + Postgres + Redis only; optional Qdrant / Langfuse; Docker or Podman; `smoke` + `down` alongside. See [deploy/lite/README.md](deploy/lite/README.md) | ~5 min first build |
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for complete details.
 
@@ -579,7 +580,7 @@ Every LLM response includes detailed savings metadata:
 > measured directly; dollar figures are an estimate. Provider-reconciled billing is a
 > separate, non-OSS concern.
 
-Alongside the `_token_opt` body, the same figures are emitted as machine-readable **`x-tokenlean-*` response headers** (request-id, routed-model, cache state, tokens/%/$ saved, latency) — **including on cache-hit, bypass, and content-filter responses** — so a FinOps pipeline attributes cost per call without parsing the body.
+Alongside the `_token_opt` body, the same figures are emitted as machine-readable **`x-tokenlean-*` response headers** (request-id, routed-model, cache state, tokens/%/$ saved, the call's actual cost `x-tokenlean-cost-usd`, latency) on served non-streamed completions — **including cache-hit, bypass, and content-filter responses** (not the batch `202`/poll or errors) — so a FinOps pipeline attributes cost per call without parsing the body. Streams cannot carry a header after the fact, so with `observability.stream_cost_event: true` a completed stream ends with its actual cost as an SSE comment frame (`: x-tokenlean-cost {...}`), which SDKs skip and raw readers can parse.
 
 A separate **application-quality surface** (`middleware/quality_metrics.py`) records signal kept deliberately distinct from ops/savings metrics: retrieval hit-rate, context freshness, grounding coverage, and output schema-validation rate — PII-free labels only.
 
@@ -668,6 +669,7 @@ All parameters externalised in `config/config.yaml.template` — no hardcoded va
 - **Per-tenant precedence** — a tenant's stored overrides (Postgres) win over `tenants.<id>` YAML, which wins over the base config; all hot-reloaded on the same 60s cycle
 - Optional **data-retention purge** for stored request artefacts (off by default)
 - **Quality-safe defaults** — every savings-vs-quality knob ships at a quality-preserving default; tune per workload using the [Tuning Knobs table](#tuning-knobs--savings-vs-quality) above
+- **Profile overlays** — `CONFIG_OVERLAYS` names YAML files deep-merged over the config (a profile states only what it changes); `config/profiles/agentic.yaml` is the gateway-only **LITE** profile, which runs provider selection by model name, failover, limits, metering and caching with every prompt-, model- or answer-changing optimisation off, and refuses unconfigured models instead of substituting the default
 
 See [docs/config-reference.md](docs/config-reference.md) for all parameters.
 

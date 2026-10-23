@@ -70,6 +70,7 @@ from protocols.base import UnsupportedRequestField, header_params
 import events
 from middleware import RequestContext, record_provider_call
 from middleware.g00_rate_limit import RateLimitExceeded, add_to_spend, counter_prefix
+from middleware.g06_routing import UnconfiguredModelError
 from middleware.g03_doc_pipeline import trigger_doc_ingestion
 # The SAME predicate G05 uses to refuse STORING an empty answer, reused here to refuse
 # SERVING one that is already stored. One definition, so the two sides cannot drift.
@@ -153,7 +154,8 @@ async def lifespan(app: FastAPI):
     # memoised instance and the cold cost is paid off the request path.
     async def _warm_l2_embedding_model():
         g5 = (cfg.get("groups", {}) or {}).get("G5_cache", {}) or {}
-        if not g5.get("enabled", True):
+        from middleware.g05_cache import l2_enabled
+        if not g5.get("enabled", True) or not l2_enabled(g5):
             return
         model_name = g5.get("l2_embedding_model", "BAAI/bge-small-en-v1.5")
         try:
@@ -1404,6 +1406,41 @@ def _stream_options_with_usage(requested) -> tuple:
     return opts, withhold
 
 
+# The final cost frame of a stream (observability.stream_cost_event). An SSE COMMENT, not an
+# event: every SSE parser skips comment lines, so an SDK reading the stream sees exactly the
+# events it saw before, while a client reading the raw stream finds the cost. A named event
+# would not be safe: the OpenAI SDK hands unknown events to the caller as chunks.
+_COST_COMMENT_PREFIX = ": x-tokenlean-cost "
+
+
+def _stream_cost_enabled(cfg) -> bool:
+    """``observability.stream_cost_event`` — strictly ``True``, so a truthy string (an
+    unexpanded ``"false"``) does not switch the frame on. Operator-only; default off."""
+    obs = (cfg or {}).get("observability") if isinstance(cfg, dict) else None
+    return isinstance(obs, dict) and obs.get("stream_cost_event") is True
+
+
+def _cost_comment(request_id, cost_usd, usage_source=None) -> str:
+    """The stream's cost frame. ``cost_usd`` uses the 6 dp of ``x-tokenlean-cost-usd``;
+    ``usage`` says whether the provider reported the usage or it was estimated."""
+    payload = {"request_id": request_id, "cost_usd": f"{float(cost_usd or 0.0):.6f}"}
+    if usage_source:
+        payload["usage"] = usage_source
+    return f"{_COST_COMMENT_PREFIX}{json.dumps(payload, separators=(',', ':'))}\n\n"
+
+
+def _cost_comment_from_headers(headers) -> Optional[str]:
+    """The cost frame for a whole response sent as a stream (cache hit, bypass, block,
+    cascade), built from the headers ``_savings_headers`` already put on it."""
+    cost = (headers or {}).get("x-tokenlean-cost-usd")
+    if cost is None:
+        return None
+    try:
+        return _cost_comment((headers or {}).get("x-tokenlean-request-id"), float(cost))
+    except (TypeError, ValueError):
+        return None
+
+
 def _stream_response(ctx, call_model, call_kwargs, outgoing_params, request_id, request_start,
                      *, eff_cfg=None, provider="", routed_adapter=None, provider_key=None):
     """Pass-through SSE streaming: relay the provider's chunks unchanged.
@@ -1471,14 +1508,54 @@ def _stream_response(ctx, call_model, call_kwargs, outgoing_params, request_id, 
         logger.error("[%s] G32 stream gate unavailable — stream is UNGATED: %s",
                      request_id, exc)
 
+    # Read once per stream; off (the default) leaves the stream byte-identical.
+    _cost_event = _stream_cost_enabled(ctx.config)
+
     async def event_gen():
         last_usage = {}
         parts = []  # accumulated assistant text for chunk-aware G23 (measurement only)
         generated = []  # everything the model generated, to estimate usage if none arrives
         called = set()  # the tools the model called (G08's pruning signal)
         served = False   # True once any chunk reached the client (billing/SLA truth)
+        accounted = False
         fail_status = "502"
         _llm_start = time.time()
+
+        def _account():
+            """The accounting the (skipped) response pipeline would have done, once: run
+            from ``finally`` as before, or earlier when the cost frame needs the price."""
+            nonlocal accounted
+            if accounted:
+                return
+            accounted = True
+            # Chunk-aware G23: run output compression on the reassembled stream to record the
+            # output-side savings the (skipped) response pipeline would have. The live chunks
+            # are emitted unchanged — rewriting them mid-stream would corrupt the SSE output.
+            _apply_stream_g23(ctx, "".join(parts))
+            # G06's routing step is written on the RESPONSE now (from the model that
+            # actually answered), and the response pipeline — G18 included — is skipped
+            # for streams. Without this a streamed request would disclose no route at
+            # all, which is the same silence in the other direction. Idempotent.
+            try:
+                from middleware.g06_routing import record_routing_step
+                record_routing_step(ctx)
+            except Exception as exc:  # noqa: BLE001 — accounting never breaks a stream
+                logger.debug("[%s] streaming routing-step record failed: %s", request_id, exc)
+            # G08's pruning signal, which the (skipped) response pipeline records for other
+            # calls: which offered registry tools the model called. After the response.
+            if called and getattr(ctx, "g08_offered_tools", None):
+                try:
+                    from middleware.g08_tool_loading import record_called_tools
+                    _after_response(record_called_tools(ctx, set(called)), "g08-called-tools")
+                except Exception as exc:  # noqa: BLE001 — accounting never breaks a stream
+                    logger.debug("[%s] recording the streamed tool calls failed: %s",
+                                 request_id, exc)
+            # The response pipeline (incl. G18) is skipped for streamed calls, so price the
+            # served call here, through G18's own pricing and counters. A stream that failed
+            # before any chunk served nothing and is not billed, so it is not priced.
+            if served:
+                _price_stream(ctx, last_usage, "".join(generated), request_id)
+
         try:
             stream = await _open_stream()
             async for chunk in stream:
@@ -1517,6 +1594,12 @@ def _stream_response(ctx, call_model, call_kwargs, outgoing_params, request_id, 
                     if cd is None:
                         continue              # whole chunk was policy-stripped
                 yield f"data: {_json.dumps(cd, separators=(',', ':'))}\n\n"
+            if _cost_event and served:
+                # Priced now rather than after [DONE], so the cost can precede it.
+                _account()
+                yield _cost_comment(request_id,
+                                    getattr(ctx.savings, "cost_actual_usd", 0.0),
+                                    "reported" if last_usage else "estimated")
             yield "data: [DONE]\n\n"
         except Exception as exc:
             # Item 12 (review S2): redact the log line and NEVER echo the raw upstream
@@ -1541,33 +1624,9 @@ def _stream_response(ctx, call_model, call_kwargs, outgoing_params, request_id, 
                     _tool_gate.finish()
                 except Exception as exc:
                     logger.debug("[%s] G32 stream gate finish failed: %s", request_id, exc)
-            # Chunk-aware G23: run output compression on the reassembled stream to record the
-            # output-side savings the (skipped) response pipeline would have. The live chunks
-            # are emitted unchanged — rewriting them mid-stream would corrupt the SSE output.
-            _apply_stream_g23(ctx, "".join(parts))
-            # G06's routing step is written on the RESPONSE now (from the model that
-            # actually answered), and the response pipeline — G18 included — is skipped
-            # for streams. Without this a streamed request would disclose no route at
-            # all, which is the same silence in the other direction. Idempotent.
-            try:
-                from middleware.g06_routing import record_routing_step
-                record_routing_step(ctx)
-            except Exception as exc:  # noqa: BLE001 — accounting never breaks a stream
-                logger.debug("[%s] streaming routing-step record failed: %s", request_id, exc)
-            # G08's pruning signal, which the (skipped) response pipeline records for other
-            # calls: which offered registry tools the model called. After the response.
-            if called and getattr(ctx, "g08_offered_tools", None):
-                try:
-                    from middleware.g08_tool_loading import record_called_tools
-                    _after_response(record_called_tools(ctx, set(called)), "g08-called-tools")
-                except Exception as exc:  # noqa: BLE001 — accounting never breaks a stream
-                    logger.debug("[%s] recording the streamed tool calls failed: %s",
-                                 request_id, exc)
-            # The response pipeline (incl. G18) is skipped for streamed calls, so price the
-            # served call here, through G18's own pricing and counters. A stream that failed
-            # before any chunk served nothing and is not billed, so it is not priced.
-            if served:
-                _price_stream(ctx, last_usage, "".join(generated), request_id)
+            # G23 measurement, G06 routing step, G08 signal and pricing — unless the cost
+            # frame already ran them.
+            _account()
             try:
                 # For streamed calls the provider owns the whole stream lifetime,
                 # so LLM time = acompletion start → last chunk consumed. += to
@@ -1654,7 +1713,8 @@ def _savings_headers(ctx, request_start: float) -> Dict[str, str]:
     served from cache — previously those (highest-volume) responses carried no headers at
     all, silently breaking the advertised always-on attribution + failing the readiness
     header gate. NOTE: two paths are disclosed exceptions, not covered by this helper —
-    streamed responses (matching ``_token_opt``/G23) and the G13 batch-results poller
+    streamed responses (matching ``_token_opt``/G23; their cost can come as a final comment
+    frame instead, see ``_stream_cost_enabled``) and the G13 batch-results poller
     (``GET /v1/batch/results/{request_id}``), which has no RequestContext at poll time and
     builds its own smaller header set from the stored baseline/actual token counts instead.
     """
@@ -1674,6 +1734,10 @@ def _savings_headers(ctx, request_start: float) -> Dict[str, str]:
             else f"{meta.get('total_pct_saving'):.2f}"
         ),
         "x-tokenlean-cost-saved-usd": f"{ctx.savings.cost_saving_usd:.6f}",
+        # What the call actually cost (every provider call it made, as G18 priced them).
+        # 0 on a cache hit / bypass / block: nothing was paid. The body carries it too, but
+        # only in the OpenAI shape, and a caller should not have to parse a body for it.
+        "x-tokenlean-cost-usd": f"{float(ctx.savings.cost_actual_usd or 0.0):.6f}",
         "x-tokenlean-latency-ms": f"{(time.time() - request_start) * 1000:.1f}",
         # Provider prompt-cache accounting (#34). Left out entirely when the provider
         # reported nothing — an absent header reads as "unknown", a "0" would have
@@ -2047,6 +2111,24 @@ async def _serve_core(
     # Run the request-side pipeline (authoritative stage order: middleware/pipeline.py)
     try:
         ctx = await _pipeline.process_request(ctx, request_headers=dict(request.headers))
+    except UnconfiguredModelError as exc:
+        # G6_routing.on_unconfigured_model: reject. Refused before any provider call and
+        # never billed, instead of being answered by proxy.default_model.
+        logger.info("[%s] refused unconfigured model %r", request_id, exc.model)
+        langfuse_tracing.finish_trace(ctx, None)
+        _record_outcome(ctx, _request_start, "400")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": (f"Model '{exc.model}' is not configured on this proxy. Use a "
+                                "model listed under providers[].models or matching a provider's "
+                                "model_prefixes (GET /v1/models)."),
+                    "type": "invalid_request_error",
+                    "code": "model_not_configured",
+                }
+            },
+        )
     except RateLimitExceeded as exc:
         logger.warning(
             "[%s] Rate limit exceeded: %s for %s (retry-after=%d)",
@@ -2430,12 +2512,16 @@ async def _translate_stream(translator, source_iter):
     completion — so its billing/usage `finally` (with ctx.ingress_protocol stamped) still
     fires exactly once."""
     errored = False
+    trailers = []   # the cost frame (observability.stream_cost_event), re-sent LAST
     for line in translator.start():
         yield line
     async for raw in source_iter:
         text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
         for frame in text.split("\n\n"):
             frame = frame.strip()
+            if frame.startswith(_COST_COMMENT_PREFIX):
+                trailers.append(frame + "\n\n")
+                continue
             if not frame.startswith("data:"):
                 continue
             payload = frame[len("data:"):].strip()
@@ -2460,6 +2546,10 @@ async def _translate_stream(translator, source_iter):
     if not errored:
         for line in translator.finish():
             yield line
+    # After the protocol's own terminal frames: the cost frame is a comment, so where it
+    # sits does not matter to a parser, and last is where a raw reader looks for it.
+    for line in trailers:
+        yield line
 
 
 def _completion_to_stream_chunk(openai_body: Dict) -> Dict:
@@ -2487,17 +2577,21 @@ def _completion_to_stream_chunk(openai_body: Dict) -> Dict:
     return chunk
 
 
-async def _one_shot_stream(translator, chunk: Dict):
-    """Drive a StreamTranslator over a single synthetic chunk (start → chunk → finish)."""
+async def _one_shot_stream(translator, chunk: Dict, trailer: Optional[str] = None):
+    """Drive a StreamTranslator over a single synthetic chunk (start → chunk → finish), then
+    the cost frame when one is given (placed as ``_translate_stream`` places it)."""
     for line in translator.start():
         yield line
     for out in translator.chunk(chunk):
         yield out
     for line in translator.finish():
         yield line
+    if trailer:
+        yield trailer
 
 
-async def _openai_one_shot_stream(openai_body: Dict, *, withhold_usage: bool):
+async def _openai_one_shot_stream(openai_body: Dict, *, withhold_usage: bool,
+                                  cost_comment: Optional[str] = None):
     """A whole OpenAI completion sent as the stream the client asked for: one content
     chunk, then the usage chunk the way a live stream sends it (``choices: []``), then
     ``[DONE]``. The usage chunk follows the live stream's rule
@@ -2517,6 +2611,8 @@ async def _openai_one_shot_stream(openai_body: Dict, *, withhold_usage: bool):
     for frame in frames:
         for out in translator.chunk(frame):
             yield out
+    if cost_comment:              # before [DONE], as on a live stream
+        yield cost_comment
     for line in translator.finish():
         yield line
 
@@ -2539,7 +2635,10 @@ def _as_requested_stream(resp, *, withhold_usage: bool):
     if not isinstance(body, dict) or not isinstance(body.get("choices"), list):
         return resp
     headers = {k: v for k, v in resp.headers.items() if k.lower().startswith("x-")}
-    return StreamingResponse(_openai_one_shot_stream(body, withhold_usage=withhold_usage),
+    cost_comment = (_cost_comment_from_headers(headers)
+                    if _stream_cost_enabled(get_config()) else None)
+    return StreamingResponse(_openai_one_shot_stream(body, withhold_usage=withhold_usage,
+                                                     cost_comment=cost_comment),
                              media_type=OPENAI.stream_media_type, headers=headers)
 
 
@@ -2580,9 +2679,11 @@ async def _translate_response(protocol, resp, *, want_stream: bool = False,
         return resp
     passthru = {k: v for k, v in dict(resp.headers or {}).items() if k.lower().startswith("x-")}
     if want_stream:
+        trailer = (_cost_comment_from_headers(passthru)
+                   if _stream_cost_enabled(get_config()) else None)
         return StreamingResponse(
             _one_shot_stream(protocol.stream_translator(),
-                             _completion_to_stream_chunk(openai_body)),
+                             _completion_to_stream_chunk(openai_body), trailer),
             media_type=protocol.stream_media_type, headers=passthru,
         )
     body = protocol.serialise_response(openai_body)

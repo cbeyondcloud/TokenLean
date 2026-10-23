@@ -780,6 +780,11 @@ groups:
     l2_literal_guard: true
     semantic_skip_multiturn: true
     l2_ttl_seconds: 86400
+    # The semantic (L2) tier on/off. false = exact-match (L1) caching only: no embedding, no
+    # cache_l2 lookup or store, and no embedding-model warm-up at start. For deployments
+    # where serving a NEAR-match answer is never acceptable (agent pipelines, code
+    # generation). Per request, `x_cache_semantic: false` does the same.
+    l2_enabled: true
     step_cache_enabled: true
     step_cache_ttl_seconds: 86400
     # (l3_enabled / l3_similarity_threshold removed 2026-09-07 — the L3 tier never
@@ -814,6 +819,11 @@ groups:
     # deployment left the default gpt-4o tiers): `fallback` (default) serves the caller's
     # own requested model — cost-routing simply no-ops; `error` returns a clean 503.
     on_unreachable_tier: fallback
+    # A model that matches no providers[].models / model_prefixes, on a path that does not
+    # route (G06 off, or no tiers): `substitute` (default) serves proxy.default_model and
+    # discloses it (x-tokenlean-model-substituted); `reject` answers 400
+    # (code model_not_configured) without calling any provider.
+    on_unconfigured_model: substitute
     tiers:
       simple:
       - gpt-4o-mini
@@ -1843,3 +1853,12 @@ observability:
   # clipped and `truncated: true` is set — never silently shortened, because a quietly
   # trimmed prompt reads as evidence of what the model saw while being something else.
   max_echo_chars: 200000
+  # End a completed stream with its actual cost, as an SSE COMMENT frame just before the
+  # terminator:  `: x-tokenlean-cost {"request_id":"…","cost_usd":"0.000123","usage":"reported"}`
+  # (`usage` is `estimated` when the provider sent no usage chunk). A stream cannot carry the
+  # cost in a header — headers go out before the first chunk — and non-streamed responses
+  # already carry it as `x-tokenlean-cost-usd`. SSE parsers skip comment lines, so SDKs see
+  # the same events; a client reading the raw stream gets the cost. Applies to the OpenAI,
+  # Anthropic and Gemini streaming routes and to cached/short-circuited answers sent as a
+  # stream. A stream that fails or is cut off carries no frame. Off: byte-identical streams.
+  stream_cost_event: false

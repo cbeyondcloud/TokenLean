@@ -124,6 +124,35 @@ def record_routing_step(ctx: RequestContext) -> None:
     )
 
 
+class UnconfiguredModelError(Exception):
+    """The caller named a model this proxy is not configured for, and
+    ``G6_routing.on_unconfigured_model`` is ``reject``: answered 400, no provider call."""
+
+    def __init__(self, model: str):
+        super().__init__(f"model {model!r} is not configured on this proxy")
+        self.model = model
+
+
+def _unconfigured_model(ctx: RequestContext, cfg: Dict[str, Any], why: str) -> None:
+    """An unconfigured model on a path that does not route: substitute the configured
+    default (the default, long-standing behaviour, disclosed by ``_record_substitution``), or
+    with ``on_unconfigured_model: reject`` refuse it. An unrecognised value keeps today's
+    behaviour and says so."""
+    mode = str(cfg.get("on_unconfigured_model", "substitute")).strip().lower()
+    if mode == "reject":
+        raise UnconfiguredModelError(ctx.model)
+    if mode != "substitute":
+        logger.warning("G06 on_unconfigured_model=%r is not substitute|reject; substituting",
+                       cfg.get("on_unconfigured_model"))
+    default_model = get_default_model()
+    # Only downgrade to a real configured default; never blank the model when default is
+    # unset/misconfigured (preserve original).
+    if default_model and ctx.model != default_model:
+        _record_substitution(ctx, default_model)
+        logger.debug("[%s] G06 %s, unknown model → default: %s",
+                     ctx.request_id, why, default_model)
+
+
 def _record_substitution(ctx: RequestContext, substitute: str) -> None:
     """Serve ``substitute`` in place of an unconfigured requested model, and SAY SO.
 
@@ -1383,16 +1412,7 @@ class G06Routing:
             # (preserves the developer's model, e.g. o4-mini, so reasoning stays
             # measurable). Only unknown models fall back to the configured default.
             if not _is_configured_model(ctx.model):
-                default_model = get_default_model()
-                # Only downgrade to a real configured default; never blank the
-                # model when default is unset/misconfigured (preserve original).
-                if default_model and ctx.model != default_model:
-                    _record_substitution(ctx, default_model)
-                    logger.debug(
-                        "[%s] G06 routing disabled, unknown model → default: %s",
-                        ctx.request_id,
-                        default_model,
-                    )
+                _unconfigured_model(ctx, cfg, "routing disabled")
             return ctx
 
         tiers = _resolve_tiers(cfg, ctx.model, _tenant_tier_picks(ctx))
@@ -1409,16 +1429,7 @@ class G06Routing:
         if not tiers:
             # No tiers configured → same no-op rule for config-known models.
             if not _is_configured_model(ctx.model):
-                default_model = get_default_model()
-                # Only downgrade to a real configured default; never blank the
-                # model when default is unset/misconfigured (preserve original).
-                if default_model and ctx.model != default_model:
-                    _record_substitution(ctx, default_model)
-                    logger.debug(
-                        "[%s] G06 no tiers configured, unknown model → default: %s",
-                        ctx.request_id,
-                        default_model,
-                    )
+                _unconfigured_model(ctx, cfg, "no tiers configured")
             return ctx
 
         # Flag any unreachable cascade tier models loudly (once per config) at first use.

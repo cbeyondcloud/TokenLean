@@ -1,0 +1,6 @@
+# LITE overlay: send traces to the Langfuse started by the `langfuse` compose profile.
+# up.sh / up.ps1 add it to CONFIG_OVERLAYS with --langfuse / -Langfuse. Prompt and response
+# text stay out of traces (G18 capture_trace_content keeps its shipped default, off).
+groups:
+  G18_observability:
+    langfuse_enabled: true
