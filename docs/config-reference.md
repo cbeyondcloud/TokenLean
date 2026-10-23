@@ -42,6 +42,7 @@ to fix, not a storage blip. Shipped profiles live in `config/profiles/` (e.g.
 | `groups` | Per-group enable/disable + tuning parameters |
 | `savings` | Token-savings **estimate** tuning (reporting only — never billed) |
 | `observability` | Operator-only diagnostics — what a response may disclose about the proxy's own internals |
+| `tracing` | OpenTelemetry spans: export, sampling, `X-Trace-ID`, joining a caller's W3C `traceparent` |
 
 ### `observability` — the prompt the proxy actually sent
 
@@ -100,7 +101,8 @@ header (USD, 6 dp; `0.000000` when no provider was paid — a cache hit, bypass 
 not on the `202` of a deferred batch request, the batch-results poll, or error responses. A
 stream cannot: headers go out before the first chunk. With this key `true`, a stream that completes
 ends with one extra frame, just before its terminator (`data: [DONE]` on the OpenAI route;
-after `message_stop` on Anthropic, after the last chunk on Gemini):
+after `message_stop` on Anthropic, after the last chunk on Gemini, after `response.completed`
+on Responses):
 
 ```
 : x-tokenlean-cost {"request_id":"6f0c…","cost_usd":"0.000412","usage":"reported"}
@@ -334,6 +336,85 @@ teams) — never its values.
 |---|---|---|
 | `admin_api.routing.poll_seconds` | `5` | How often each replica checks for a newer overlay version (minimum 1). Read at every check, so a hot reload changes it. |
 
+### /v1/responses — the OpenAI Responses API
+
+`POST /v1/responses` serves clients that speak only the OpenAI Responses API — the Codex CLI
+(`wire_api = "responses"`), the OpenAI SDK's `client.responses` — through the same pipeline as
+`/v1/chat/completions`: every provider, every G-group, the same usage row (`protocol` is
+`responses`), `X-Agentic-*` tags, team binding, `x-tokenlean-*` headers and stream cost frame.
+The proxy key goes in `Authorization: Bearer`. The request is translated to the chat shape on the
+way in; the answer goes back as a Response object (`stream: false`) or as Responses SSE events
+(`stream: true`). There is no setting: the route is always on.
+
+**Stateless.** No response is stored. `previous_response_id`, `conversation`, `background: true`
+and a stored `prompt` get a 400 that names the field: send the whole conversation in `input` each
+turn, as Codex does. `store` is accepted, and the answer always says `store: false`. Every other
+path under `/v1/responses/` (retrieve, delete, cancel, `input_items`, `compact`, `input_tokens`)
+answers 404.
+
+| Request field | Becomes |
+|---|---|
+| `instructions` | a system message, first |
+| `input` as a string | one user message |
+| `message` items (`developer` becomes system; `user`, `assistant`, `system`) with `input_text` / `output_text` / `refusal` / `input_image` (URL or data URL) parts | chat messages; all-text parts join into one string, a blank line between parts |
+| `function_call` / `function_call_output` | the assistant's `tool_calls` (`call_id` kept as the id; consecutive calls in one assistant message) / a `tool` message |
+| `custom_tool_call` / `custom_tool_call_output` | the same, the free-form `input` wrapped as `{"input": "..."}` |
+| `reasoning` items | dropped: their encrypted content is readable only by the model that wrote it |
+| `tools` of type `function` | a function tool (`strict` kept) |
+| `tools` of type `custom` (Codex's `apply_patch`, with a lark grammar) | a function with one string parameter, `input`, whose description carries the grammar; the call comes back as a `custom_tool_call` item |
+| `tool_choice` (`auto`, `none`, `required`, a function or custom tool by name), `parallel_tool_calls` | as they are |
+| `text.format` (`text`, `json_object`, `json_schema`) | `response_format` |
+| `text.verbosity` | `verbosity` (dropped for a provider without it) |
+| `reasoning.effort` | `reasoning_effort` (G12 and G25 read it; stripped for a model that does not reason) |
+| `max_output_tokens` | `max_tokens` |
+| `temperature`, `top_p`, `prompt_cache_key`, `prompt_cache_retention`, `safety_identifier`, `user`, `service_tier` | the chat parameter of the same name (`prompt_cache_key` is the provider's cache key, which G21 may set itself, as on the chat route) |
+| `store`, `include`, `stream_options`, `max_tool_calls`, `metadata`, `client_metadata` | accepted, never sent upstream (`metadata` is echoed in the Response) |
+| `previous_response_id`, `conversation`, `background`, `prompt`, `truncation: auto`, `top_logprobs` | a 400 naming the field |
+| any other field | dropped, its name logged, unless listed in [`ingress.extra_allowed_params`](#ingress) |
+
+Also refused with a 400 that names the field: a tool other than `function` or `custom` (`namespace`,
+`web_search`, `file_search` and the other hosted tools), an `item_reference` or any item type it
+cannot carry, an `input_file` part, an `input_image` given by `file_id`, and an image inside a tool
+output.
+
+**Privacy.** The headers a Responses client sends to identify itself — `originator`, `user-agent`,
+`session-id`, `thread-id`, `x-client-request-id` and every `x-codex-*` header — are kept from the
+pipeline entirely, and `client_metadata` never becomes a parameter, so none of them reaches a
+provider, a routing rule or a log. `traceparent` and the `X-Agentic-*` headers are read as on every
+route.
+
+**Output.** One item per thing the model produced, in order: a `reasoning` item (when the provider
+streams reasoning text), the assistant `message` (`output_text`), then a `function_call` per tool
+call, or a `custom_tool_call` (with the unwrapped `input`) for a tool the request declared
+`custom`. The Response `id` is `resp_` followed by the proxy's request id. A stream is these SSE
+events, each an `event:` line and a `data:` line with a `sequence_number`:
+
+| Event | When |
+|---|---|
+| `response.created`, `response.in_progress` | first |
+| `response.output_item.added` | an item starts |
+| `response.reasoning_text.delta`, `.done` | reasoning text, live |
+| `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done` | the message's text, live |
+| `response.function_call_arguments.delta`, `.done` | a function call, sent whole at the end |
+| `response.custom_tool_call_input.delta`, `.done` | a custom tool call, sent whole at the end |
+| `response.output_item.done` | an item ends: every item gets one |
+| `response.completed` | last, with the whole Response and its `usage` |
+| `response.incomplete` | last instead, when the answer hit `max_output_tokens` or a content filter (`incomplete_details.reason`) |
+| `response.failed` | last instead, when the provider failed (`error.code` `server_error` or `rate_limit_exceeded`): never a stream that just closes |
+
+`usage` carries `input_tokens`, `input_tokens_details.cached_tokens` (cache reads),
+`input_tokens_details.cache_write_tokens` (cache writes, when the provider reports them),
+`output_tokens`, `output_tokens_details.reasoning_tokens` and `total_tokens`; it is null when the
+provider reported none. A refusal before the stream starts uses the OpenAI error envelope
+(`error.type` `invalid_request_error`, `authentication_error`, `permission_error`,
+`rate_limit_error` or `server_error`), with `Retry-After` kept on a 429. G13 never defers a
+Responses request: the route admits no `batch_topic`.
+
+Lost in translation to a chat provider: encrypted reasoning carried between turns, and
+grammar-constrained output for custom tools (the grammar is only described to the model). A
+native pass-through to providers that speak the Responses API, which would keep both, is a planned
+follow-up.
+
 ### rate_limit extras
 
 | Parameter | Default | Description |
@@ -400,13 +481,56 @@ The header is ignored (the socket peer is used) when it has fewer entries than `
 
 ### ingress
 
-Which request-body fields the OpenAI-compatible endpoint (`/v1/chat/completions`) accepts. It admits the documented Chat Completions parameters, TokenLean's own client parameters (every `x_*` field, plus `workflow_id`, `template_id`, `rag_query`, `session_id`, `user_id` and the rest), and any names listed here. Every other field is dropped, and its **name** is logged (never its value), so you can see if a client relies on one. The Anthropic and Gemini endpoints build their parameters from fixed fields and are unaffected.
+Which request-body fields the OpenAI-compatible endpoint (`/v1/chat/completions`) accepts. It admits the documented Chat Completions parameters, TokenLean's own client parameters (every `x_*` field, plus `workflow_id`, `template_id`, `rag_query`, `session_id`, `user_id` and the rest), and any names listed here. Every other field is dropped, and its **name** is logged (never its value), so you can see if a client relies on one. The Anthropic and Gemini endpoints build their parameters from fixed fields and are unaffected. The Responses endpoint (`/v1/responses`) translates the fields it knows ([/v1/responses](#v1responses--the-openai-responses-api)), drops any other field the same way, and admits the names listed here as the chat parameter of the same name.
 
 | Parameter | Default | Description |
 |---|---|---|
 | `extra_allowed_params` | `[]` | Extra body-field names to admit, e.g. `["metadata"]`. Global config only — a tenant override cannot extend it |
 
 Two limits hold whatever you list: a field starting with `_` (the proxy's internal flags) is never admitted, and litellm call arguments — `api_base`, `base_url`, `api_key`, `extra_headers`, `extra_body`, `fallbacks`, `timeout`, `mock_*` and similar — are stripped again before the upstream call, on every provider path.
+
+### tracing — OpenTelemetry spans and W3C trace context
+
+Set in `config/params/tracing.yaml` (template `tracing.yaml.template`) and read once at startup.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | unset: on when `OTEL_EXPORTER_OTLP_ENDPOINT` is set | Export spans over OTLP gRPC. Off, every span is a no-op and nothing below applies |
+| `otlp_endpoint` | `http://jaeger:4317` | The collector; `OTEL_EXPORTER_OTLP_ENDPOINT` wins. TLS unless it starts with `http://` |
+| `service_name` | `token-opt-proxy` | The `service.name` resource attribute |
+| `sample_rate` | `1.0` | Share of the requests that start a new trace that are recorded; a caller's own sampling decision wins |
+| `propagate_trace_id_header` | `true` | Name each request's trace on its response as `X-Trace-ID` |
+| `forward_traceparent` | `false` | Send the request span's `traceparent` and `tracestate` to the provider on every call. Only the boolean `true` turns it on |
+
+A request on a model route (`/v1/chat/completions`, `/v1/messages`, Gemini `generateContent`,
+`/v1/responses`) is one trace: a request span named `chat <model>` (kind server) that covers the
+whole request, the `proxy-pipeline` span under it, and one span per pipeline stage under that.
+
+**Joining the caller's trace.** When the request carries a valid W3C `traceparent` header (and
+optionally `tracestate`), the request span is a child of the caller's span: the same trace id, the
+caller's span as parent, the `tracestate` carried along. The caller's sampled flag is honoured: with
+`-00` the proxy records nothing either, and the response still names the trace in `X-Trace-ID`. A
+malformed header (wrong version, length or case, an all-zero id) is ignored and the request starts
+a new trace; it is never an error. Without the header the request span is the root of a new trace.
+`X-Trace-ID` names the caller's trace when the request joined one.
+
+**Attributes.** The request span carries the OpenTelemetry GenAI semantic-convention attributes:
+
+| Attribute | Value |
+|---|---|
+| `gen_ai.operation.name` | `chat` |
+| `gen_ai.provider.name`, `gen_ai.system` | the provider that served, by the name `usage_events.provider` records; `gen_ai.system` is the older name, kept for backends that still read it |
+| `gen_ai.request.model` | the model requested (after a tenant default is applied) |
+| `gen_ai.response.model` | the model the provider reported, else the routed model |
+| `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` | summed over every provider call the request paid for; absent when none was made (a cache hit, a bypass, a refusal) |
+
+It also carries `http.response.status_code`, `proxy.request_id`, `proxy.tenant_id` and
+`proxy.ingress_protocol`; a 5xx marks it as an error. No prompt or answer text goes on a span.
+
+**Forwarding.** By default no trace id is sent to a provider. With `forward_traceparent: true`,
+every provider call (the primary, a failover target, a cascade tier) carries `traceparent` (and
+`tracestate`) naming the proxy's request span as the parent, added to any headers the provider
+adapter sets itself.
 
 ### proxy
 | Parameter | Default | Description |

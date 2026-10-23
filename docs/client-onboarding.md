@@ -113,6 +113,37 @@ client = genai.Client(
 )
 ```
 
+### OpenAI Responses API / Codex CLI (native `/v1/responses`)
+For clients that speak only the Responses API. The route is **stateless**: send the whole
+conversation in `input` every turn (`store: false`); `previous_response_id` is refused with a 400.
+Streaming and non-streaming both work, as do function tools and custom tools (Codex's
+`apply_patch` comes back as a `custom_tool_call` item) and `text.format` JSON schemas. The
+field-by-field mapping, the SSE events and what is refused:
+[config-reference.md → /v1/responses](config-reference.md#v1responses--the-openai-responses-api).
+```python
+import os
+from openai import OpenAI
+client = OpenAI(api_key=os.environ["PROXY_API_KEY"], base_url=os.environ["PROXY_ENDPOINT"] + "/v1")
+resp = client.responses.create(model="gpt-4o-mini", input="Say hello", store=False)
+print(resp.output_text)
+```
+
+#### Codex CLI
+Add a model provider with `wire_api = "responses"` to Codex's `config.toml` (Codex appends
+`/responses` to `base_url`):
+```toml
+model = "gpt-4o-mini"            # any model the proxy routes
+model_provider = "tokenlean"
+
+[model_providers.tokenlean]
+name = "TokenLean"
+base_url = "http://localhost:8000/v1"
+wire_api = "responses"
+env_key = "TOKENLEAN_API_KEY"    # the environment variable holding your proxy key
+```
+Codex's identifying headers (`originator`, `user-agent`, `session-id`, `thread-id`,
+`x-client-request-id`, `x-codex-*`) and its `client_metadata` never reach the provider.
+
 ### Java
 ```java
 // Before
@@ -191,6 +222,11 @@ unchanged to Anthropic and Gemini clients.
 | `x-tokenlean-latency-ms` | `812.4` | end-to-end proxy latency, to chart cost against latency |
 | `x-tokenlean-request-id` | `a1b2…` | join key to your traces/logs |
 | `x-trace-id` | `4bf92f35…` | the call's OpenTelemetry trace in the proxy's own tracing, when the operator exports it (`tracing.propagate_trace_id_header`, on by default); sent on streamed answers and refusals too |
+
+**Joining your own trace.** Send a W3C `traceparent` header (and `tracestate`, if you use it)
+and, when the operator exports tracing, the proxy's span for the call becomes a child of your span,
+so the call appears inside your trace; `x-trace-id` then names your trace id. A malformed header is
+ignored (the proxy starts its own trace), never an error.
 
 The `x-tokenlean-*` headers are on served (2xx) non-streamed completions. They are **not** on
 streamed answers (headers go out before the first chunk; with `observability.stream_cost_event`

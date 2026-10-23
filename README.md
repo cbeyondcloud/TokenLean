@@ -86,7 +86,7 @@ The **54.1%** headline is our internal quality-gated ablation (temperature-0, 12
 `--workload full` also prints a **disclosed illustrative-mix blend** (~32% at the default balanced weights, tracking the agentic lever's spread; `--weights` tunable) — a weighted average of the reproducible parts, echoed with its weight vector into `ab_results.json`. It is **not** a second headline, and it lands **below 54.1% by construction — which is the honest point**: (a) the largest agentic lever (G14/G15 tool-output projection) **structurally cannot fire in a live single-loop A/B** — only tool-catalogue pruning (G08/G16) is live-reproducible here, so agentic reads ~12% vs the internal 46%; **this figure was corrected downward on 2026-09-06** — the harness had been pinning G16's system-prompt cap to 800 tokens against a shipped default of 4096, and every BFCL episode carries a ~1,046-token system prompt, so a lever no default install applies was worth roughly half the number and also damped its variance; it now runs the shipped config; and (b) the recognized public prose items are **small and stateless** (~2–4%), where the internal 38% prose figure comes from production-scale documents — so a disclosed **production-shaped `ops` profile** (verbose DevOps payloads, flagged in [`DATA_LICENSES.md`](examples/benchmark/DATA_LICENSES.md) as *not* a recognized benchmark) is included to exercise the structured-pruning levers (G19/G22) that only fire on bulky first-asks, lifting the prose lever to ~8%. A skeptic reproduces each *part*, sees exactly why the blend differs from the headline, and trusts both numbers more — nothing is tuned to land on a target. Already on a managed proxy? Preview savings against your **live** deployment — see [`docs/client-onboarding.md`](docs/client-onboarding.md).
 
 **Why teams use it:**
-- 🪄 **Drop-in** — change one line (`base_url`), not your prompts or your SDK. Works from the **OpenAI SDK** (`/v1/chat/completions`), the **Anthropic SDK / Claude Code** (`/v1/messages`), and the **Gemini SDK** (`generateContent`) — the proxy translates each natively while applying every optimisation
+- 🪄 **Drop-in** — change one line (`base_url`), not your prompts or your SDK. Works from the **OpenAI SDK** (`/v1/chat/completions`), the **OpenAI Responses API / Codex CLI** (`/v1/responses`), the **Anthropic SDK / Claude Code** (`/v1/messages`), and the **Gemini SDK** (`generateContent`) — the proxy translates each natively while applying every optimisation
 - 📉 **Broad reduction** — 28 stacked techniques from the Token Optimisation Playbook v7, not just caching
 - 🔍 **Always measured** — every response carries a `_token_opt` savings breakdown **and machine-readable `x-tokenlean-*` headers** (routed model, cache hit, tokens/%/$ saved, latency) — emitted **even on cache hits and bypasses** — so your FinOps pipeline attributes cost per call without parsing the body; per-call → quarterly Grafana dashboards; plus a separate **application-quality** metrics surface (retrieval hit-rate, context freshness, grounding coverage) kept distinct from operational health
 - 🪞 **Prompt echo (configurable, off by default)** — ask for the exact prompt the proxy sent to the provider, returned with the response — the fastest way to answer "why did the model answer as if it had not been told X?". Requires both an operator opt-in (`observability.echo_sent_prompt`) and a per-request flag (`x_echo_prompt`); never includes provider credentials; not available on streamed responses, and on the OpenAI-compatible route only.
@@ -231,8 +231,9 @@ cp infra/terraform.tfvars.template infra/terraform.tfvars
 Point your existing SDK's base URL at the proxy — **no prompt or code changes**. The proxy
 speaks each provider's native wire protocol (request, response, streaming, errors, and tool
 calls) while applying every optimisation, so the one-line swap works whether you use the
-OpenAI, Anthropic, or Gemini SDK (including **Claude Code** via `/v1/messages`) — multi-turn
-agentic tool use round-trips structurally too.
+OpenAI (Chat Completions or Responses), Anthropic, or Gemini SDK (including **Claude Code** via
+`/v1/messages` and the **Codex CLI** via `/v1/responses`) — multi-turn agentic tool use
+round-trips structurally too.
 
 **OpenAI SDK** → `/v1/chat/completions`
 ```python
@@ -264,6 +265,12 @@ client = genai.Client(
 )
 ```
 
+**OpenAI Responses API / Codex CLI** → `/v1/responses` (stateless: send the whole conversation each turn)
+```python
+client = OpenAI(api_key=os.environ["PROXY_API_KEY"], base_url=os.environ["PROXY_ENDPOINT"] + "/v1")
+resp = client.responses.create(model="gpt-4o-mini", input="Hello", store=False)
+```
+
 The proxy is OpenAI-shaped internally; each request is normalised in and the response
 re-serialised back to your SDK's native shape (`ctx.ingress_protocol` records which one, for
 observability — billing is one row per served request regardless of protocol).
@@ -280,7 +287,8 @@ flowchart TB
     OpenAI · Anthropic · Gemini SDK`"])
 
     Ingress["`**0 · Native ingress** (protocols/)
-    Anthropic /v1/messages + Gemini :generateContent normalised to OpenAI shape;
+    Anthropic /v1/messages, Gemini :generateContent, OpenAI Responses /v1/responses
+    normalised to OpenAI shape;
     response, streaming & errors re-serialised back to the caller's protocol`"]
 
     Gate["`**1 · Gate**
@@ -329,8 +337,9 @@ flowchart TB
 ```
 
 > Stages run in the exact order above (source of truth: `src/proxy/middleware/pipeline.py`).
-> **Stage 0 · Native ingress** translates an Anthropic (`/v1/messages`) or Gemini
-> (`:generateContent` / `:streamGenerateContent`) request into the OpenAI shape the pipeline speaks,
+> **Stage 0 · Native ingress** translates an Anthropic (`/v1/messages`), Gemini
+> (`:generateContent` / `:streamGenerateContent`) or OpenAI Responses (`/v1/responses`) request into
+> the OpenAI shape the pipeline speaks,
 > then re-serialises the response — so the pipeline stays protocol-agnostic and the OpenAI path is
 > unchanged. **G24 runs first** and can skip any later stage per request; **G21** is the last step
 > before the provider call. **G4 bypass**, an **L1/L2 cache hit**, and an **F2 agent dispatch**
@@ -381,13 +390,14 @@ Per-tenant policy, **PII-free audit rows**, Prometheus counters, and a Trust & S
 </p>
 
 ### 🔌 Native multi-protocol ingress
-The one-line base-URL swap works from the **OpenAI**, **Anthropic** (`/v1/messages` — Claude Code included), and **Gemini** (`:generateContent` / `:streamGenerateContent`) SDKs, with each SDK's native auth (`x-api-key` / `x-goog-api-key` / `?key=`). Every request is normalised into the OpenAI-shaped pipeline and the response re-serialised — non-streaming, streaming, error envelopes, **and tool/function calls** — back to your SDK's native shape. Multi-turn agentic tool use round-trips **structurally** (not as text): Anthropic `tool_use`/`tool_result` and Gemini `functionCall`/`functionResponse` map to well-formed OpenAI `tool_calls`/`tool` messages both ways, so an agentic loop through `/v1/messages` (Claude Code) or `generateContent` keeps full tool-call fidelity across turns. Your own prompt-cache markers (`cache_control`) survive the translation and reach Anthropic where you placed them; they are sent only to providers that cache by marker (Anthropic, Bedrock), never to another provider a request is routed or failed over to. Every optimisation applies; billing is one row per served request regardless of protocol.
+The one-line base-URL swap works from the **OpenAI**, **Anthropic** (`/v1/messages` — Claude Code included), and **Gemini** (`:generateContent` / `:streamGenerateContent`) SDKs, with each SDK's native auth (`x-api-key` / `x-goog-api-key` / `?key=`). Every request is normalised into the OpenAI-shaped pipeline and the response re-serialised — non-streaming, streaming, error envelopes, **and tool/function calls** — back to your SDK's native shape. Multi-turn agentic tool use round-trips **structurally** (not as text): Anthropic `tool_use`/`tool_result` and Gemini `functionCall`/`functionResponse` map to well-formed OpenAI `tool_calls`/`tool` messages both ways, so an agentic loop through `/v1/messages` (Claude Code) or `generateContent` keeps full tool-call fidelity across turns. Your own prompt-cache markers (`cache_control`) survive the translation and reach Anthropic where you placed them; they are sent only to providers that cache by marker (Anthropic, Bedrock), never to another provider a request is routed or failed over to. Every optimisation applies; billing is one row per served request regardless of protocol. Clients that speak only the **OpenAI Responses API** (the **Codex CLI**, the OpenAI SDK's `client.responses`) use `/v1/responses`: stateless (the whole conversation in every request), streaming and non-streaming, function and custom tools (Codex's `apply_patch` comes back as a `custom_tool_call`), `text.format` JSON schema; Codex's session and installation headers never reach the provider. See [config-reference.md](docs/config-reference.md#v1responses--the-openai-responses-api).
 
 | Client | Endpoint |
 |---|---|
 | OpenAI SDK | `POST /v1/chat/completions` |
 | Anthropic SDK / Claude Code | `POST /v1/messages` |
 | Gemini SDK | `POST /v1beta/models/{model}:generateContent` · `:streamGenerateContent` |
+| OpenAI Responses API / Codex CLI | `POST /v1/responses` |
 
 Tool-use and output-format controls arrive as the client set them: Anthropic `tool_choice` (including `none`) and `disable_parallel_tool_use`; Gemini `toolConfig`, JSON mode (`responseMimeType` + `responseSchema`), `topK` and `thinkingConfig`. A Gemini `generationConfig` field the proxy cannot carry (audio output, for example) is refused with a 400 that names it, never silently dropped.
 

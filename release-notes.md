@@ -21,6 +21,30 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-24
+
+### OpenAI Responses API endpoint: the Codex CLI and `client.responses` through any provider — Enhancement (OSS)
+`POST /v1/responses` translates a Responses API request into the chat shape the pipeline speaks, and
+the answer back into a Response object or the Responses SSE events, so the Codex CLI and the OpenAI
+SDK's `client.responses` reach every configured provider with every optimisation applied. Codex's
+`apply_patch` (a custom tool with a lark grammar) travels as a function and comes back as a
+`custom_tool_call` item, streamed or not; a `text.format` JSON schema becomes `response_format`.
+Every item ends with `response.output_item.done` and every stream with `response.completed`,
+`response.incomplete` or `response.failed`, never a silent close. Stateless: `previous_response_id`,
+hosted tools and anything else it cannot honour get a 400 naming the field. Codex's identifying
+headers and `client_metadata` never reach the provider. Usage rows (`protocol` `responses`), usage
+tags, team binding and the cost header and frame work as on `/v1/chat/completions`, which is unchanged.
+- **OSS:** the endpoint and its protocol adapter ship in the core proxy.
+
+### W3C trace context: a caller's `traceparent` makes the proxy's span a child of its own — Enhancement (OSS)
+Every model endpoint now opens a request span covering the whole request, with the OpenTelemetry GenAI
+attributes (`gen_ai.operation.name`, `gen_ai.provider.name` and `gen_ai.system`, the request and
+response model, input and output tokens). A request with a valid `traceparent` (and `tracestate`) joins
+the caller's trace as a child of the caller's span and honours its sampling flag; `X-Trace-ID` then
+names that trace. A malformed header starts a new trace and is never an error. With tracing off nothing
+changes. `tracing.forward_traceparent` (off by default) also sends the trace context to the provider.
+- **OSS:** trace-context extraction, the request span and its attributes ship in the core proxy.
+
 ## 2026-10-23
 
 ### Routing rules and team limits over HTTP: validated, versioned, applied without a restart — Enhancement (OSS)
