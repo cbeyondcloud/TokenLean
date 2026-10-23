@@ -181,6 +181,9 @@ async def lifespan(app: FastAPI):
     # Billing, the security audit log and per-tenant settings. Before the startup hooks:
     # a managed deploy waits here for the database, so the hooks always get one.
     await _wire_database_at_startup()
+    # The admin-managed routing overlay (ST-10, /admin/routing): the latest stored version
+    # before serving when the database answers now, then followed every poll_seconds.
+    await _start_routing_overlay()
     if not _METRICS_SCRAPE_TOKEN and _METRICS_ALLOW_UNAUTHENTICATED:
         logger.warning(
             "METRICS_ALLOW_UNAUTHENTICATED is on and METRICS_SCRAPE_TOKEN is not set — "
@@ -742,6 +745,74 @@ async def admin_rotate_key(key_id: str, request: Request):
     scope = await _admin_caller(request, "proxy key management")
     rotated = await keys.rotate(key_id, scope, _audit_logger, get_config())
     return JSONResponse(content=rotated, headers=_NO_STORE)
+
+
+# ---------------------------------------------------------------------------
+# /admin/routing — routing rules and team limits as a versioned, hot-applied overlay (ST-10).
+# Unbound admin keys only. Logic: admin_api/routing.py (fragment, store, apply) and
+# admin_api/routing_api.py (handlers).
+# ---------------------------------------------------------------------------
+
+_ROUTING_STARTUP_SYNC_S = 10.0
+
+
+async def _start_routing_overlay() -> None:
+    from admin_api import routing
+    if _db_pool is not None:
+        try:
+            await asyncio.wait_for(routing.ensure_schema(_db_pool), _ROUTING_STARTUP_SYNC_S)
+            await asyncio.wait_for(routing.sync_once(_db_pool), _ROUTING_STARTUP_SYNC_S)
+        except Exception as exc:
+            logger.warning("routing overlay: not applied at startup (the poller retries): %s",
+                           exc)
+    _service_task(routing.run_poller(lambda: _db_pool, get_config), "routing-overlay-poller")
+
+
+@app.get("/admin/routing")
+async def admin_routing_current(request: Request):
+    """The current routing overlay version (0: none) and the version this replica runs."""
+    from admin_api import routing_api
+    scope = await _admin_caller(request, "routing overlay management")
+    return await routing_api.get_current(_db_pool, scope)
+
+
+@app.put("/admin/routing")
+async def admin_routing_apply(request: Request):
+    """Validate ``{fragment, expected_version?, comment?}``, store it as the next version and
+    apply it (this replica at once, the others within admin_api.routing.poll_seconds)."""
+    from admin_api import routing_api
+    from admin_api.common import json_object
+    scope = await _admin_caller(request, "routing overlay management")
+    body = await json_object(request)
+    return await routing_api.put(body, _db_pool, scope, _audit_logger, get_config())
+
+
+@app.get("/admin/routing/history")
+async def admin_routing_history(request: Request):
+    """Stored versions, newest first (``?limit=50&before=<version>``)."""
+    from admin_api import routing_api
+    scope = await _admin_caller(request, "routing overlay management")
+    return await routing_api.get_history(dict(request.query_params), _db_pool, scope)
+
+
+@app.get("/admin/routing/versions/{version}")
+async def admin_routing_version(version: str, request: Request):
+    """One stored version."""
+    from admin_api import routing_api
+    scope = await _admin_caller(request, "routing overlay management")
+    if not version.isdigit():
+        raise HTTPException(status_code=404, detail=f"No routing overlay version {version}.")
+    return await routing_api.get_one(int(version), _db_pool, scope)
+
+
+@app.post("/admin/routing/rollback")
+async def admin_routing_rollback(request: Request):
+    """Store an earlier version's fragment (``{version}``; 0 = none) as the next version."""
+    from admin_api import routing_api
+    from admin_api.common import json_object
+    scope = await _admin_caller(request, "routing overlay management")
+    body = await json_object(request)
+    return await routing_api.rollback(body, _db_pool, scope, _audit_logger, get_config())
 
 
 @app.get("/v1/batch/results/{request_id}")

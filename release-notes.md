@@ -23,6 +23,17 @@ date changes.
 
 ## 2026-10-23
 
+### Routing rules and team limits over HTTP: validated, versioned, applied without a restart — Enhancement (OSS)
+`/admin/routing` lets an admin set routing rules and team limits as an overlay on the config, the way an
+agentic control plane generates them: a tier -> model map for every tenant, one tenant or one team, G6
+routing rules, team spend caps and `rate_limit.per_team`. A fragment is checked whole first; an invalid one
+gets a 422 listing every problem's path and nothing is applied. Beyond per-team limits it can never touch
+rate limiting (G00), nor loop control (G17), trust & safety (G29-G32) or any other section. Every apply and rollback is a new
+Postgres version with who and when (`GET` current and history, `POST .../rollback`). The writing replica
+applies it at once, the others within `admin_api.routing.poll_seconds` (5 s); requests in flight are
+unaffected. Every change is audited. With nothing set, the config is exactly as before.
+- **OSS:** the endpoint, validation, version store and hot apply ship in the core proxy.
+
 ### Proxy keys over HTTP, bound to a user and a team, with a Postgres key store — Enhancement (OSS)
 `/admin/keys` creates, lists, revokes and rotates proxy keys. The raw key is shown once (create, rotate);
 only its hash is stored, and a listing shows neither. A key can be bound to a team and to a user of its

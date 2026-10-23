@@ -15,7 +15,7 @@ FROM postgres:15-alpine@sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8
 WORKDIR /migrations
 
 # Copy the migration SQL (byte-identical to the Terraform local-exec heredocs) + runner.
-COPY billing.sql tenant_configs.sql audit_events.sql rls_policies.sql pgvector.sql proxy_keys.sql ./
+COPY billing.sql tenant_configs.sql audit_events.sql rls_policies.sql pgvector.sql proxy_keys.sql routing_overlay.sql ./
 COPY run.sh ./run.sh
 RUN chmod +x ./run.sh
 

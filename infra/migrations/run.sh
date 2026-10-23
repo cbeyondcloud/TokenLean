@@ -16,7 +16,7 @@
 #
 # Order mirrors the Terraform depends_on graph:
 #   billing → tenant_configs, audit_events → rls   (pgvector independent, optional)
-#   proxy_keys (ST-9) is independent of the others.
+#   proxy_keys (ST-9) and routing_overlay (ST-10) are independent of the others.
 # Fails LOUDLY (set -e + ON_ERROR_STOP=1): any migration error aborts the job.
 set -eu
 
@@ -51,6 +51,7 @@ run_sql billing.sql
 run_sql tenant_configs.sql
 run_sql audit_events.sql
 run_sql proxy_keys.sql
+run_sql routing_overlay.sql
 run_sql rls_policies.sql
 
 if [ "${RUN_PGVECTOR:-false}" = "true" ]; then
