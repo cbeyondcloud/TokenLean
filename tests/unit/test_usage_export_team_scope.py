@@ -1,8 +1,10 @@
-"""/admin/usage-export and teams (owner decision 82).
+"""/admin/usage-export and teams (owner decisions 82 and 84).
 
 A team-bound key exports ONLY its own team's rows of its own tenant, whatever it puts in
-the body or the query string. A key with no team binding keeps the tenant view exactly as
-before (and an admin key its cross-tenant view).
+the body or the query string, and with no user identity in them: the tags' tenant-only
+keys (``billing.metering.tags.tenant_only_keys``, default ``user``) are removed and a
+``user_id`` field is blanked. A key with no team binding keeps the tenant view exactly as
+before (and an admin key its cross-tenant view), user values included.
 """
 import contextlib
 import copy
@@ -28,17 +30,18 @@ _KEYS = {
 
 
 class _Conn:
-    def __init__(self):
+    def __init__(self, rows=None):
         self.calls = []
+        self.rows = rows or []
 
     async def fetch(self, sql, *args):
         self.calls.append((sql, args))
-        return []
+        return [dict(r) for r in self.rows]
 
 
 class _Pool:
-    def __init__(self):
-        self.conn = _Conn()
+    def __init__(self, rows=None):
+        self.conn = _Conn(rows)
 
     def acquire(self):
         conn = self.conn
@@ -52,8 +55,8 @@ class _Pool:
         return _Acq()
 
 
-async def _export(key, body=None, query=""):
-    pool = _Pool()
+async def _export(key, body=None, query="", rows=None, config=None, text=False):
+    pool = _Pool(rows)
 
     async def _get_pool(_dsn):
         return pool
@@ -64,7 +67,7 @@ async def _export(key, body=None, query=""):
         patch("auth.api_key_manager._CACHE_LOADED_AT", 9999999999.0),
         patch("config_loader.load_config"),
         patch("config_loader.start_hot_reload"),
-        patch("config_loader.get_config", return_value=c._integration_config()),
+        patch("config_loader.get_config", return_value=config or c._integration_config()),
         patch("cache.redis_pool.init_pool"),
         patch("cache.redis_pool.close_pool", new_callable=AsyncMock),
         patch("cache.redis_pool.get_redis", return_value=c._make_mock_redis()),
@@ -82,7 +85,7 @@ async def _export(key, body=None, query=""):
                                      headers={"Authorization": f"Bearer {key}"})
     assert resp.status_code == 200, resp.text
     [(sql, args)] = pool.conn.calls
-    return sql, args
+    return resp.text if text else (sql, args)
 
 
 @pytest.mark.asyncio
@@ -119,3 +122,53 @@ async def test_an_admin_key_keeps_its_view():
 async def test_a_team_bound_admin_key_is_scoped_like_any_team_key():
     sql, args = await _export("k-admin-team", {"tenant_id": "ACME-PRD-01"})
     assert args[2:] == ("ops", "sre")
+
+
+# ── Decision 84: user identity is for tenant-level keys only ─────────────────────────────
+
+_USER = "dev@acme.test"
+_ROWS = [
+    {"tenant_id": "ACME-PRD-01", "request_id": "r1", "team": "payments", "user_id": _USER,
+     "tags": json.dumps({"user": _USER, "run_id": "run-1", "step": "plan"})},
+    {"tenant_id": "ACME-PRD-01", "request_id": "r2", "team": "payments", "user_id": _USER,
+     "tags": json.dumps({"user": _USER})},
+    {"tenant_id": "ACME-PRD-01", "request_id": "r3", "team": "payments", "user_id": "",
+     "tags": None},
+]
+
+
+def _records(text):
+    return [json.loads(line) for line in text.splitlines()]
+
+
+@pytest.mark.asyncio
+async def test_a_team_key_s_export_has_no_user_value_anywhere():
+    text = await _export("k-payments", rows=_ROWS, text=True)
+    assert _USER not in text
+    r1, r2, r3 = _records(text)
+    assert r1["tags"] == {"run_id": "run-1", "step": "plan"}
+    assert r2["tags"] is None                        # nothing left but the user
+    assert r3["tags"] is None
+    assert all(r["user_id"] == "" for r in (r1, r2, r3))
+
+
+@pytest.mark.asyncio
+async def test_a_team_bound_admin_key_gets_no_user_value_either():
+    assert _USER not in await _export("k-admin-team", rows=_ROWS, text=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["k-tenant", "k-admin"])
+async def test_an_unbound_or_admin_key_s_export_is_unchanged(key):
+    r1, r2, r3 = _records(await _export(key, rows=_ROWS, text=True))
+    assert r1["tags"] == {"user": _USER, "run_id": "run-1", "step": "plan"}
+    assert r2["tags"] == {"user": _USER}
+    assert r1["user_id"] == _USER
+
+
+@pytest.mark.asyncio
+async def test_the_tenant_only_keys_are_configurable():
+    cfg = c._integration_config()
+    cfg["billing"] = {"metering": {"tags": {"tenant_only_keys": ["user", "run_id"]}}}
+    r1, _, _ = _records(await _export("k-payments", rows=_ROWS, config=cfg, text=True))
+    assert r1["tags"] == {"step": "plan"}

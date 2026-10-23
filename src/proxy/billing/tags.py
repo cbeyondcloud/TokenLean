@@ -118,6 +118,31 @@ def looks_like_secret(value: str) -> bool:
             or _basic_credentials(value) or _url_credentials(value))
 
 
+#: Tag keys only tenant-level keys may read back (owner decision 84): a team-bound key's
+#: usage export has them removed. Default: the user identity.
+DEFAULT_TENANT_ONLY_KEYS = ("user",)
+
+
+def tenant_only_keys(config: Any) -> frozenset:
+    """``billing.metering.tags.tenant_only_keys`` (a list of tag keys; default
+    :data:`DEFAULT_TENANT_ONLY_KEYS`). Unreadable: the default, so never fewer keys hidden."""
+    billing = config.get("billing") if isinstance(config, dict) else None
+    metering = billing.get("metering") if isinstance(billing, dict) else None
+    section = metering.get("tags") if isinstance(metering, dict) else None
+    raw = section.get("tenant_only_keys") if isinstance(section, dict) else None
+    if not isinstance(raw, (list, tuple)):
+        return frozenset(DEFAULT_TENANT_ONLY_KEYS)
+    return frozenset(k for k in raw if isinstance(k, str))
+
+
+def without_tenant_only(tags: Any, hidden: frozenset) -> Any:
+    """``tags`` without the ``hidden`` keys; ``None`` when nothing is left."""
+    if not isinstance(tags, dict):
+        return tags
+    kept = {k: v for k, v in tags.items() if k not in hidden}
+    return kept or None
+
+
 def _warn_once(message: str, *args: Any) -> None:
     key = message % args
     if key not in _warned:

@@ -27,6 +27,9 @@ billing:
     tags:
       enabled: true
       max_value_chars: 256          # at most 1024
+      # Tag keys only tenant-level keys may read back: a team-bound key's
+      # /admin/usage-export has them removed (and user_id blanked).
+      tenant_only_keys: [user]
       headers:                      # request header -> tag key ([a-z][a-z0-9_]*)
         X-Agentic-Team: team
         X-Agentic-User: user

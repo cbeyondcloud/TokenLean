@@ -30,7 +30,8 @@ sends), one key per header, so cost can be summed per run, step or agent with `t
 header is ignored. Values are trimmed, capped at 256 characters and must be printable ASCII; a value
 that looks like a credential (checked whole, before the cap) is dropped and counted, never stored. The allow-list is read from the global
 config only, so a tenant cannot widen it. Tags select nothing: they are attribution. Rows without
-allow-listed headers store NULL; `/admin/usage-export` returns the tags.
+allow-listed headers store NULL; `/admin/usage-export` returns the tags, without the user identity
+(`tenant_only_keys`, default `user`) when the key is bound to a team.
 - **OSS:** the tags column, allow-list, value checks and export field ship in the core proxy.
 
 ### Teams under a tenant: a key bound to a team, team spend caps and team config — Enhancement (OSS)

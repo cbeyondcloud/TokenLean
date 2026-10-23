@@ -144,7 +144,9 @@ with `gateway: true`, its `X-Team` header; else `default` (no team). The binding
 any header. The team is written to `usage_events.team` and returned by `/admin/usage-export`,
 used as the `team` metric label (bounded by `G18_observability.label_values.team`), and
 selects `rate_limit.per_team` limits. A team-bound key's `/admin/usage-export` returns **only
-its own team's rows** of its own tenant, whatever the body or query string asks for; a key with
+its own team's rows** of its own tenant, whatever the body or query string asks for, and with no
+user identity in them (the `billing.metering.tags.tenant_only_keys` tags — default `user` — are
+removed and any `user_id` is blanked); a key with
 no team binding keeps the whole-tenant view (an admin key, its cross-tenant view).
 
 Rotating keys: `rotate_tenant_keys_per_binding(tenant)` issues **one new key per binding** — the
@@ -361,6 +363,7 @@ Both columns are additive (`ADD COLUMN IF NOT EXISTS`, applied by the app at sta
 | `tags.enabled` | `true` | Record **usage tags**: each request header on the `tags.headers` allow-list becomes one key of `usage_events.tags`; every other header is ignored. |
 | `tags.headers` | the ten `X-Agentic-*` identity headers | Allow-list, `header name: tag key` (header names match in any case; tag keys `[a-z][a-z0-9_]*`, at most 64 entries). Default: `X-Agentic-Team: team`, `X-Agentic-User: user`, `X-Agentic-Repo: repo`, `X-Agentic-Pipeline: pipeline`, `X-Agentic-Run-Id: run_id`, `X-Agentic-Step: step`, `X-Agentic-Agent: agent`, `X-Agentic-Parent-Agent: parent_agent`, `X-Agentic-Tier: tier`, `X-Agentic-Policy-Version: policy_version`. A value set here **replaces** the default list; `{}` records nothing. |
 | `tags.max_value_chars` | `256` | Longer values are cut to this length (at most `1024`). |
+| `tags.tenant_only_keys` | `[user]` | Tag keys only tenant-level keys may read back: they are stored for every request (per-user cost and chargeback), but a **team-bound** key's `/admin/usage-export` has them removed, and any `user_id` blanked. Unbound and admin keys see them. An unreadable value hides the default. |
 
 Tag values are trimmed and must be printable ASCII; a value that looks like a credential (a provider or proxy key in any case, a bearer token — also URL-encoded as `Bearer%20…` — or a `Basic` value that decodes to `user:password`, a JWT, `user:password@` or a token as the user in a URL, a `password=…` pair, another secret-named key with a credential-shaped value, a private-key header) is **dropped, never stored**; the whole value is checked before it is cut to `max_value_chars`, so no prefix of a credential is kept. Detection looks for a credential-shaped body, not a keyword: `Basic analysis`, `token: refresh` and `ssh://git@github.com/org/repo` are kept. Dropped values are counted in `token_opt_usage_tags_dropped_total{reason="secret"}` (`reason="invalid"` for non-printable values). The settings are read from the global config only — a tenant's or team's overrides cannot change what is recorded — and an unreadable `tags` section records nothing. Tags are what the caller asserts: they never select a team, a limit, a route or a config (`usage_events.team` is the authenticated team, so the two may differ).
 

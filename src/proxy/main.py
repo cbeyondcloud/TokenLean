@@ -616,6 +616,11 @@ async def usage_export(request: Request):
         async with pool.acquire() as conn:
             rows = await conn.fetch(sql, *args)
 
+        # Owner decision 84: user identity is for tenant-level keys. A team-bound key's rows
+        # lose the tenant-only tag keys (default: the user) and any user_id value.
+        from billing.tags import tenant_only_keys, without_tenant_only
+        hidden = tenant_only_keys(get_config()) if team_filter else frozenset()
+
         # Stream JSONL, coercing non-JSON-native types (TIMESTAMPTZ → ISO, NUMERIC → float)
         lines = []
         for r in rows:
@@ -629,6 +634,10 @@ async def usage_export(request: Request):
             # JSONB comes back from asyncpg as text: export the usage tags as an object.
             if isinstance(record.get("tags"), str):
                 record["tags"] = json.loads(record["tags"])
+            if team_filter:
+                record["tags"] = without_tenant_only(record.get("tags"), hidden)
+                if "user_id" in record:
+                    record["user_id"] = ""
             lines.append(json.dumps(record, separators=(",", ":")))
 
         if not lines:

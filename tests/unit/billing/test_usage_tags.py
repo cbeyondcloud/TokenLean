@@ -49,7 +49,10 @@ class TestTheDefaultAllowList:
             "billing.yaml.template"
         shipped = yaml.safe_load(template.read_text(encoding="utf-8"))["billing"]["metering"]
         assert shipped["tags"] == {"enabled": True, "max_value_chars": 256,
+                                   "tenant_only_keys": ["user"],
                                    "headers": DEFAULT_TAG_HEADERS}
+        assert usage_tags.tenant_only_keys({"billing": {"metering": shipped}}) == \
+            frozenset(usage_tags.DEFAULT_TENANT_ONLY_KEYS)
 
     def test_all_ten_are_stored(self):
         assert extract_tags(FRAMEWORK, {}) == EXPECTED
