@@ -275,10 +275,22 @@ class IngressProtocol:
         stateless adapter returns itself."""
         return self
 
-    def pipeline_headers(self, headers: Any) -> Optional[Dict[str, str]]:
+    def pipeline_headers(self, headers: Any, extra: Iterable[Any] = ()) -> Optional[Dict[str, str]]:
         """The request headers the pipeline may see, or None for all of them. An adapter
         whose clients send identifying headers (session, thread, installation ids) keeps
-        them from the pipeline here, so nothing downstream can log, match or forward them."""
+        them from the pipeline here, so nothing downstream can log, match or forward them;
+        ``extra`` is the operator's additions (``ingress.private_headers``)."""
+        return None
+
+    def keepalive_seconds(self, config: Any) -> float:
+        """Seconds of silence after which the route's stream sends a keepalive comment; 0
+        sends none (every adapter but Responses: their streams are unchanged)."""
+        return 0.0
+
+    def scope_params(self, params: Dict[str, Any], tenant_id: str, config: Any) -> None:
+        """Adjust the parsed params once the caller's tenant is known (after auth). The
+        Responses adapter replaces a client's ``prompt_cache_key`` with a tenant-scoped
+        digest here; every other adapter leaves the params as they are."""
         return None
 
     def parse_request(

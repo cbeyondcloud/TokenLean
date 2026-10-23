@@ -10,5 +10,7 @@ from providers.generic_adapter import GenericLiteLLMAdapter
 
 @register_adapter("cohere")
 class CohereAdapter(GenericLiteLLMAdapter):
+    #: OpenTelemetry GenAI well-known provider name (gen_ai.provider.name).
+    SEMCONV_PROVIDER_NAME = "cohere"
     PROVIDER_NAME = "cohere"
     LITELLM_PREFIX = "cohere"

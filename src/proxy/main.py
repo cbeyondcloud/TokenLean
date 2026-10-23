@@ -2189,6 +2189,16 @@ def _ingress_extra_allowed_params(cfg: Any) -> Tuple[str, ...]:
     return tuple(name for name in raw if isinstance(name, str) and name)
 
 
+def _ingress_private_headers(cfg: Any) -> Tuple[str, ...]:
+    """Operator additions to an adapter's private-header list: ``ingress.private_headers``
+    (names, or prefixes ending in ``*``). Global config only, like extra_allowed_params."""
+    section = cfg.get("ingress") if isinstance(cfg, dict) else None
+    raw = section.get("private_headers") if isinstance(section, dict) else None
+    if not isinstance(raw, list):
+        return ()
+    return tuple(name for name in raw if isinstance(name, str) and name)
+
+
 def _validate_openai_request(messages: Any) -> None:
     """Light shape check for the OpenAI ingress body. Malformed input gets a clean
     400 here — matching the Anthropic/Gemini routes, which already return a 400 —
@@ -2240,6 +2250,32 @@ async def chat_completions(request: Request):
 
 
 async def _serve_core(
+    request: Request, request_id: str, _request_start: float,
+    messages: list, model: str, params: dict, user_id: str, api_key: str,
+    tenant_metadata, ingress_protocol: str, headers: Optional[Dict[str, str]] = None,
+):
+    """The request core (``_serve_request_core``), with its request span ended on any
+    exception that escapes it. Every handled exit ends the span through ``_record_outcome``;
+    an unexpected error (a stage, a key lookup, a helper raising) would otherwise lose the
+    trace. Ending is idempotent, so an exit that already recorded its outcome is unchanged."""
+    try:
+        return await _serve_request_core(
+            request, request_id, _request_start, messages, model, params, user_id, api_key,
+            tenant_metadata, ingress_protocol, headers)
+    except HTTPException as exc:
+        finish_request_span(_request_ctx(request), exc.status_code)
+        raise
+    except Exception:
+        finish_request_span(_request_ctx(request), "500")
+        raise
+
+
+def _request_ctx(request: Request):
+    """The RequestContext the core left on the request (None before it built one)."""
+    return getattr(getattr(request, "state", None), "pipeline_ctx", None)
+
+
+async def _serve_request_core(
     request: Request, request_id: str, _request_start: float,
     messages: list, model: str, params: dict, user_id: str, api_key: str,
     tenant_metadata, ingress_protocol: str, headers: Optional[Dict[str, str]] = None,
@@ -2303,7 +2339,9 @@ async def _serve_core(
     ctx.ingress_protocol = ingress_protocol
     # The request span (ST-5): the whole request, a child of the caller's span when the
     # request carries a W3C traceparent; ended with the outcome (_record_outcome).
-    ctx.otel_request_span = start_request_span(ctx, headers)
+    # The raw request headers: a repeated traceparent is malformed (W3C) on every route,
+    # which a dict view (one value per name) cannot show.
+    ctx.otel_request_span = start_request_span(ctx, request.headers)
     # Read when the response starts (TraceIdHeaderMiddleware): its X-Trace-ID, on every path.
     state = getattr(request, "state", None)
     if state is not None:
@@ -2394,14 +2432,6 @@ async def _serve_core(
             },
             headers={"Retry-After": str(exc.retry_after)},
         )
-    except HTTPException as exc:
-        # Not a refusal handled above, so no outcome is recorded (as before), but the request
-        # span still ends: the trace shows the request failed instead of losing it.
-        finish_request_span(ctx, exc.status_code)
-        raise
-    except Exception:
-        finish_request_span(ctx, "500")
-        raise
 
     # Trust & Safety block (G30 injection guardrail / G29 PII policy) — a served
     # content-filter refusal (HTTP 200, finish_reason="content_filter"). Billed once
@@ -2723,17 +2753,68 @@ def _detail_str(exc: HTTPException) -> str:
     return d if isinstance(d, str) else str(d)
 
 
-async def _translate_stream(translator, source_iter):
+# What a stream sends when it has been silent for the protocol's keepalive interval: an SSE
+# comment, which every SSE parser (Codex's, the OpenAI SDK's) skips, so no event changes.
+_KEEPALIVE_COMMENT = ": keepalive\n\n"
+
+
+async def _next_or_end(iterator):
+    """(True, item) for the iterator's next item, (False, None) at its end: run as a task,
+    so waiting on it can time out without cancelling the iterator."""
+    try:
+        return True, await iterator.__anext__()
+    except StopAsyncIteration:
+        return False, None
+
+
+async def _paced(source_iter, keepalive_s: float, sent_at):
+    """Items of ``source_iter``, with None put in whenever ``keepalive_s`` seconds pass with
+    nothing sent to the client (``sent_at()``: when the caller last sent a frame). The wait
+    never cancels the pending item; it is cancelled only if the client goes away."""
+    loop = asyncio.get_running_loop()
+    iterator = source_iter.__aiter__()
+    pending = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(_next_or_end(iterator))
+            timeout = max(0.0, sent_at() + keepalive_s - loop.time())
+            done, _ = await asyncio.wait({pending}, timeout=timeout)
+            if not done:
+                yield None
+                continue
+            task, pending = pending, None
+            has_item, item = task.result()
+            if not has_item:
+                return
+            yield item
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+
+
+async def _translate_stream(translator, source_iter, keepalive_s: float = 0.0):
     """Wrap the OpenAI SSE body-iterator, re-emitting each chunk in the caller's protocol.
 
     Consuming ``source_iter`` also drives the underlying _stream_response generator to
     completion — so its billing/usage `finally` (with ctx.ingress_protocol stamped) still
-    fires exactly once."""
+    fires exactly once. ``keepalive_s`` > 0 (a protocol that asks for it) sends a keepalive
+    comment whenever the client has received nothing for that long — the provider is slow,
+    or it is streaming a tool call the protocol sends whole — so an idle timeout (the
+    client's or a load balancer's) does not cut a stream that is still working."""
     errored = False
     trailers = []   # the cost frame (observability.stream_cost_event), re-sent LAST
+    loop = asyncio.get_running_loop()
+    last_sent = [loop.time()]
     for line in translator.start():
         yield line
-    async for raw in source_iter:
+    source = (_paced(source_iter, keepalive_s, lambda: last_sent[0]) if keepalive_s > 0
+              else source_iter)
+    async for raw in source:
+        if raw is None:
+            last_sent[0] = loop.time()
+            yield _KEEPALIVE_COMMENT
+            continue
         text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
         for frame in text.split("\n\n"):
             frame = frame.strip()
@@ -2753,10 +2834,12 @@ async def _translate_stream(translator, source_iter):
             if isinstance(obj, dict) and "error" in obj and "choices" not in obj:
                 msg = obj.get("error")
                 for out in translator.error(msg if isinstance(msg, str) else "upstream error"):
+                    last_sent[0] = loop.time()
                     yield out
                 errored = True
                 continue
             for out in translator.chunk(obj):
+                last_sent[0] = loop.time()
                 yield out
     # A stream that failed emits its protocol error frame and STOPS — never a synthetic
     # success termination (finish() would fabricate a finishReason:STOP / message_stop that
@@ -2870,7 +2953,8 @@ async def _translate_response(protocol, resp, *, want_stream: bool = False,
     streamGenerateContent returns a JSON array of GenerateContentResponse."""
     if isinstance(resp, StreamingResponse):
         return StreamingResponse(
-            _translate_stream(protocol.stream_translator(), resp.body_iterator),
+            _translate_stream(protocol.stream_translator(), resp.body_iterator,
+                              protocol.keepalive_seconds(get_config())),
             media_type=protocol.stream_media_type,
             status_code=resp.status_code,
         )
@@ -2926,6 +3010,7 @@ async def _serve_protocol(request: Request, proto, *, path_model: str = "",
                  if proto.admits_extra_params else {})
         messages, model, params = proto.parse_request(body, dict(request.headers), path_model,
                                                       **extra)
+        proto.scope_params(params, _caller_tenant_id(tenant_metadata), get_config())
         if force_stream:
             params["stream"] = True
     except HTTPException as exc:
@@ -2944,7 +3029,9 @@ async def _serve_protocol(request: Request, proto, *, path_model: str = "",
     try:
         resp = await _serve_core(request, request_id, _request_start, messages, model, params,
                                  user_id, api_key, tenant_metadata, proto.name,
-                                 headers=proto.pipeline_headers(request.headers))
+                                 headers=proto.pipeline_headers(
+                                     request.headers,
+                                     extra=_ingress_private_headers(get_config())))
     except HTTPException as exc:
         eb, st = proto.serialise_error(exc.status_code, _detail_str(exc))
         return JSONResponse(status_code=st, content=eb)

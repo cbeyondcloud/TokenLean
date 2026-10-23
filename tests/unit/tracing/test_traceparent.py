@@ -161,6 +161,36 @@ def test_a_malformed_traceparent_starts_a_new_trace_and_is_never_an_error(monkey
     assert resp.headers["x-trace-id"] == format(request.context.trace_id, "032x")
 
 
+@pytest.mark.parametrize("path", list(_BODIES))
+def test_two_traceparent_headers_are_malformed_on_every_route(monkeypatch, memory, path):
+    # W3C: more than one traceparent is invalid. Taking the first on some routes and the
+    # last on others would join different traces for the same request.
+    exporter = memory()
+    monkeypatch.setattr(main, "_authenticate", _fake_auth)
+    monkeypatch.setattr(main, "get_config", lambda: _CFG)
+    monkeypatch.setattr(main, "_pipeline", _Pipeline())
+    monkeypatch.setattr(main, "_usage_meter", None)
+    other = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    resp = TestClient(main.app).post(path, json=_BODIES[path], headers=[
+        ("Authorization", "Bearer tok-x"), ("traceparent", _TRACEPARENT),
+        ("traceparent", other)])
+    assert resp.status_code == 200, resp.text
+    request, _ = _spans(exporter)
+    assert request.parent is None
+    assert format(request.context.trace_id, "032x") not in (_TRACE, other.split("-")[1])
+
+
+def test_several_tracestate_headers_combine(memory):
+    memory()
+    from starlette.datastructures import Headers
+    headers = Headers(raw=[(b"traceparent", _TRACEPARENT.encode()),
+                           (b"tracestate", b"acme=1"), (b"tracestate", b"globex=2")])
+    context = otel.parent_context(headers)
+    from opentelemetry import trace as _trace
+    state = _trace.get_current_span(context).get_span_context().trace_state
+    assert (state.get("acme"), state.get("globex")) == ("1", "2")
+
+
 def test_without_a_traceparent_the_request_span_is_a_root(monkeypatch, memory):
     exporter = memory()
     resp = _post(monkeypatch)
@@ -216,6 +246,71 @@ def test_the_request_span_carries_the_gen_ai_attributes(memory):
     assert attrs["http.response.status_code"] == 200
     assert attrs["proxy.ingress_protocol"] == "responses"
     assert attrs["proxy.tenant_id"] == "acme"
+    assert attrs["proxy.provider"] == "openai"
+
+
+# The OpenTelemetry well-known gen_ai.provider.name for each built-in adapter; any other
+# provider reports TokenLean's own name. Pinned: dashboards filter on these values.
+_SEMCONV_PROVIDER = {
+    "openai": "openai", "anthropic": "anthropic", "azure": "azure.ai.openai",
+    "bedrock": "aws.bedrock", "gemini": "gcp.gemini", "xai": "x_ai",
+    "mistral": "mistral_ai", "groq": "groq", "deepseek": "deepseek", "cohere": "cohere",
+}
+
+
+@pytest.mark.parametrize("name,semconv", sorted(_SEMCONV_PROVIDER.items()))
+def test_each_adapter_reports_the_well_known_provider_name(name, semconv):
+    from providers import get_adapter_by_name
+    assert get_adapter_by_name(name).semconv_provider_name == semconv
+
+
+def test_every_registered_adapter_is_pinned():
+    from providers import _REGISTRY
+    assert set(_REGISTRY) == set(_SEMCONV_PROVIDER)
+
+
+def test_a_config_only_provider_reports_its_own_name_or_the_one_configured():
+    from providers.generic_adapter import GenericLiteLLMAdapter
+    assert GenericLiteLLMAdapter("acme-llm", {}).semconv_provider_name == "acme-llm"
+    named = GenericLiteLLMAdapter("vertex-eu", {"semconv_provider_name": "gcp.vertex_ai"})
+    assert named.semconv_provider_name == "gcp.vertex_ai"
+
+
+def test_the_span_reports_the_well_known_name_and_keeps_tokenleans_own(memory):
+    from providers import get_adapter_by_name
+    exporter = memory()
+    ctx = _ctx(provider_adapter=get_adapter_by_name("bedrock"))
+    ctx.otel_request_span = otel.start_request_span(ctx, {})
+    otel.finish_request_span(ctx, "200", None)
+    (span,) = exporter.get_finished_spans()
+    assert span.attributes["gen_ai.provider.name"] == "aws.bedrock"
+    assert span.attributes["gen_ai.system"] == "aws.bedrock"
+    assert span.attributes["proxy.provider"] == "bedrock"
+
+
+def test_a_failure_after_the_pipeline_still_ends_the_span(monkeypatch, memory):
+    exporter = memory()
+
+    class _Passing(_Pipeline):
+        async def process_request(self, ctx, request_headers=None):
+            ctx.otel_span = otel.start_span("proxy-pipeline", ctx)
+            otel.end_span(ctx.otel_span)
+            return ctx                                   # no short-circuit: on to the call
+
+    async def boom(*_a, **_kw):
+        raise RuntimeError("key store exploded")
+
+    monkeypatch.setattr(main, "_authenticate", _fake_auth)
+    monkeypatch.setattr(main, "get_config", lambda: _CFG)
+    monkeypatch.setattr(main, "_pipeline", _Passing())
+    monkeypatch.setattr(main, "_usage_meter", None)
+    monkeypatch.setattr(main, "resolve_provider_key", boom)
+    client = TestClient(main.app, raise_server_exceptions=False)
+    resp = client.post("/v1/chat/completions", json=_BODIES["/v1/chat/completions"],
+                       headers={"Authorization": "Bearer tok-x", "traceparent": _TRACEPARENT})
+    assert resp.status_code == 500
+    request, _ = _spans(exporter)
+    assert request.attributes["http.response.status_code"] == 500
 
 
 def test_a_request_with_no_provider_call_reports_no_usage(memory):

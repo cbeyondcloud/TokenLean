@@ -143,7 +143,9 @@ env_key = "TOKENLEAN_API_KEY"    # the environment variable holding your proxy k
 ```
 Codex's identifying headers (`originator`, `user-agent`, `session-id`, `thread-id`,
 `x-client-request-id`, `x-codex-*`) and its `client_metadata` never reach the provider. Its
-`prompt_cache_key` (the thread id) is sent as the provider's cache key, as on the chat route.
+`prompt_cache_key` (the thread id) reaches the provider only as an opaque digest scoped to your
+tenant, which keeps prompt caching working. While the model writes a long tool call, the stream
+sends `: keepalive` comments (every 15 s by default), so Codex's idle timeout does not cut it.
 
 ### Java
 ```java

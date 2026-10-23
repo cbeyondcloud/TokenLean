@@ -33,6 +33,9 @@ def _cache_write_1h_tokens(usage: Dict, details: Dict) -> Optional[int]:
 
 @register_adapter("anthropic")
 class AnthropicAdapter(ProviderAdapter):
+    #: OpenTelemetry GenAI well-known provider name (gen_ai.provider.name).
+    SEMCONV_PROVIDER_NAME = "anthropic"
+
     @property
     def name(self) -> str:
         return "anthropic"

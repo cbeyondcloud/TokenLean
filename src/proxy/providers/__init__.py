@@ -224,10 +224,20 @@ def _first_present(source: Dict, keys: tuple) -> Optional[int]:
 class ProviderAdapter(ABC):
     """Base interface every provider adapter must implement."""
 
+    #: The OpenTelemetry GenAI well-known ``gen_ai.provider.name`` for this provider
+    #: (``aws.bedrock``, ``gcp.gemini``...). None: report :attr:`name`. Each adapter
+    #: declares its own, so no provider name is written outside its adapter.
+    SEMCONV_PROVIDER_NAME: Optional[str] = None
+
     @property
     @abstractmethod
     def name(self) -> str:
         """Canonical provider name matching the `providers[].name` config key."""
+
+    @property
+    def semconv_provider_name(self) -> str:
+        """The provider as OpenTelemetry names it on a span (``gen_ai.provider.name``)."""
+        return self.SEMCONV_PROVIDER_NAME or self.name
 
     @abstractmethod
     def map_structured_output(

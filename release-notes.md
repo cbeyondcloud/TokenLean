@@ -32,8 +32,9 @@ SDK's `client.responses` reach every configured provider with every optimisation
 Every item ends with `response.output_item.done` and every stream with `response.completed`,
 `response.incomplete` or `response.failed`, never a silent close. Stateless: `previous_response_id`,
 hosted tools and anything else it cannot honour get a 400 naming the field. Codex's identifying
-headers and `client_metadata` never reach the provider (its `prompt_cache_key` is sent as the
-provider cache key, as on the chat route). Usage rows (`protocol` `responses`), usage
+headers and `client_metadata` never reach the provider, and its `prompt_cache_key` (the thread
+id) goes only as a tenant-scoped digest. Function-call arguments stream live, and a stream
+silent for 15 s sends a keepalive comment, so a long tool call is never cut by an idle timeout. Usage rows (`protocol` `responses`), usage
 tags, team binding and the cost header and frame work as on `/v1/chat/completions`, which is unchanged.
 - **OSS:** the endpoint and its protocol adapter ship in the core proxy.
 

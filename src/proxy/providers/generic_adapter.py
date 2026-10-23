@@ -32,6 +32,16 @@ class GenericLiteLLMAdapter(ProviderAdapter):
     def name(self) -> str:
         return self._name
 
+    @property
+    def semconv_provider_name(self) -> str:
+        """A config-only provider may name itself for OpenTelemetry
+        (``providers[].semconv_provider_name``, e.g. ``gcp.vertex_ai``); else the class's
+        well-known name, else its own."""
+        configured = self._cfg.get("semconv_provider_name")
+        if isinstance(configured, str) and configured:
+            return configured
+        return super().semconv_provider_name
+
     def build_call(self, model: str, provider_cfg: Dict, api_key: Optional[str]) -> tuple:
         """Inject the subclass LITELLM_PREFIX (if config didn't set routing) then delegate."""
         cfg = dict(provider_cfg or {})

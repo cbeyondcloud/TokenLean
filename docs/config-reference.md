@@ -344,7 +344,7 @@ teams) — never its values.
 `responses`), `X-Agentic-*` tags, team binding, `x-tokenlean-*` headers and stream cost frame.
 The proxy key goes in `Authorization: Bearer`. The request is translated to the chat shape on the
 way in; the answer goes back as a Response object (`stream: false`) or as Responses SSE events
-(`stream: true`). There is no setting: the route is always on.
+(`stream: true`). The route is always on; its settings are under [`ingress`](#ingress).
 
 **Stateless.** No response is stored. `previous_response_id`, `conversation`, `background: true`
 and a stored `prompt` get a 400 that names the field: send the whole conversation in `input` each
@@ -355,9 +355,9 @@ answers 404.
 | Request field | Becomes |
 |---|---|
 | `instructions` | a system message, first |
-| `input` as a string | one user message |
-| `message` items (`developer` becomes system; `user`, `assistant`, `system`) with `input_text` / `output_text` / `refusal` / `input_image` (URL or data URL) parts | chat messages; all-text parts join into one string, a blank line between parts |
-| `function_call` / `function_call_output` | the assistant's `tool_calls` (`call_id` kept as the id; consecutive calls in one assistant message) / a `tool` message |
+| `input` as a string | one user message. Input with nothing to answer (an empty or blank string, only reasoning items, only system or developer messages, no content parts) gets a 400 `input contains no content` |
+| `message` items (`developer` becomes system; `user`, `assistant`, `system`) with `input_text` / `output_text` / `refusal` / `input_image` (URL or data URL) parts | chat messages; all-text parts join into one string, a blank line between parts. A developer message in mid-conversation becomes a mid-conversation system message, which some OpenAI-compatible backends with a strict chat template reject |
+| `function_call` / `function_call_output` | the assistant's `tool_calls` (`call_id` kept as the id; consecutive calls in one assistant message) / a `tool` message. An image in a tool output becomes the text `[image omitted: images in tool output are not supported by this gateway]` (the count is logged, never the image), so a session that used Codex's `view_image` stays servable |
 | `custom_tool_call` / `custom_tool_call_output` | the same, the free-form `input` wrapped as `{"input": "..."}` |
 | `reasoning` items | dropped: their encrypted content is readable only by the model that wrote it |
 | `tools` of type `function` | a function tool (`strict` kept) |
@@ -367,44 +367,50 @@ answers 404.
 | `text.verbosity` | `verbosity` (dropped for a provider without it) |
 | `reasoning.effort` | `reasoning_effort` (G12 and G25 read it; stripped for a model that does not reason) |
 | `max_output_tokens` | `max_tokens` (a positive integer, else a 400) |
-| `temperature`, `top_p`, `prompt_cache_key`, `prompt_cache_retention`, `safety_identifier`, `user`, `service_tier` | the chat parameter of the same name (`prompt_cache_key` is the provider's cache key, which G21 may set itself, as on the chat route) |
+| `temperature`, `top_p`, `prompt_cache_retention`, `safety_identifier`, `user`, `service_tier` | the chat parameter of the same name |
+| `prompt_cache_key` | the provider's cache key, as `sha256("responses|<tenant>|<key>")` cut to 32 hex characters: the same key gives the same digest, so caching works, but the client's id (Codex: its thread id) is not sent. G21 may still set its own, as on the chat route. `ingress.forward_prompt_cache_key: true` sends the value as it is |
+| `stream` | `true` or `false`; anything else is a 400 |
 | `store`, `include`, `stream_options`, `max_tool_calls`, `metadata`, `client_metadata` | accepted, never sent upstream (`metadata` is echoed in the Response) |
 | `previous_response_id`, `conversation`, `background`, `prompt`, `truncation: auto`, `top_logprobs` | a 400 naming the field |
 | any other field | dropped, its name logged, unless listed in [`ingress.extra_allowed_params`](#ingress) |
 
 Also refused with a 400 that names the field: a tool other than `function` or `custom` (`namespace`,
 `web_search`, `file_search` and the other hosted tools), an `item_reference` or any item type it
-cannot carry, an `input_file` part, an `input_image` given by `file_id`, and an image inside a tool
-output.
+cannot carry, an `input_file` part (in a message or a tool output), and an `input_image` given by
+`file_id`.
 
 **Privacy.** These request headers, which identify the client, its user, machine, session or
 thread, are kept from the pipeline entirely: `originator`, `user-agent`, `session-id`, `thread-id`,
 `conversation-id`, `x-client-request-id`, `chatgpt-account-id`, `openai-organization`,
 `openai-project`, and every `x-codex-*`, `x-openai-*` and `x-stainless-*` header. `client_metadata`
-never becomes a parameter. So none of them reaches a provider, a routing rule or a log.
-`prompt_cache_key` is different: it is the provider's cache key, sent as on the chat route, and
-Codex sets it to its thread id. `traceparent` and the `X-Agentic-*` headers are read as on every
-route.
+never becomes a parameter. So none of them reaches a provider, a routing rule or a log. No
+request header reaches a provider in any case (the provider call carries none of them), so for
+`user-agent`, `originator`, `session-id` and `thread-id` this is defence in depth. Operators add
+their own with `ingress.private_headers`. Codex's thread id also arrives as `prompt_cache_key`,
+which goes to the provider only as a tenant-scoped digest (above). `traceparent` and the
+`X-Agentic-*` headers are read as on every route.
 
 **Output.** One item per thing the model produced, in order: a `reasoning` item (when the provider
 streams reasoning text), the assistant `message` (`output_text`), then a `function_call` per tool
 call, or a `custom_tool_call` (with the unwrapped `input`) for a tool the request declared
 `custom`. The Response `id` is `resp_` followed by the proxy's request id without its dashes. A
-stream is these SSE
-events, each an `event:` line and a `data:` line with a `sequence_number`:
+stream is these SSE events, each an `event:` line and a `data:` line with a `sequence_number`.
+`response.created` and `response.in_progress` carry a skeleton Response (`instructions` null,
+`tools` empty); the terminal event carries the whole one. A stream silent for
+`ingress.responses.keepalive_seconds` gets a `: keepalive` comment between events.
 
 | Event | When |
 |---|---|
 | `response.created`, `response.in_progress` | first |
-| `response.output_item.added` | an item starts |
+| `response.output_item.added` | an item starts; a tool call as soon as its name arrives |
 | `response.reasoning_text.delta`, `.done` | reasoning text, live |
 | `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done` | the message's text, live |
-| `response.function_call_arguments.delta`, `.done` | a function call, sent whole at the end |
-| `response.custom_tool_call_input.delta`, `.done` | a custom tool call, sent whole at the end |
+| `response.function_call_arguments.delta`, `.done` | a function call's arguments, live; `.done` when the stream ends |
+| `response.custom_tool_call_input.delta`, `.done` | a custom tool call's input, whole, when the stream ends (on the wire it is JSON-wrapped; the keepalive covers a long one) |
 | `response.output_item.done` | an item ends: every item gets one |
 | `response.completed` | last, with the whole Response and its `usage` |
 | `response.incomplete` | last instead, when the answer hit `max_output_tokens` (`incomplete_details.reason`). A content-filter finish, such as a G29/G30/G31 block served as a refusal, ends with `response.completed`: a client like Codex retries an incomplete response, and each retry would be another billed block |
-| `response.failed` | last instead, when the provider failed (`error.code` `server_error` or `rate_limit_exceeded`): never a stream that just closes |
+| `response.failed` | last instead, when the provider failed (`error.code` `server_error` or `rate_limit_exceeded`): never a stream that just closes. The text or reasoning so far is closed first (`response.output_item.done`, status `incomplete`); a half-streamed tool call is never closed, so a client cannot run it |
 
 `usage` carries `input_tokens`, `input_tokens_details.cached_tokens` (cache reads),
 `input_tokens_details.cache_write_tokens` (cache writes, when the provider reports them),
@@ -491,6 +497,9 @@ Which request-body fields the OpenAI-compatible endpoint (`/v1/chat/completions`
 | Parameter | Default | Description |
 |---|---|---|
 | `extra_allowed_params` | `[]` | Extra body-field names to admit, e.g. `["metadata"]`. Global config only — a tenant override cannot extend it |
+| `forward_prompt_cache_key` | `false` | `/v1/responses` only. Off, a client's `prompt_cache_key` (Codex sets its thread id) reaches the provider as an opaque digest scoped to the tenant, which keeps caching working; only the boolean `true` sends the client's value as it is |
+| `private_headers` | `[]` | `/v1/responses` only. More request headers kept from the pipeline, added to the built-in list: names, or prefixes ending in `*`, e.g. `["x-device-id", "x-corp-*"]`. Case does not matter |
+| `responses.keepalive_seconds` | `15` | `/v1/responses` only. A stream that has sent the client nothing for this long sends an SSE comment (`: keepalive`), which clients skip, so an idle timeout does not cut it while the provider writes a long tool call. `0` sends none |
 
 Two limits hold whatever you list: a field starting with `_` (the proxy's internal flags) is never admitted, and litellm call arguments — `api_base`, `base_url`, `api_key`, `extra_headers`, `extra_body`, `fallbacks`, `timeout`, `mock_*` and similar — are stripped again before the upstream call, on every provider path.
 
@@ -516,15 +525,18 @@ optionally `tracestate`), the request span is a child of the caller's span: the 
 caller's span as parent, the `tracestate` carried along. The caller's sampled flag is honoured: with
 `-00` the proxy records nothing either, and the response still names the trace in `X-Trace-ID`. A
 malformed header (wrong version, length or case, an all-zero id) is ignored and the request starts
-a new trace; it is never an error. Without the header the request span is the root of a new trace.
-`X-Trace-ID` names the caller's trace when the request joined one.
+a new trace; it is never an error, and neither is a request with more than one `traceparent` header,
+which is malformed too (several `tracestate` headers combine). Without the header the request span
+is the root of a new trace. `X-Trace-ID` names the caller's trace when the request joined one.
+Because an authenticated caller's sampled flag wins over `sample_rate`, callers that sample
+everything raise the proxy's export volume accordingly.
 
 **Attributes.** The request span carries the OpenTelemetry GenAI semantic-convention attributes:
 
 | Attribute | Value |
 |---|---|
 | `gen_ai.operation.name` | `chat` |
-| `gen_ai.provider.name`, `gen_ai.system` | the provider that served, by the name `usage_events.provider` records; `gen_ai.system` is the older name, kept for backends that still read it |
+| `gen_ai.provider.name`, `gen_ai.system` | the provider that served, by its OpenTelemetry well-known name: `openai`, `anthropic`, `azure.ai.openai`, `aws.bedrock`, `gcp.gemini`, `x_ai`, `mistral_ai`, `groq`, `deepseek`, `cohere`; a config-only provider reports its own name, or `providers[].semconv_provider_name`. `gen_ai.system` is the older attribute, kept for backends that still read it. TokenLean's own provider name (as `usage_events.provider` records it) is `proxy.provider` |
 | `gen_ai.request.model` | the model requested (after a tenant default is applied) |
 | `gen_ai.response.model` | the model the provider reported, else the routed model |
 | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` | summed over every provider call the request paid for; absent when none was made (a cache hit, a bypass, a refusal) |
@@ -533,9 +545,11 @@ It also carries `http.response.status_code`, `proxy.request_id`, `proxy.tenant_i
 `proxy.ingress_protocol`; a 5xx marks it as an error. No prompt or answer text goes on a span.
 
 **Forwarding.** By default no trace id is sent to a provider. With `forward_traceparent: true`,
-every provider call (the primary, a failover target, a cascade tier) carries `traceparent` (and
-`tracestate`) naming the proxy's request span as the parent, added to any headers the provider
-adapter sets itself.
+every model call that serves the request (the primary, a failover target, a cascade tier) carries
+`traceparent` (and `tracestate`) naming the proxy's request span as the parent, added to any
+headers the provider adapter sets itself. The helper calls some groups make on their own do not
+carry it: the G06 judge, the G11 repair call, G09's schema call, the G10 history summary
+and an F2 dispatch to a downstream agent.
 
 ### proxy
 | Parameter | Default | Description |

@@ -27,7 +27,7 @@ the SDK dependency.
 """
 import logging
 import os
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -215,11 +215,28 @@ def end_span(span: Any, *, error: Optional[Exception] = None) -> None:
 
 
 def _trace_context_carrier(headers: Any) -> Dict[str, str]:
-    """The W3C trace-context headers of a request, by lower-case name."""
+    """The W3C trace-context headers of a request, by lower-case name. Read from every
+    header line (Starlette's ``Headers.items()`` keeps repeats): more than one
+    ``traceparent`` is malformed (W3C) and is dropped, so the request starts a new trace on
+    every route alike; several ``tracestate`` lines combine, as the spec says."""
     if not hasattr(headers, "items"):
         return {}
-    return {str(k).lower(): v for k, v in headers.items()
-            if str(k).lower() in _TRACE_CONTEXT_HEADERS and isinstance(v, str)}
+    parents: List[str] = []
+    states: List[str] = []
+    for key, value in headers.items():
+        name = str(key).lower()
+        if not isinstance(value, str):
+            continue
+        if name == "traceparent":
+            parents.append(value)
+        elif name == "tracestate":
+            states.append(value)
+    if len(parents) != 1:
+        return {}
+    carrier = {"traceparent": parents[0]}
+    if states:
+        carrier["tracestate"] = ",".join(states)
+    return carrier
 
 
 def parent_context(headers: Any) -> Any:
@@ -289,10 +306,15 @@ def finish_request_span(ctx: Any, status: Any, response: Any = None) -> None:
         model = str(getattr(ctx, "model", "") or "")[:_MAX_MODEL_CHARS]
         span.update_name(f"{GEN_AI_OPERATION} {model}".strip())
         span.set_attribute(GEN_AI_REQUEST_MODEL, model)
-        provider = str(getattr(getattr(ctx, "provider_adapter", None), "name", "") or "")
+        adapter = getattr(ctx, "provider_adapter", None)
+        provider = str(getattr(adapter, "name", "") or "")
         if provider:
-            span.set_attribute(GEN_AI_PROVIDER_NAME, provider)
-            span.set_attribute(GEN_AI_SYSTEM, provider)
+            # The OpenTelemetry well-known name the adapter declares (aws.bedrock,
+            # gcp.gemini...), else TokenLean's own; TokenLean's name stays in proxy.provider.
+            semconv = str(getattr(adapter, "semconv_provider_name", "") or provider)
+            span.set_attribute(GEN_AI_PROVIDER_NAME, semconv)
+            span.set_attribute(GEN_AI_SYSTEM, semconv)
+            span.set_attribute("proxy.provider", provider)
         reported = response.get("model") if isinstance(response, dict) else None
         span.set_attribute(GEN_AI_RESPONSE_MODEL,
                            str(reported or getattr(ctx, "routed_model", "") or model)

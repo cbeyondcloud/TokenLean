@@ -322,9 +322,11 @@ def test_an_operator_admitted_field_passes():
      "input[0].content[0]"),
     ({"input": [{"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"},
                 {"type": "function_call_output", "call_id": "c",
-                 "output": [{"type": "input_image", "image_url": "data:x"}]}]},
+                 "output": [{"type": "input_file", "file_id": "f"}]}]},
      "input[1].output"),
     ({"input": 7}, "input"),
+    ({"stream": "false"}, "stream"),
+    ({"stream": 1}, "stream"),
     ({"input": []}, "input"),
     ({"input": [{"role": "wizard", "content": "x"}]}, "input[0].role"),
     ({"text": {"format": {"type": "xml"}}}, "text.format.type"),
@@ -341,9 +343,86 @@ def test_null_stateful_fields_are_fine():
             "truncation": "disabled", "conversation": None, "top_logprobs": 0})
 
 
+@pytest.mark.parametrize("body", [
+    {"input": ""},                                                  # an empty user message
+    {"input": "   ", "instructions": "You are Codex."},             # whitespace only
+    {"input": [{"type": "reasoning", "id": "rs_1", "summary": [],
+                "encrypted_content": "gAAA"}]},                     # reasoning only
+    {"input": [{"type": "message", "role": "user", "content": []}]},
+    {"input": [{"type": "message", "role": "developer", "content": "rules"}],
+     "instructions": "You are Codex."},                             # system messages only
+], ids=["empty-string", "whitespace", "reasoning-only", "no-parts", "system-only"])
+def test_input_with_nothing_to_answer_is_refused(body):
+    # Sent on, it reached the provider as messages=[] or an empty user message, and came
+    # back as a 502 or a failed stream.
+    with pytest.raises(UnsupportedRequestField, match="input contains no content"):
+        _parse({"model": "m", **body})
+
+
+def test_a_tool_round_trip_alone_is_content():
+    _parse({"model": "m", "input": [
+        {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c", "output": "done"}]})
+
+
+def test_an_image_in_a_tool_output_becomes_a_placeholder(caplog):
+    # Codex's view_image answers with an image in the tool output, and every later turn
+    # resends it: a 400 would make the session unservable for good.
+    with caplog.at_level("INFO", logger="protocols.responses_ingress"):
+        _, messages, _, _ = _parse({"model": "m", "input": [
+            {"type": "function_call", "call_id": "c", "name": "view_image",
+             "arguments": '{"path":"a.png"}'},
+            {"type": "function_call_output", "call_id": "c", "output": [
+                {"type": "input_text", "text": "Here it is:"},
+                {"type": "input_image", "image_url": "data:image/png;base64,SECRETPIXELS"},
+                {"type": "input_image", "image_url": "https://example.test/b.png"}]}]})
+    assert messages[-1] == {"role": "tool", "tool_call_id": "c", "content": (
+        "Here it is:\n\n"
+        "[image omitted: images in tool output are not supported by this gateway]\n\n"
+        "[image omitted: images in tool output are not supported by this gateway]")}
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "2 image" in logged
+    assert "SECRETPIXELS" not in logged and "example.test" not in logged
+
+
+# ── prompt_cache_key: a tenant-scoped digest, not the client's own id ─────────
+
+def test_prompt_cache_key_becomes_an_opaque_tenant_scoped_digest():
+    import hashlib
+    proto, _, _, params = _parse({"model": "m", "input": "x",
+                                  "prompt_cache_key": "019a-thread-id"})
+    proto.scope_params(params, tenant_id="acme", config={})
+    expected = hashlib.sha256(b"responses|acme|019a-thread-id").hexdigest()[:32]
+    assert params["prompt_cache_key"] == expected
+    # the same thread keeps its key (caching still works); another tenant's never matches
+    again = {"prompt_cache_key": "019a-thread-id"}
+    proto.scope_params(again, tenant_id="acme", config={})
+    other = {"prompt_cache_key": "019a-thread-id"}
+    proto.scope_params(other, tenant_id="globex", config={})
+    assert again["prompt_cache_key"] == expected != other["prompt_cache_key"]
+
+
+@pytest.mark.parametrize("switch,raw", [(True, True), ("true", False), (1, False),
+                                        (None, False)])
+def test_only_a_literal_true_forwards_the_raw_prompt_cache_key(switch, raw):
+    params = {"prompt_cache_key": "019a-thread-id"}
+    cfg = {"ingress": {"forward_prompt_cache_key": switch}}
+    RESPONSES.for_request("r").scope_params(params, tenant_id="acme", config=cfg)
+    assert (params["prompt_cache_key"] == "019a-thread-id") is raw
+
+
+def test_scoping_without_a_prompt_cache_key_adds_none():
+    params = {}
+    RESPONSES.for_request("r").scope_params(params, tenant_id="acme", config={})
+    assert params == {}
+
+
 # ── privacy: headers the pipeline never sees ───────────────────────────────────
 
 def test_client_identifying_headers_are_kept_from_the_pipeline():
+    # No request header ever reaches a provider (the litellm call carries none), so this
+    # filter is defence in depth: user-agent, originator, session-id and thread-id (and the
+    # rest) also never reach a routing rule, a log or a future header forwarder.
     headers = {"Authorization": "Bearer k", "originator": "codex_exec",
                "User-Agent": "codex_exec/0.160.1", "session-id": "s", "thread-id": "t",
                "x-client-request-id": "r", "x-codex-window-id": "w",
@@ -361,6 +440,14 @@ def test_client_identifying_headers_are_kept_from_the_pipeline():
 def test_the_other_adapters_keep_every_header():
     from protocols import ANTHROPIC
     assert ANTHROPIC.pipeline_headers({"user-agent": "x"}) is None
+    assert ANTHROPIC.pipeline_headers({"user-agent": "x"}, extra=("user-agent",)) is None
+
+
+def test_an_operator_can_add_names_and_prefixes_to_the_private_list():
+    headers = {"Authorization": "Bearer k", "X-Device-Id": "d-1", "x-corp-user": "u",
+               "x-corp-session": "s", "X-Team": "payments"}
+    kept = RESPONSES.pipeline_headers(headers, extra=("x-device-id", "X-Corp-*", 7, ""))
+    assert {k.lower() for k in kept} == {"authorization", "x-team"}
 
 
 # ── response: stream ───────────────────────────────────────────────────────────
@@ -452,6 +539,100 @@ def test_function_calls_stream_back_as_function_call_items_after_the_text():
     assert "response.function_call_arguments.done" in [e for e, _ in events]
     assert events[-1][0] == "response.completed"
     assert len({i["id"] for i in done}) == 3
+
+
+def test_a_function_call_streams_live_as_its_arguments_arrive():
+    # A large call used to be silent until the model finished: Codex's idle timeout (or a
+    # load balancer's) then cut the stream and the turn was retried and billed again.
+    proto, *_ = _parse({"model": "m", "input": "x", "tools": [_EXEC_TOOL]})
+    t = proto.stream_translator()
+    list(t.start())
+    head = _events(t.chunk({"choices": [{"delta": {"tool_calls": [
+        {"index": 0, "id": "call_1", "function": {"name": "exec_command",
+                                                  "arguments": ""}}]}}]}))
+    assert [e for e, _ in head] == ["response.output_item.added"]
+    assert head[0][1]["item"] == {"type": "function_call", "id": head[0][1]["item"]["id"],
+                                  "call_id": "call_1", "name": "exec_command",
+                                  "arguments": "", "status": "in_progress"}
+    item_id = head[0][1]["item"]["id"]
+    for piece in ('{"cmd":', '"ls -la"', "}"):
+        frames = _events(t.chunk({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": piece}}]}}]}))
+        assert frames == [("response.function_call_arguments.delta", {
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": frames[0][1]["sequence_number"],
+            "item_id": item_id, "output_index": 0, "delta": piece})]
+    tail = _events(list(t.chunk({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}))
+                   + list(t.finish()))
+    assert [e for e, _ in tail] == ["response.function_call_arguments.done",
+                                    "response.output_item.done", "response.completed"]
+    assert tail[0][1]["arguments"] == '{"cmd":"ls -la"}'
+    assert tail[1][1]["item"]["arguments"] == '{"cmd":"ls -la"}'
+    assert tail[1][1]["item"]["status"] == "completed"
+
+
+def test_arguments_before_the_name_are_held_until_the_call_can_be_announced():
+    proto, *_ = _parse({"model": "m", "input": "x", "tools": [_EXEC_TOOL]})
+    t = proto.stream_translator()
+    list(t.start())
+    assert list(t.chunk({"choices": [{"delta": {"tool_calls": [
+        {"index": 0, "id": "call_1", "function": {"arguments": '{"cmd":'}}]}}]})) == []
+    frames = _events(t.chunk({"choices": [{"delta": {"tool_calls": [
+        {"index": 0, "function": {"name": "exec_command", "arguments": '"pwd"}'}}]}}]}))
+    assert [e for e, _ in frames] == ["response.output_item.added",
+                                      "response.function_call_arguments.delta"]
+    assert frames[1][1]["delta"] == '{"cmd":"pwd"}'
+
+
+def test_a_custom_tool_call_is_announced_when_it_starts():
+    proto, *_ = _parse({"model": "m", "input": "x", "tools": [_PATCH_TOOL]})
+    t = proto.stream_translator()
+    list(t.start())
+    frames = _events(t.chunk({"choices": [{"delta": {"tool_calls": [
+        {"index": 0, "id": "call_p", "function": {"name": "apply_patch",
+                                                  "arguments": '{"input":"*** Be'}}]}}]}))
+    assert [e for e, _ in frames] == ["response.output_item.added"]
+    assert frames[0][1]["item"]["type"] == "custom_tool_call"
+    assert frames[0][1]["item"]["input"] == ""
+
+
+def test_created_and_in_progress_carry_a_skeleton_and_the_terminal_event_the_whole():
+    proto, *_ = _parse({"model": "m", "input": "x", "instructions": "I" * 20000,
+                        "tools": [_EXEC_TOOL, _PATCH_TOOL]})
+    events = _run_stream(proto, [{"choices": [{"delta": {"content": "ok"},
+                                               "finish_reason": "stop"}]}])
+    for name, data in events[:2]:
+        assert data["response"]["instructions"] is None, name
+        assert data["response"]["tools"] == [], name
+        assert data["response"]["id"] == "resp_req1"
+        assert len(json.dumps(data)) < 2000
+    final = events[-1][1]["response"]
+    assert final["instructions"] == "I" * 20000
+    assert final["tools"] == [_EXEC_TOOL, _PATCH_TOOL]
+
+
+def test_a_failure_closes_the_open_message_first_but_never_an_unfinished_call():
+    proto, *_ = _parse({"model": "m", "input": "x", "tools": [_EXEC_TOOL]})
+    events = _run_stream(proto, [
+        {"choices": [{"delta": {"content": "Let me check."}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {
+            "name": "exec_command", "arguments": '{"cmd":"rm'}}]}}]},
+    ], fail="LLM provider error (upstream call failed)")
+    done = [d["item"] for e, d in events if e == "response.output_item.done"]
+    # the message was closed when the call began; the half-streamed call is never "done",
+    # so a client cannot run it
+    assert [i["type"] for i in done] == ["message"]
+    assert events[-1][0] == "response.failed"
+
+    proto, *_ = _parse({"model": "m", "input": "x"})
+    events = _run_stream(proto, [{"choices": [{"delta": {"content": "Half an ans"}}]}],
+                         fail="LLM provider error (upstream call failed)")
+    assert [e for e, _ in events][-3:] == ["response.content_part.done",
+                                           "response.output_item.done", "response.failed"]
+    closed = events[-2][1]["item"]
+    assert closed["status"] == "incomplete"
+    assert closed["content"][0]["text"] == "Half an ans"
+    assert events[-1][1]["response"]["output"] == [closed]
 
 
 def test_a_truncated_answer_ends_incomplete():

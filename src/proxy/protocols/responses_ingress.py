@@ -34,7 +34,9 @@ upstream; any other field is dropped and its name logged, unless the operator ad
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import re
 import time
 import uuid
@@ -44,6 +46,8 @@ from protocols.base import (
     INTERNAL_PARAM_PREFIX, IngressProtocol, StreamTranslator, UnsupportedRequestField,
     _log_dropped, safe_json_dumps,
 )
+
+logger = logging.getLogger(__name__)
 
 # Body fields carried as the chat parameter of the same name. (``parallel_tool_calls`` and
 # ``tool_choice`` are carried only with tools: a chat provider rejects them alone.)
@@ -86,6 +90,13 @@ _PRIVATE_HEADERS = frozenset({"originator", "user-agent", "session-id", "session
                               "x-client-request-id", "chatgpt-account-id",
                               "openai-organization", "openai-project"})
 _PRIVATE_HEADER_PREFIXES = ("x-codex-", "x-openai-", "x-stainless-")
+DEFAULT_KEEPALIVE_SECONDS = 15.0
+# An operator's own entries (``ingress.private_headers``) ending in this are prefixes.
+_PREFIX_MARK = "*"
+
+# What a tool output's image becomes: a chat provider takes no image in a tool message, and
+# refusing it would make the whole session unservable (every later turn resends it).
+IMAGE_OMITTED = "[image omitted: images in tool output are not supported by this gateway]"
 
 _ROLES = {"user": "user", "assistant": "assistant", "system": "system", "developer": "system"}
 _TEXT_PARTS = ("input_text", "output_text", "text")
@@ -151,12 +162,20 @@ def _tool_output(output: Any, where: str) -> str:
     if output is None:
         return ""
     if isinstance(output, list):
-        texts = []
+        texts, images = [], 0
         for j, part in enumerate(output):
-            if isinstance(part, dict) and part.get("type") in _TEXT_PARTS:
+            ptype = part.get("type") if isinstance(part, dict) else None
+            if ptype in _TEXT_PARTS:
                 texts.append(str(part.get("text") or ""))
+            elif ptype == "input_image":
+                texts.append(IMAGE_OMITTED)
+                images += 1
             else:
-                raise _refuse(f"{where}[{j}]: only text parts are supported in a tool output")
+                raise _refuse(f"{where}[{j}]: only text and image parts are supported in a "
+                              "tool output")
+        if images:
+            logger.info("Responses ingress: %d image part(s) in a tool output replaced with a "
+                        "placeholder", images)
         return "\n\n".join(texts)
     return safe_json_dumps(output)
 
@@ -237,7 +256,22 @@ def _messages(body: Dict[str, Any]) -> List[Dict[str, Any]]:
         out.extend(_items_to_messages(inp))
     else:
         raise _refuse("input must be a string or a non-empty array of items")
+    if not any(_has_content(m) for m in out if m.get("role") != "system"):
+        # Sent on, it reached the provider as messages=[] or an empty user message and came
+        # back as a 502 or a failed stream.
+        raise _refuse("input contains no content")
     return out
+
+
+def _has_content(message: Dict[str, Any]) -> bool:
+    """Whether a non-system chat message gives the model something to answer: text that is
+    not blank, any content part, a tool call or a tool result."""
+    if message.get("tool_calls") or message.get("role") == "tool":
+        return True
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    return bool(content)
 
 
 def _custom_as_function(tool: Dict[str, Any], where: str) -> Dict[str, Any]:
@@ -423,12 +457,50 @@ class ResponsesProtocol(IngressProtocol):
     def for_request(self, request_id: str) -> "ResponsesProtocol":
         return ResponsesProtocol(request_id)
 
-    def pipeline_headers(self, headers: Any) -> Optional[Dict[str, str]]:
+    def pipeline_headers(self, headers: Any, extra: Iterable[Any] = ()) -> Optional[Dict[str, str]]:
+        """The headers without the private ones: the built-in list plus the operator's
+        ``extra`` names (``ingress.private_headers``; one ending in ``*`` is a prefix)."""
         if not hasattr(headers, "items"):
             return {}
+        names, prefixes = set(_PRIVATE_HEADERS), list(_PRIVATE_HEADER_PREFIXES)
+        for entry in extra or ():
+            if not isinstance(entry, str) or not entry.strip(_PREFIX_MARK).strip():
+                continue
+            entry = entry.strip().lower()
+            if entry.endswith(_PREFIX_MARK):
+                prefixes.append(entry.rstrip(_PREFIX_MARK))
+            else:
+                names.add(entry)
+        prefix_tuple = tuple(prefixes)
         return {k: v for k, v in headers.items()
-                if str(k).lower() not in _PRIVATE_HEADERS
-                and not str(k).lower().startswith(_PRIVATE_HEADER_PREFIXES)}
+                if str(k).lower() not in names and not str(k).lower().startswith(prefix_tuple)}
+
+    def keepalive_seconds(self, config: Any) -> float:
+        """``ingress.responses.keepalive_seconds`` (default 15; 0 switches it off). A
+        custom tool call's input is sent whole when the model finishes it, which for a large
+        patch can take minutes; without these comments Codex's stream idle timeout (or a
+        load balancer's) cuts the stream and the turn is retried and billed again."""
+        section = config.get("ingress") if isinstance(config, dict) else None
+        section = section.get("responses") if isinstance(section, dict) else None
+        value = section.get("keepalive_seconds") if isinstance(section, dict) else None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            return DEFAULT_KEEPALIVE_SECONDS
+        return float(value)
+
+    def scope_params(self, params: Dict[str, Any], tenant_id: str, config: Any) -> None:
+        """Replace the client's ``prompt_cache_key`` with an opaque digest scoped to the
+        tenant. Codex sets the key to its thread id; the digest keeps equality (the same
+        thread gets the same key, so provider caching still works) without sending the id.
+        ``ingress.forward_prompt_cache_key: true`` (global config, only a literal true)
+        sends the client's value as it is."""
+        key = params.get("prompt_cache_key")
+        if key is None:
+            return
+        section = config.get("ingress") if isinstance(config, dict) else None
+        if isinstance(section, dict) and section.get("forward_prompt_cache_key") is True:
+            return
+        seed = f"responses|{tenant_id or ''}|{key}".encode("utf-8")
+        params["prompt_cache_key"] = hashlib.sha256(seed).hexdigest()[:32]
 
     # ── request ──
     def parse_request(self, body, headers=None, path_model="", extra_allowed=()):
@@ -461,8 +533,10 @@ class ResponsesProtocol(IngressProtocol):
             if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
                 raise _refuse("max_output_tokens must be a positive integer")
             params["max_tokens"] = limit
-        if "stream" in body:
-            params["stream"] = bool(body["stream"])
+        if body.get("stream") is not None:
+            if not isinstance(body["stream"], bool):
+                raise _refuse("stream must be true or false")
+            params["stream"] = body["stream"]
         for name in _DIRECT_PARAMS:
             if body.get(name) is not None:
                 params[name] = body[name]
@@ -520,10 +594,15 @@ class ResponsesProtocol(IngressProtocol):
 
     def response(self, status: str, output: List[Dict[str, Any]], usage: Any, model: str = "",
                  *, error: Optional[Dict[str, Any]] = None,
-                 incomplete: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """A Response object (the same shape streamed and whole)."""
+                 incomplete: Optional[Dict[str, Any]] = None,
+                 skeleton: bool = False) -> Dict[str, Any]:
+        """A Response object (the same shape streamed and whole). A ``skeleton`` (the
+        interim ``response.created`` / ``response.in_progress``) leaves out the echoed
+        ``instructions`` and ``tools``, the large part; the terminal event carries them."""
         echo = dict(self._echo)
         requested = echo.pop("model", "")
+        if skeleton:
+            echo["instructions"], echo["tools"] = None, []
         return {"id": self.response_id, "object": "response", "created_at": self._created,
                 "status": status, "error": error, "incomplete_details": incomplete,
                 "model": model or requested, "output": output, "usage": usage,
@@ -565,16 +644,18 @@ class ResponsesProtocol(IngressProtocol):
 class _ResponsesStream(StreamTranslator):
     """Chat stream chunks → Responses SSE events.
 
-    Text and reasoning stream live, each in its own output item (one open at a time; a
-    switch closes the open one with its ``*.done`` events and ``response.output_item.done``).
-    Tool calls are accumulated by index, as the other ingress translators do, and emitted
-    whole at the end: ``function_call`` or, for a tool the request declared custom,
-    ``custom_tool_call`` with the unwrapped input. Every item ends with
-    ``response.output_item.done``, and the stream with ``response.completed`` (or
-    ``response.incomplete`` for a truncated answer, ``response.failed`` for an
-    upstream error), which carries the Response id and usage: a client that needs them
-    (Codex builds items only from ``output_item.done`` and ends a turn only on a terminal
-    event) never sees a stream close without one.
+    Nothing is held back that can be sent: text and reasoning stream live, each in its own
+    output item (one open at a time; a switch closes the open one with its ``*.done`` events
+    and ``response.output_item.done``). A tool call is announced
+    (``response.output_item.added``) as soon as its name arrives, and a function call's
+    arguments stream live as ``response.function_call_arguments.delta``; a custom tool call's
+    input is JSON-wrapped on the wire, so it is unwrapped and sent whole when the stream ends
+    (the route's keepalive comments cover a long one). Each call is closed at the end, in the
+    order the calls began. Every item ends with ``response.output_item.done``, and the stream
+    with ``response.completed`` (``response.incomplete`` for a truncated answer,
+    ``response.failed`` for an upstream error), which carries the Response id and usage: a
+    client that needs them (Codex builds items only from ``output_item.done`` and ends a turn
+    only on a terminal event) never sees a stream close without one.
     """
 
     def __init__(self, proto: ResponsesProtocol) -> None:
@@ -583,18 +664,28 @@ class _ResponsesStream(StreamTranslator):
         self._model = ""
         self._usage: Any = None
         self._finish: Any = None
-        self._output: List[Dict[str, Any]] = []
+        self._next_index = 0                          # output_index of the next item
+        self._done: Dict[int, Dict[str, Any]] = {}    # finished items by output_index
         self._open: Optional[Dict[str, Any]] = None   # the live text/reasoning item
-        self._calls: List[Dict[str, str]] = []        # tool calls, in the order they began
-        self._slots: Dict[int, Dict[str, str]] = {}   # stream index -> its current call
+        self._calls: List[Dict[str, Any]] = []        # tool calls, in the order they began
+        self._slots: Dict[int, Dict[str, Any]] = {}   # stream index -> its current call
 
     def _event(self, etype: str, **data: Any) -> str:
         payload = {"type": etype, "sequence_number": self._seq, **data}
         self._seq += 1
         return f"event: {etype}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
 
+    def _reserve_index(self) -> int:
+        index, self._next_index = self._next_index, self._next_index + 1
+        return index
+
+    def _output(self) -> List[Dict[str, Any]]:
+        return [self._done[i] for i in sorted(self._done)]
+
     def start(self) -> Iterable[str]:
-        resp = self._p.response("in_progress", [], None)
+        # A skeleton: the request's instructions and tools (about 20 KB for Codex) are echoed
+        # once, on the terminal event, not on every interim one.
+        resp = self._p.response("in_progress", [], None, skeleton=True)
         yield self._event("response.created", response=resp)
         yield self._event("response.in_progress", response=resp)
 
@@ -602,7 +693,7 @@ class _ResponsesStream(StreamTranslator):
         if self._open is not None and self._open["kind"] == kind:
             return
         yield from self._close_open()
-        index = len(self._output)
+        index = self._reserve_index()
         if kind == "reasoning":
             item_id = self._p.item_id("rs", index)
             self._open = {"kind": kind, "id": item_id, "index": index, "text": ""}
@@ -632,8 +723,34 @@ class _ResponsesStream(StreamTranslator):
                               logprobs=[])
             yield self._event("response.content_part.done", **ref,
                               part=final["content"][0])
-        self._output.append(final)
+        self._done[item["index"]] = final
         yield self._event("response.output_item.done", output_index=item["index"], item=final)
+
+    def _announce(self, slot: Dict[str, Any]) -> Iterable[str]:
+        """Open a tool call's item once its name is known; a function call's arguments so
+        far go out as its first delta."""
+        yield from self._close_open()   # the text before a call is finished
+        index = self._reserve_index()
+        slot["index"] = index
+        slot["call_id"] = slot["id"] or self._p.item_id("call", index)
+        slot["custom"] = self._p.is_custom(slot["name"])
+        if slot["custom"]:
+            slot["item_id"] = self._p.item_id("ctc", index)
+            yield self._event("response.output_item.added", output_index=index, item={
+                "type": "custom_tool_call", "id": slot["item_id"],
+                "call_id": slot["call_id"], "name": slot["name"], "input": "",
+                "status": "in_progress"})
+            return
+        slot["item_id"] = self._p.item_id("fc", index)
+        yield self._event("response.output_item.added", output_index=index, item={
+            "type": "function_call", "id": slot["item_id"], "call_id": slot["call_id"],
+            "name": slot["name"], "arguments": "", "status": "in_progress"})
+        if slot["args"]:
+            yield self._args_delta(slot, slot["args"])
+
+    def _args_delta(self, slot: Dict[str, Any], piece: str) -> str:
+        return self._event("response.function_call_arguments.delta", item_id=slot["item_id"],
+                           output_index=slot["index"], delta=piece)
 
     def chunk(self, openai_chunk: Dict[str, Any]) -> Iterable[str]:
         self._model = openai_chunk.get("model") or self._model
@@ -665,55 +782,55 @@ class _ResponsesStream(StreamTranslator):
             # A new id on an index whose call already has one is a new call (a provider that
             # numbers parallel calls all 0): never merge two calls' arguments.
             if slot is None or (tc.get("id") and slot["id"] and tc["id"] != slot["id"]):
-                slot = {"id": "", "name": "", "args": ""}
+                slot = {"id": "", "name": "", "args": "", "index": None}
                 self._slots[idx] = slot
                 self._calls.append(slot)
             if tc.get("id"):
                 slot["id"] = tc["id"]
             fn = tc.get("function") or {}
-            if fn.get("name"):
+            if fn.get("name") and not slot["name"]:
                 slot["name"] = fn["name"]
-            if isinstance(fn.get("arguments"), str):
-                slot["args"] += fn["arguments"]
+            piece = fn.get("arguments") if isinstance(fn.get("arguments"), str) else ""
+            slot["args"] += piece
+            if slot["index"] is None:
+                if slot["name"]:
+                    yield from self._announce(slot)     # sends the arguments so far
+            elif piece and not slot["custom"]:
+                yield self._args_delta(slot, piece)
 
-    def _emit_calls(self) -> Iterable[str]:
+    def _close_calls(self) -> Iterable[str]:
         for slot in self._calls:
-            if not slot["name"]:
+            if slot["index"] is None:   # never named: nothing a client could run
                 continue
-            index = len(self._output)
-            call_id = slot["id"] or self._p.item_id("call", index)
-            final = self._p.call_item(index, call_id, slot["name"], slot["args"])
-            if final["type"] == "custom_tool_call":
-                yield self._event("response.output_item.added", output_index=index,
-                                  item={**final, "input": "", "status": "in_progress"})
-                ref = {"item_id": final["id"], "output_index": index}
+            index = slot["index"]
+            final = self._p.call_item(index, slot["call_id"], slot["name"], slot["args"])
+            ref = {"item_id": slot["item_id"], "output_index": index}
+            if slot["custom"]:
                 yield self._event("response.custom_tool_call_input.delta", **ref,
                                   delta=final["input"])
                 yield self._event("response.custom_tool_call_input.done", **ref,
                                   input=final["input"])
             else:
-                yield self._event("response.output_item.added", output_index=index,
-                                  item={**final, "arguments": "", "status": "in_progress"})
-                ref = {"item_id": final["id"], "output_index": index}
-                yield self._event("response.function_call_arguments.delta", **ref,
-                                  delta=final["arguments"])
                 yield self._event("response.function_call_arguments.done", **ref,
                                   name=final["name"], arguments=final["arguments"])
-            self._output.append(final)
+            self._done[index] = final
             yield self._event("response.output_item.done", output_index=index, item=final)
 
     def error(self, message: str) -> Iterable[str]:
         text = message if isinstance(message, str) else "upstream error"
         code = "rate_limit_exceeded" if "rate limit" in text.lower() else "server_error"
-        resp = self._p.response("failed", list(self._output), responses_usage(self._usage),
+        # The text or reasoning so far is closed (incomplete) so the client can show it; a
+        # tool call is never closed half-streamed, so nothing can run truncated arguments.
+        yield from self._close_open("incomplete")
+        resp = self._p.response("failed", self._output(), responses_usage(self._usage),
                                 self._model, error={"code": code, "message": text})
         yield self._event("response.failed", response=resp)
 
     def finish(self) -> Iterable[str]:
         status, incomplete = _status(self._finish)
         yield from self._close_open("incomplete" if status == "incomplete" else "completed")
-        yield from self._emit_calls()
-        resp = self._p.response(status, list(self._output), responses_usage(self._usage),
+        yield from self._close_calls()
+        resp = self._p.response(status, self._output(), responses_usage(self._usage),
                                 self._model, incomplete=incomplete)
         yield self._event("response.completed" if status == "completed"
                           else "response.incomplete", response=resp)

@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 @register_adapter("openai")
 class OpenAIAdapter(ProviderAdapter):
+    #: OpenTelemetry GenAI well-known provider name (gen_ai.provider.name).
+    SEMCONV_PROVIDER_NAME = "openai"
+
     @property
     def name(self) -> str:
         return "openai"
