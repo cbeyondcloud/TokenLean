@@ -251,7 +251,7 @@ async def import_blob_store_once(pg_pool) -> int:
         return 0
     from auth import api_key_manager as km
     try:
-        blob = km._load_full_store()  # backend not yet installed → reads the blob
+        blob = km._load_blob_store()  # the blob, whatever backend is installed
     except Exception as exc:
         logger.warning("proxy_keys import: blob read failed: %s", exc)
         return 0

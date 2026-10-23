@@ -743,6 +743,7 @@ The tool-loading path is `src/proxy/middleware/g08_tool_loading.py`.
 | Authentication | Workload Identity (no JSON credential files) |
 | **Spend caps** | Per-tenant monthly USD ceiling (`rate_limit.spend_cap`) + budget-threshold webhook — denial-of-wallet protection; per-team caps for keys bound to a team (`teams.<team>.monthly_spend_cap_usd`) |
 | **Teams** | A proxy key can be bound to a team of its tenant (`issue-key.sh --team`): the team is recorded on every usage row, can carry its own spend cap, and can have its own config overlay (`groups` / `proxy` only) — see `docs/config-reference.md` "teams" |
+| **Key admin API** | `/admin/keys` creates, lists, revokes and rotates proxy keys (admin keys only; a team-bound admin key manages only its own team's keys). A key can be bound to a team and a user; the raw key is shown once and only its hash is stored; every change is audited. Keys live in the blob store or, with `key_store.backend: postgres`, in Postgres, where a revocation reaches every replica within `refresh_seconds` — see `docs/config-reference.md` "/admin/keys" |
 | **IP allowlist** | Optional per-tenant CIDR allowlist over the `/v1/*` routes |
 | **PII redaction (G29)** | Detect + `off\|flag\|mask\|block` email/SSN/card/phone/IP (+ optional Presidio, opt-in PHI) before the provider call; **reversible masking**; PII-free audit rows |
 | **Injection guardrails (G30)** | Precision-biased prompt-injection / jailbreak detection; `allow\|flag\|block`; non-bypassable, runs before optimisation spends tokens; optional response-side `scan_response` |

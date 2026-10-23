@@ -21,6 +21,19 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-23
+
+### Proxy keys over HTTP, bound to a user and a team, with a Postgres key store — Enhancement (OSS)
+`/admin/keys` creates, lists, revokes and rotates proxy keys. The raw key is shown once (create, rotate);
+only its hash is stored, and a listing shows neither. A key can be bound to a team and to a user of its
+tenant: the user becomes the request's user and rate-limit principal, and `X-User-ID` cannot replace it.
+Admin keys only; an admin key bound to a team manages only its own team's keys. Every change is audited,
+and changes are refused while the audit log is not wired. `key_store.backend: postgres` validates keys
+against the `proxy_keys` table: a revoked key is refused at once by the replica that revoked it and by
+every other within `refresh_seconds` (5 s), never later than `max_stale_seconds` (300 s). `issue-key.sh
+--api URL` drives the API. The blob store stays the default.
+- **OSS:** the key API, user binding, Postgres key store selection and `issue-key.sh --api` ship in the core proxy.
+
 ## 2026-10-22
 
 ### Usage tags: attribute cost to a run, a step or an agent from allow-listed headers — Enhancement (OSS)

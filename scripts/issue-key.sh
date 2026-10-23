@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# issue-key.sh — Issue or revoke proxy API keys stored in Secret Manager
+# issue-key.sh — Issue, revoke, rotate and list proxy API keys
 # =============================================================================
 # Usage:
 #   ./scripts/issue-key.sh issue  --tenant <id> [--tier free|enterprise] [--admin] [--gateway]
@@ -8,6 +8,12 @@
 #   ./scripts/issue-key.sh revoke --tenant <id>  [--project ID]
 #   ./scripts/issue-key.sh list                  [--project ID]
 #   (issue/revoke also take --backend blob and --region R — see "Key store" below)
+# Through the proxy's admin API (/admin/keys), whatever key store the proxy uses:
+#   ./scripts/issue-key.sh issue  --api URL --tenant <id> [--team NAME] [--bind-user USER]
+#                                 [--tier free|enterprise] [--label TEXT] [--admin] [--gateway]
+#   ./scripts/issue-key.sh list   --api URL [--tenant <id>] [--team NAME] [--bind-user USER]
+#   ./scripts/issue-key.sh revoke --api URL --key-id ID
+#   ./scripts/issue-key.sh rotate --api URL --key-id ID
 #
 #   --admin    key may impersonate another tenant via X-Tenant-ID (operator/benchmark).
 #   --gateway  key is a customer API gateway: its X-Team header is trusted (selects the
@@ -16,7 +22,19 @@
 #              "default"): its requests carry that team (usage_events.team, team spend cap,
 #              team config overlay), whatever X-Team says.
 #
-# Key store: this script writes ONLY the Secret Manager blob. issue/revoke first read the
+# Admin API mode (--api URL, or TOKENLEAN_ADMIN_URL): the script calls the proxy's
+# /admin/keys instead of writing Secret Manager, so it works with any key store
+# (key_store.backend: blob | postgres) and the proxy audits every change. The admin proxy
+# key is read from TOKENLEAN_ADMIN_KEY only (never a flag: a command line is visible to
+# other users of the host) and handed to curl in a private header file. A team-bound admin
+# key manages only its own team's keys. Keys are named by their key id (list shows it); the
+# raw key is printed once, on issue and rotate. gcloud is not used in this mode.
+#   --bind-user  bind the key to a user (1-128 of A-Z a-z 0-9 . _ @ + -): its requests are
+#                that user's, whatever X-User-ID says. (--user stays an alias of --tenant.)
+#   --label      a note that list shows (1-128 printable characters).
+#   --key-id     the key to revoke or rotate (16-64 lowercase hex characters).
+#
+# Key store: without --api this script writes ONLY the Secret Manager blob. issue/revoke first read the
 # deployed Cloud Run service (PROXY_SERVICE_NAME, default token-proxy; --region or
 # GCP_REGION, default asia-south1) and refuse when it validates keys against Postgres
 # (PROXY_KEYS_BACKEND=postgres, the commercial deploy) — use the admin console there.
@@ -49,6 +67,10 @@ TIER="free"
 ADMIN="false"
 GATEWAY="false"
 TEAM=""
+BIND_USER=""
+LABEL=""
+KEY_ID=""
+API_URL=""
 PROJECT_ID=""
 SECRET_NAME="${PROXY_KEYS_SECRET_NAME:-token-proxy-api-keys}"
 BACKEND=""
@@ -63,25 +85,176 @@ fi
 # ─── Argument parsing ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    issue|revoke|list) COMMAND="$1"; shift ;;
+    issue|revoke|list|rotate) COMMAND="$1"; shift ;;
     --user)    USER_ID="$2";    shift 2 ;;
     --tenant)  TENANT_ID="$2";  shift 2 ;;
     --tier)    TIER="$2";       shift 2 ;;
     --admin)   ADMIN="true";    shift ;;
     --gateway) GATEWAY="true";  shift ;;
     --team)    TEAM="$2";       shift 2 ;;
+    --bind-user) BIND_USER="$2"; shift 2 ;;
+    --label)   LABEL="$2";      shift 2 ;;
+    --key-id)  KEY_ID="$2";     shift 2 ;;
+    --api)     API_URL="$2";    shift 2 ;;
     --project) PROJECT_ID="$2"; shift 2 ;;
     --secret)  SECRET_NAME="$2"; shift 2 ;;
     --backend) BACKEND="$2";    shift 2 ;;
     --region)  REGION_ARG="$2"; shift 2 ;;
     --help)
-      sed -n '/^# Usage:/,/^# ===/p' "$0" | head -10
+      sed -n '/^# Usage:/,/^# ===/p' "$0" | head -16
       exit 0 ;;
     *) error "Unknown option: $1" ;;
   esac
 done
 
-[[ -z "$COMMAND" ]] && error "Command required: issue | revoke | list"
+[[ -z "$COMMAND" ]] && error "Command required: issue | revoke | rotate | list"
+API_URL="${API_URL:-${TOKENLEAN_ADMIN_URL:-}}"
+
+# ─── Admin API mode (--api URL) ───────────────────────────────────────────────
+die_api() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+
+API_CODE=""
+API_BODY=""
+NL=$'\n'
+api_request() {
+  # api_request METHOD PATH [JSON]: sets API_CODE and API_BODY. The admin key goes to curl
+  # in a mode-600 header file, removed at once, so it never appears on a command line.
+  local method="$1" path="$2" body="${3:-}" hdr out
+  hdr="$(mktemp)"
+  chmod 600 "$hdr"
+  printf 'Authorization: Bearer %s\n' "$TOKENLEAN_ADMIN_KEY" > "$hdr"
+  local args=(-sS -X "$method" -H "@${hdr}" -H "Content-Type: application/json"
+              -w "${NL}%{http_code}")
+  if [[ -n "$body" ]]; then
+    args+=(--data-binary "$body")
+  fi
+  if ! out=$(curl "${args[@]}" "${API_URL%/}${path}"); then
+    rm -f "$hdr"
+    die_api "Could not reach the admin API at ${API_URL}"
+  fi
+  rm -f "$hdr"
+  API_CODE="${out##*"$NL"}"
+  API_BODY="${out%"$NL"*}"
+}
+
+api_ok_or_die() {
+  if [[ ! "$API_CODE" =~ ^2 ]]; then
+    local detail
+    detail=$(printf '%s' "$API_BODY" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin).get('detail')
+except Exception:
+    d = None
+print(json.dumps(d) if isinstance(d, (dict, list)) else (d or ''))" 2>/dev/null || true)
+    die_api "The admin API answered HTTP ${API_CODE}: ${detail:-$API_BODY}"
+  fi
+}
+
+api_print_key() {
+  # The raw key, exactly once, with its id and binding.
+  printf '%s' "$API_BODY" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print('  Key id:  ' + str(d.get('key_id')))
+if d.get('replaced_key_id'):
+    print('  Replaces key id ' + str(d['replaced_key_id']) + ', now revoked')
+print('  Binding: ' + ', '.join(f'{k}={d[k]}' for k in ('tenant_id', 'team', 'user', 'tier')
+                                 if d.get(k)))
+print('  Key:     ' + str(d.get('key')))
+print('  Usage:   Authorization: Bearer ' + str(d.get('key')))"
+  warn "Store this key securely — it cannot be retrieved again."
+}
+
+api_issue() {
+  local tenant="${TENANT_ID:-$USER_ID}" body
+  [[ -z "$tenant" ]] && die_api "--tenant is required for issue"
+  case "$TIER" in
+    free|enterprise) ;;
+    *) die_api "--tier must be free|enterprise (got '${TIER}')" ;;
+  esac
+  if [[ -n "$TEAM" ]] && [[ "$TEAM" == "default" || ! "$TEAM" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+    die_api "--team must be 1-64 characters of A-Z a-z 0-9 . _ - and not 'default'"
+  fi
+  if [[ -n "$BIND_USER" && ! "$BIND_USER" =~ ^[A-Za-z0-9._@+-]{1,128}$ ]]; then
+    die_api "--bind-user must be 1-128 characters of A-Z a-z 0-9 . _ @ + -"
+  fi
+  body=$(TENANT="$tenant" TIER="$TIER" TEAM="$TEAM" BIND_USER="$BIND_USER" LABEL="$LABEL" \
+         ADMIN="$ADMIN" GATEWAY="$GATEWAY" python3 -c "
+import json, os
+b = {'tenant_id': os.environ['TENANT'], 'tier': os.environ['TIER']}
+for field, var in (('team', 'TEAM'), ('user', 'BIND_USER'), ('label', 'LABEL')):
+    if os.environ.get(var):
+        b[field] = os.environ[var]
+for flag in ('admin', 'gateway'):
+    if os.environ.get(flag.upper()) == 'true':
+        b[flag] = True
+print(json.dumps(b))")
+  api_request POST /admin/keys "$body"
+  api_ok_or_die
+  success "Key issued through ${API_URL}"
+  api_print_key
+}
+
+api_list() {
+  local query
+  query=$(TENANT="${TENANT_ID:-$USER_ID}" TEAM="$TEAM" BIND_USER="$BIND_USER" python3 -c "
+import os, urllib.parse
+q = {k: os.environ[v] for k, v in (('tenant_id', 'TENANT'), ('team', 'TEAM'),
+                                    ('user', 'BIND_USER')) if os.environ.get(v)}
+print(('?' + urllib.parse.urlencode(q, safe='@')) if q else '')")
+  api_request GET "/admin/keys${query}"
+  api_ok_or_die
+  printf '%s' "$API_BODY" | python3 -c "
+import json, sys
+keys = json.load(sys.stdin).get('keys') or []
+if not keys:
+    print('  (no keys in your scope)')
+for k in keys:
+    flags = ' '.join(f for f in ('admin', 'gateway', 'suspended') if k.get(f))
+    cols = [k.get('key_id')] + [f'{f}={k.get(f) or \"-\"}' for f in
+                                ('tenant_id', 'team', 'user', 'tier', 'label', 'created_at')]
+    print('  ' + '  '.join(str(c) for c in cols) + (('  ' + flags) if flags else ''))
+print(f'Total: {len(keys)} key(s)')"
+}
+
+api_one_key() {
+  if [[ -z "$KEY_ID" ]]; then
+    die_api "--key-id is required for ${COMMAND} in admin API mode (list shows each key's id)"
+  fi
+  [[ "$KEY_ID" =~ ^[0-9a-f]{16,64}$ ]] || die_api "--key-id must be 16-64 lowercase hex characters"
+  if [[ "$COMMAND" == "revoke" ]]; then
+    api_request DELETE "/admin/keys/${KEY_ID}"
+    api_ok_or_die
+    success "Revoked key ${KEY_ID}"
+  else
+    api_request POST "/admin/keys/${KEY_ID}/rotate"
+    api_ok_or_die
+    success "Rotated key ${KEY_ID}"
+    api_print_key
+  fi
+}
+
+if [[ -n "$API_URL" ]]; then
+  # Checked before anything is sent; the key itself is never echoed.
+  case "$COMMAND" in
+    issue)         [[ -n "${TENANT_ID:-$USER_ID}" ]] || die_api "--tenant is required for issue" ;;
+    revoke|rotate) [[ -n "$KEY_ID" ]] || die_api "--key-id is required for ${COMMAND} in admin \
+API mode (list shows each key's id)" ;;
+  esac
+  [[ -n "${TOKENLEAN_ADMIN_KEY:-}" ]] || die_api "TOKENLEAN_ADMIN_KEY must hold an admin proxy \
+key (it is never taken on the command line)."
+  case "$COMMAND" in
+    issue)         api_issue ;;
+    list)          api_list ;;
+    revoke|rotate) api_one_key ;;
+  esac
+  exit 0
+fi
+if [[ "$COMMAND" == "rotate" ]]; then
+  error "rotate works through the admin API only: pass --api URL (or set TOKENLEAN_ADMIN_URL) \
+and TOKENLEAN_ADMIN_KEY"
+fi
 case "$BACKEND" in
   ""|blob|postgres) ;;
   *) error "--backend must be blob|postgres (got '${BACKEND}')" ;;

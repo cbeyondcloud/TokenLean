@@ -36,6 +36,8 @@ to fix, not a storage blip. Shipped profiles live in `config/profiles/` (e.g.
 | `proxy` | Port, log level, CORS, default model |
 | `providers` | LLM provider endpoints (keys in Secret Manager — not here) |
 | `rate_limit` | G0 request throttling + per-tier/per-tenant limits + optional monthly quota gate |
+| `key_store` | Where proxy keys are validated: the blob (file / Secret Manager, default) or Postgres |
+| `admin_api` | The admin HTTP APIs (`/admin/keys`, `/admin/routing`): audit requirement, routing overlay polling |
 | `retention` | Optional periodic purge of aged `audit_events` / `usage_events` / expired `cache_l2` (default OFF) |
 | `groups` | Per-group enable/disable + tuning parameters |
 | `savings` | Token-savings **estimate** tuning (reporting only — never billed) |
@@ -150,7 +152,7 @@ removed and any `user_id` is blanked); a key with
 no team binding keeps the whole-tenant view (an admin key, its cross-tenant view).
 
 Rotating keys: `rotate_tenant_keys_per_binding(tenant)` issues **one new key per binding** — the
-tenant's unbound keys and each team — each keeping its team, tier, trust flags and extra metadata
+tenant's unbound keys and each team, and within either each bound user (see "/admin/keys") — each keeping its team, user, tier, trust flags and extra metadata
 (the tenant's IP allowlist and any suspension carry to all), and revokes every old key in one
 store write. `rotate_tenant_keys(tenant)` keeps its single-key result for a tenant whose keys share
 one binding, and refuses, changing nothing, for a tenant with several.
@@ -179,6 +181,66 @@ teams:
 
 The `default` team never has settings, a cap or an overlay: a deployment that binds no key to a
 team and has no `teams:` block behaves exactly as before.
+
+### key_store — where proxy keys are validated
+
+```yaml
+key_store:
+  backend: blob            # blob (default) | postgres
+  refresh_seconds: 5       # postgres: each replica re-reads every key this often (min 5)
+  max_stale_seconds: 300   # postgres: refuse every key (503) after this long unrefreshed; 0 = never
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `backend` | `blob` | `blob`: the local JSON file (`LOCAL_PROXY_KEYS_FILE` / `STORAGE_BACKEND=local`) or the Secret Manager secret, exactly as before; an absent section means it. `postgres`: the `proxy_keys` table (needs `DATABASE_URL`), which has no size limit and serialises writers across replicas. On first wiring the blob's keys are copied in once, into an empty table only and never a revoked hash. Chosen at startup; changing it takes a restart. A value the proxy cannot use (a typo) refuses to start. |
+| `refresh_seconds` | `5` | `postgres`: how often each replica re-reads every key. A key revoked or rotated through one replica is refused **at once** by that replica and **within `refresh_seconds`** by every other. |
+| `max_stale_seconds` | `300` | `postgres`: a replica that has not managed to re-read the table for this long answers **503** to every key until it does, so a revocation is never honoured later than this, even while the database is unreachable. `0` keeps serving the last snapshot (the blob backends' behaviour). Must be `0` or at least `refresh_seconds`. |
+
+With `postgres`, no key validates until the database is wired (requests get 503; the blob is not
+consulted, since a key revoked in Postgres may still be in it), and `/health` lists `key_store`
+under `not_wired` meanwhile. The blob backends are unchanged: a revocation reaches other replicas
+within `KEY_FILE_CHECK_SECONDS` (local file, default 1 s) or `KEY_SECRET_CHECK_SECONDS` (Secret
+Manager, default 5 s), with `KEY_CACHE_TTL_SECONDS` (300 s) as the backstop. A host that installs
+its own Postgres store (`PROXY_KEYS_BACKEND=postgres`, the commercial deploy) keeps `backend: blob`
+here. Tables: `infra/migrations/proxy_keys.sql` (down: `infra/migrations/down/proxy_keys.sql`,
+destructive).
+
+### /admin/keys — proxy keys over HTTP
+
+Admin proxy keys only (the `/admin/tool-governance` rule). An admin key **with no team binding**
+manages every tenant's keys; an admin key **bound to a team** manages only its own team's keys of
+its own tenant (owner decision 82's scoping): its listing is that team's whatever the query says,
+a create naming another tenant or team or asking for `admin` / `gateway` is refused (403), and
+another team's key is "not found" (404). Keys are named by their **`key_id`**, the first 16 hex
+characters of the key's sha256 (a longer prefix up to the whole hash also works). The raw key is in
+the response **exactly once** — on create and on rotate, with `Cache-Control: no-store` — and the
+store keeps only its hash; a listing shows neither.
+
+| Method and path | Request | Success |
+|---|---|---|
+| `POST /admin/keys` | `{tenant_id, team?, user?, tier?, label?, admin?, gateway?}` — `tenant_id` required for an unbound admin key (a team-bound one defaults to its own tenant and team); `team` 1–64 of `A-Z a-z 0-9 . _ -`, not `default`; `user` 1–128 of `A-Z a-z 0-9 . _ @ + -`; `tier` `free` (default) or `enterprise`; `label` 1–128 printable ASCII; unknown fields refused | **201** `{key, key_id, tenant_id, team, user, tier, admin, gateway, suspended, label, created_at, notice}` |
+| `GET /admin/keys?tenant_id=&team=&user=` | optional filters | **200** `{keys: [{key_id, tenant_id, team, user, tier, admin, gateway, suspended, label, created_at}], count}` |
+| `DELETE /admin/keys/{key_id}` | — | **200** `{revoked: true, key_id, ...}` |
+| `POST /admin/keys/{key_id}/rotate` | — | **200** `{key, key_id, replaced_key_id, ...}`: a new key with the same tenant, team, user, tier, trust flags, label and extra metadata (and the tenant's IP allowlist and the key's suspension); the old key is revoked in the same store write |
+
+Errors: **401** no or invalid key; **403** not an admin key, or a team-bound admin key reaching
+outside its team; **404** no key with that id in the caller's scope (also a malformed id);
+**409** an id prefix that names more than one key; **422** an invalid body,
+`{"detail": {"error": "invalid_request", "errors": [{"field", "message"}]}}`; **503** the key
+store is unavailable, or the audit log is not wired (below).
+
+A key bound to a **user** is that user: the request's `user_id` and G00 rate-limit principal
+(`rate_limit.per_user`), and an `X-User-ID` override does not apply to it, as no `X-Team` applies
+to a team-bound key. Every change writes one `audit_events` row (`proxy_key.created`,
+`proxy_key.revoked`, `proxy_key.rotated`) for the key's tenant, `user_id` = the actor
+`admin-key:<tenant>[:team=<team>]:key=<key_id>`, `details` = the key's ids and binding — never
+the key or its hash. `scripts/issue-key.sh --api URL` drives this API (the admin key from
+`TOKENLEAN_ADMIN_KEY`, never the command line).
+
+| Key | Default | Description |
+|---|---|---|
+| `admin_api.require_audit` | `true` | Refuse admin changes (`/admin/keys`, `/admin/routing`) with **503** while the audit log is not wired (`DATABASE_URL` unset or the database not reached yet), so no change goes unrecorded. `false` allows them; the would-be audit row is then logged as a warning. A row that fails to write after the change is logged at ERROR with its content. |
 
 ### rate_limit extras
 

@@ -36,7 +36,7 @@ litellm.drop_params = True
 from auth.api_key_manager import (
     validate_proxy_key, is_admin_key, is_gateway_key, is_suspended,
     is_contract_inactive, get_ip_allowlist, key_cached_and_fresh, key_store_backend_installed,
-    key_team,
+    key_team, key_user, key_store_stale,
 )
 from net.client_ip import ClientIPMiddleware, request_client_ip
 from net.ip_allowlist import ip_allowed
@@ -117,6 +117,9 @@ async def lifespan(app: FastAPI):
     # spend cap or provider tiers). Hot reload keeps the last good config afterwards.
     load_config(required=True)
     start_hot_reload()
+    # Which store proxy keys are validated against (key_store.backend, default blob). For
+    # postgres no key validates until the database wiring below has loaded the table.
+    _select_key_store(get_config())
     # WS22 env invariant: provider credentials must reach this process ONLY as
     # LLM_KEY_<PROVIDER> (resolved through the BYOK seam). Litellm-native vars are
     # picked up by litellm directly, bypassing per-tenant key resolution — under a
@@ -291,21 +294,43 @@ _db_expected = False    # DATABASE_URL was set at startup
 _db_pool = None         # set once the database has answered
 _db_retry_task = None   # a self-hosted proxy's background retry
 _retention_task = None
+_key_store = None             # key_store settings chosen at startup (auth/key_store_config)
+_key_store_refresher = None   # the Postgres key store's CacheRefresher, once wired
+
+
+def _select_key_store(cfg: Dict[str, Any]) -> None:
+    """Read ``key_store`` (raises ValueError on a setting it cannot use: a typo must not
+    validate keys against the wrong store) and, for postgres, install the stand-in under
+    which no key validates until :func:`_wire_database` loads the table."""
+    global _key_store
+    from auth import key_store_config
+    _key_store = key_store_config.key_store_settings(cfg)
+    key_store_config.install_pending(_key_store)
+    if _key_store["backend"] == "postgres" and not os.getenv("DATABASE_URL", ""):
+        logger.error("key_store.backend is postgres but DATABASE_URL is not set: no proxy key "
+                     "will validate")
+
+
+def _key_store_wanted() -> bool:
+    return bool(_key_store) and _key_store.get("backend") == "postgres"
 
 
 def _db_not_wired() -> list:
     """The database-backed parts this instance is running without (reported by /health)."""
     if not _db_expected:
         return []
-    return [part for part, wired in (("billing", _usage_meter is not None),
-                                     ("audit", _audit_logger is not None),
-                                     ("tenant_config", _db_pool is not None)) if not wired]
+    parts = [("billing", _usage_meter is not None),
+             ("audit", _audit_logger is not None),
+             ("tenant_config", _db_pool is not None)]
+    if _key_store_wanted():
+        parts.append(("key_store", _key_store_refresher is not None))
+    return [part for part, wired in parts if not wired]
 
 
 async def _wire_database(db_url: str) -> None:
     """Wire each part not wired yet. The parts are independent, so a failing schema step
     leaves the others wired. Raises, naming the parts that failed."""
-    global _db_pool, _usage_meter, _audit_logger, _retention_task
+    global _db_pool, _usage_meter, _audit_logger, _retention_task, _key_store_refresher
     if _db_pool is None:
         from cache.pg_pool import get_pg_pool
         pg = await get_pg_pool(db_url)
@@ -335,6 +360,17 @@ async def _wire_database(db_url: str) -> None:
             _audit_logger = AuditLogger(db_pool=_db_pool)
         except Exception as exc:
             failed.append(f"audit: {exc}")
+    if _key_store_wanted() and _key_store_refresher is None:
+        try:
+            # key_store.backend: postgres — load proxy_keys, install the backend, then keep
+            # every key fresh (a revocation through another replica within refresh_seconds).
+            from auth import key_store_config
+            refresher = await key_store_config.wire_postgres(
+                _db_pool, asyncio.get_running_loop(), _key_store)
+            _service_task(refresher.run(), "key-store-refresher")
+            _key_store_refresher = refresher
+        except Exception as exc:
+            failed.append(f"key_store: {exc}")
     if failed:
         raise RuntimeError("; ".join(failed))
 
@@ -654,6 +690,58 @@ async def usage_export(request: Request):
     except Exception as exc:
         logger.error("Usage export failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Usage export failed: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# /admin/keys — proxy keys over HTTP (ST-9). Admin keys only; a team-bound admin key manages
+# its own team's keys only. Logic and scope rules: admin_api/keys.py.
+# ---------------------------------------------------------------------------
+
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
+async def _admin_caller(request: Request, action: str):
+    from admin_api.common import admin_scope
+    _user_id, api_key, tenant_metadata = await _authenticate(request)
+    _require_admin(tenant_metadata, action)
+    return admin_scope(tenant_metadata, api_key)
+
+
+@app.post("/admin/keys")
+async def admin_create_key(request: Request):
+    """Issue a proxy key: ``{tenant_id, team?, user?, tier?, label?, admin?, gateway?}`` ->
+    201 with the raw key (shown once) and its ``key_id``."""
+    from admin_api import keys
+    from admin_api.common import json_object
+    scope = await _admin_caller(request, "proxy key management")
+    body = await json_object(request)
+    created = await keys.create(body, scope, _audit_logger, get_config())
+    return JSONResponse(status_code=201, content=created, headers=_NO_STORE)
+
+
+@app.get("/admin/keys")
+async def admin_list_keys(request: Request):
+    """List keys (never a raw key or a hash), filtered by ``tenant_id`` / ``team`` / ``user``."""
+    from admin_api import keys
+    scope = await _admin_caller(request, "proxy key management")
+    return await keys.listing(dict(request.query_params), scope)
+
+
+@app.delete("/admin/keys/{key_id}")
+async def admin_revoke_key(key_id: str, request: Request):
+    """Revoke one key: every replica refuses it within the key store's refresh interval."""
+    from admin_api import keys
+    scope = await _admin_caller(request, "proxy key management")
+    return await keys.revoke(key_id, scope, _audit_logger, get_config())
+
+
+@app.post("/admin/keys/{key_id}/rotate")
+async def admin_rotate_key(key_id: str, request: Request):
+    """Replace one key with a new one of the same binding; the old one is revoked."""
+    from admin_api import keys
+    scope = await _admin_caller(request, "proxy key management")
+    rotated = await keys.rotate(key_id, scope, _audit_logger, get_config())
+    return JSONResponse(content=rotated, headers=_NO_STORE)
 
 
 @app.get("/v1/batch/results/{request_id}")
@@ -2834,6 +2922,13 @@ async def _authenticate(
             detail=("Missing proxy key. Use 'Authorization: Bearer <proxy-key>' "
                     "(or x-api-key / x-goog-api-key / ?key= for native Anthropic/Gemini SDKs)."),
         )
+    # An installed key store (Postgres) that has not refreshed within its staleness bound
+    # answers no key: a key revoked elsewhere must not keep working past the bound (ST-9).
+    if key_store_stale():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The proxy key store is unavailable. Retry shortly.",
+        )
     is_valid, user_id, tenant_metadata = await _validate_key(api_key)
     if not is_valid:
         raise HTTPException(
@@ -2847,6 +2942,12 @@ async def _authenticate(
         logger.warning("Refused a proxy key whose record has an empty tenant_id")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail="This proxy key is not bound to a tenant.")
+    # A key bound to a user (ST-9) is that user: the request's user and its rate-limit
+    # principal. No X-User-ID override applies to it (below), as no X-Team applies to a
+    # team-bound key.
+    bound_user = key_user(tenant_metadata)
+    if bound_user:
+        user_id = bound_user
     # The key-bound identity, recorded BEFORE any X-User-ID override below: _serve_core
     # hands it to G00 as the rate-limit principal (an allow-listed override is still the
     # caller's choice). getattr: some callers pass a bare request object with no .state.
@@ -2898,7 +2999,7 @@ async def _authenticate(
 
     # Check for X-User-ID header override (per-user attribution within a tenant)
     header_override_enabled = cfg.get("proxy", {}).get("allow_user_id_header_override", False)
-    if header_override_enabled:
+    if header_override_enabled and not bound_user:
         header_user_id = request.headers.get("X-User-ID") or request.headers.get("x-user-id")
         if header_user_id:
             # WS25: allowlist = global config patterns + the tenant's own email domain
