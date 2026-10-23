@@ -211,8 +211,9 @@ destructive).
 Admin proxy keys only (the `/admin/tool-governance` rule). An admin key **with no team binding**
 manages every tenant's keys; an admin key **bound to a team** manages only its own team's keys of
 its own tenant (owner decision 82's scoping): its listing is that team's whatever the query says,
-a create naming another tenant or team or asking for `admin` / `gateway` is refused (403), and
-another team's key is "not found" (404). Keys are named by their **`key_id`**, the first 16 hex
+a create naming another tenant or team, asking for `admin` / `gateway`, or binding a `user` who
+already holds a key of the tenant outside that team (another team's or a tenant-level key) is
+refused (403), and another team's key is "not found" (404). Keys are named by their **`key_id`**, the first 16 hex
 characters of the key's sha256 (a longer prefix up to the whole hash also works). The raw key is in
 the response **exactly once** — on create and on rotate, with `Cache-Control: no-store` — and the
 store keeps only its hash; a listing shows neither.
@@ -226,7 +227,7 @@ store keeps only its hash; a listing shows neither.
 
 Errors: **401** no or invalid key; **403** not an admin key, or a team-bound admin key reaching
 outside its team; **404** no key with that id in the caller's scope (also a malformed id);
-**409** an id prefix that names more than one key; **422** an invalid body,
+**409** an id prefix that names more than one key; **413** a body over 1 MiB; **422** an invalid body,
 `{"detail": {"error": "invalid_request", "errors": [{"field", "message"}]}}`; **503** the key
 store is unavailable, or the audit log is not wired (below).
 
@@ -296,7 +297,10 @@ it at once; every other replica checks the latest version number every
 is live everywhere within that interval. Applying swaps the process config object: a request
 already in flight finishes with the config it started with. Each replica re-checks a stored
 fragment's shape before applying it and refuses (keeping its current version, with an error log)
-one that reaches a protected group. With no version stored, or the empty fragment, the config is
+one that reaches a protected group (logged once). A replica that could not read or apply the latest
+version (the database down at startup, or a refused row) lists `routing_overlay` under `/health`'s
+`not_wired` until it can, since until then it serves without the admin-set routing and team limits.
+With no version stored, or the empty fragment, the config is
 the loaded config object itself — exactly as without this feature. Table:
 `infra/migrations/routing_overlay.sql` (down: `infra/migrations/down/routing_overlay.sql`).
 

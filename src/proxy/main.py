@@ -327,6 +327,9 @@ def _db_not_wired() -> list:
              ("tenant_config", _db_pool is not None)]
     if _key_store_wanted():
         parts.append(("key_store", _key_store_refresher is not None))
+    from admin_api.routing import sync_failing
+    if sync_failing():
+        parts.append(("routing_overlay", False))
     return [part for part, wired in parts if not wired]
 
 
@@ -763,8 +766,12 @@ async def _start_routing_overlay() -> None:
             await asyncio.wait_for(routing.ensure_schema(_db_pool), _ROUTING_STARTUP_SYNC_S)
             await asyncio.wait_for(routing.sync_once(_db_pool), _ROUTING_STARTUP_SYNC_S)
         except Exception as exc:
-            logger.warning("routing overlay: not applied at startup (the poller retries): %s",
-                           exc)
+            # Serving on the file config alone may lift admin-set team limits until the
+            # poller reaches the store: say so loudly, and on /health (routing_overlay).
+            routing._sync_failed()
+            logger.error("routing overlay: the stored version could not be applied at startup "
+                         "(admin-set routing and team limits are missing until the poller "
+                         "reaches the database): %s", exc)
     _service_task(routing.run_poller(lambda: _db_pool, get_config), "routing-overlay-poller")
 
 
@@ -800,8 +807,8 @@ async def admin_routing_version(version: str, request: Request):
     """One stored version."""
     from admin_api import routing_api
     scope = await _admin_caller(request, "routing overlay management")
-    if not version.isdigit():
-        raise HTTPException(status_code=404, detail=f"No routing overlay version {version}.")
+    if not re.fullmatch(r"[0-9]{1,18}", version):
+        raise HTTPException(status_code=404, detail="No such routing overlay version.")
     return await routing_api.get_one(int(version), _db_pool, scope)
 
 

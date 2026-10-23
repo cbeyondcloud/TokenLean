@@ -715,6 +715,7 @@ def create_key(
     gateway: bool = False,
     team: Optional[str] = None,
     user: Optional[str] = None,
+    user_team_scope: Optional[str] = None,
 ) -> Tuple[str, str, dict]:
     """Create a proxy key for a tenant, persist it, refresh the cache.
 
@@ -728,7 +729,10 @@ def create_key(
     ``team`` binds the key to a team of the tenant (see ``key_team``): 1-64 characters of
     ``A-Z a-z 0-9 . _ -``, not ``default``. Reserved in ``extra`` for the same reason.
     ``user`` binds the key to a user (see ``key_user``): 1-128 characters of
-    ``A-Z a-z 0-9 . _ @ + -``. Reserved in ``extra`` too.
+    ``A-Z a-z 0-9 . _ @ + -``. Reserved in ``extra`` too. ``user_team_scope`` (a
+    team-bound admin issuing the key) refuses, with :class:`KeyScopeError` and nothing
+    written, a ``user`` who already holds a key of this tenant outside that team (another
+    team's, or a tenant-level one): a team's admin must not take another team's user.
     """
     from tenancy.teams import valid_team_name
 
@@ -764,6 +768,11 @@ def create_key(
     def add(store):
         if key_hash in store:
             raise ValueError("key already exists")
+        if user is not None and user_team_scope is not None:
+            for entry in store.values():
+                if (isinstance(entry, dict) and entry.get("tenant_id") == tenant_id
+                        and key_user(entry) == user and key_team(entry) != user_team_scope):
+                    raise KeyScopeError("that user holds a key of this tenant outside the team")
         # The tenant's source-IP restriction applies to every key it holds: a key issued
         # after the CIDRs were set would otherwise be an unrestricted way in.
         cidrs = _tenant_allowlist(store, tenant_id)
@@ -1065,6 +1074,10 @@ def list_tenants() -> List[dict]:
 # written.
 
 KEY_ID_LENGTH = 16
+
+
+class KeyScopeError(PermissionError):
+    """A key change outside the caller's scope (a user bound outside the caller's team)."""
 _KEY_ID = re.compile(r"[0-9a-f]{16,64}")
 
 

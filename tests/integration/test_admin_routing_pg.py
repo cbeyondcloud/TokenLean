@@ -50,6 +50,7 @@ def clean_overlay(monkeypatch):
     monkeypatch.setattr(config_loader, "_base_config", base)
     monkeypatch.setattr(config_loader, "_runtime_overlay", {})
     routing._applied.update(version=0, sha256=None)
+    monkeypatch.setattr(routing, "_sync_state", {"failing": False, "refused": None})
     yield
     config_loader.set_runtime_overlay({})
     routing._applied.update(version=0, sha256=None)

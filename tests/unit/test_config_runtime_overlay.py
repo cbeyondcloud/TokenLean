@@ -68,7 +68,10 @@ def test_a_hot_reload_keeps_the_overlay(loaded):
     assert cfg["proxy"]["port"] == 4001
     assert cfg["teams"] == {"payments": {"monthly_spend_cap_usd": 5}}
     # The section the overlay adds is not "dropped" by a reload of a file without it.
-    assert config_loader.CONFIG_RELOAD_FAILURES._value.get() is not None
+    failures = config_loader.CONFIG_RELOAD_FAILURES._value.get()
+    config_loader.load_config()
+    assert config_loader.CONFIG_RELOAD_FAILURES._value.get() == failures
+    assert config_loader.get_config()["teams"] == {"payments": {"monthly_spend_cap_usd": 5}}
 
 
 def test_a_reload_is_judged_against_the_file_not_the_overlay(loaded, monkeypatch):

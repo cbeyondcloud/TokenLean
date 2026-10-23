@@ -248,3 +248,39 @@ async def test_an_unavailable_store_answers_503(env):
     with patch.object(akm, "_load_full_store", side_effect=RuntimeError("store down")):
         assert (await _create({"tenant_id": "acme"})).status_code == 503
         assert (await _call("GET", "/admin/keys")).status_code == 503
+
+
+# ── review fixes ────────────────────────────────────────────────────────────
+
+async def test_a_team_admin_cannot_bind_a_user_who_belongs_elsewhere(env):
+    store, audit, _ = env
+    await _create({"tenant_id": "acme", "team": "search", "user": "carol@acme.test"})
+    await _create({"tenant_id": "acme", "user": "dave@acme.test"})          # tenant-level
+    rows, before = len(audit.rows), _stored(store)
+    for user in ("carol@acme.test", "dave@acme.test"):
+        r = await _create({"user": user}, key=SRE)
+        assert r.status_code == 403, (user, r.text)
+    assert _stored(store) == before and len(audit.rows) == rows
+    assert (await _create({"user": "erin@acme.test"}, key=SRE)).status_code == 201
+    assert (await _create({"user": "erin@acme.test"}, key=SRE)).status_code == 201
+    # The same user in another tenant is another person: not refused.
+    await _create({"tenant_id": "other", "team": "x", "user": "frank@acme.test"})
+    assert (await _create({"user": "frank@acme.test"}, key=SRE)).status_code == 201
+
+
+async def test_a_corrupt_store_is_503_not_422(env):
+    store, _audit, _ = env
+    assert akm.validate_proxy_key(ROOT)[0] is True       # the caller's key is cached
+    store.write_text("{not json", encoding="utf-8")
+    assert (await _create({"tenant_id": "acme"})).status_code == 503
+
+
+async def test_an_oversized_or_too_deep_body_is_refused(env):
+    big = {"tenant_id": "acme", "label": "x" * (1024 * 1024 + 10)}
+    assert (await _create(big)).status_code == 413
+    deep = "[" * 100_000 + "]" * 100_000
+    async with AsyncClient(transport=ASGITransport(app=main.app),
+                           base_url="http://test") as client:
+        r = await client.post("/admin/keys", content=deep,
+                              headers={"Authorization": f"Bearer {ROOT}"})
+    assert r.status_code == 422

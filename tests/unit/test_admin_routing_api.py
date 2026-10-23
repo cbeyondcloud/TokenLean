@@ -94,6 +94,7 @@ def env(monkeypatch):
     monkeypatch.setattr(main, "_db_pool", object())
     monkeypatch.setattr(main, "_audit_logger", audit)
     monkeypatch.setattr(routing, "_applied", {"version": 0, "sha256": None})
+    monkeypatch.setattr(routing, "_sync_state", {"failing": False, "refused": None})
     yield store, audit, base
     config_loader.set_runtime_overlay({})
 
@@ -272,3 +273,16 @@ async def test_what_is_applied_is_what_the_request_path_reads(env):
     g00._load_config(cfg)
     limits = g00._get_limits_for_scope("u", "payments", "ACME-PRD-01", rl_cfg=cfg["rate_limit"])
     assert limits["requests_per_minute"] == 7
+
+
+@pytest.mark.parametrize("path", ["/admin/routing/versions/%C2%B2",
+                                  "/admin/routing/versions/99999999999999999999999"])
+async def test_an_odd_version_in_the_path_is_not_found(env, path):
+    assert (await _call("GET", path)).status_code == 404
+
+
+async def test_out_of_range_numbers_are_refused(env):
+    r = await _put(V1, expected_version=2 ** 63)
+    assert r.status_code == 422
+    r = await _call("GET", "/admin/routing/history?before=99999999999999999999")
+    assert r.status_code == 422

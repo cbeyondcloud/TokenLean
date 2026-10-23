@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 PUT_FIELDS = ("fragment", "expected_version", "comment")
 ROLLBACK_FIELDS = ("version", "expected_version", "comment")
 MAX_HISTORY = 200
+MAX_VERSION = 2 ** 62  # well inside Postgres BIGINT
 
 
 def _require_unbound(scope: AdminScope) -> None:
@@ -65,8 +66,8 @@ def _optional_version(body: Dict[str, Any], field: str) -> Optional[int]:
     value = body.get(field)
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise field_error(field, "a version number, 0 or more")
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_VERSION:
+        raise field_error(field, f"a version number from 0 to {MAX_VERSION}")
     return value
 
 
@@ -179,6 +180,8 @@ async def get_history(query: Dict[str, str], pool, scope: AdminScope) -> Dict[st
         before = int(query["before"]) if query.get("before") else None
     except ValueError:
         raise field_error("limit", "limit and before are whole numbers") from None
+    if before is not None and not 0 <= before <= MAX_VERSION:
+        raise field_error("before", f"a version number from 0 to {MAX_VERSION}")
     if not 1 <= limit <= MAX_HISTORY:
         raise field_error("limit", f"1-{MAX_HISTORY}")
     _require_pool(pool)

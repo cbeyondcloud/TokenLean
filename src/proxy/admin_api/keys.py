@@ -15,6 +15,7 @@ found" (404), as is any id that names no key. Every change writes one audit row
 (``proxy_key.created`` / ``.revoked`` / ``.rotated``) with ids only, never a key or a hash.
 """
 import asyncio
+import json
 import logging
 import re
 from typing import Any, Dict, Optional
@@ -49,6 +50,12 @@ async def _engine(fn, *args, **kwargs):
         return await asyncio.to_thread(fn, *args, **kwargs)
     except km.AmbiguousKeyId as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except km.KeyScopeError as exc:
+        raise HTTPException(status_code=403, detail=(
+            "A team-bound admin key cannot bind a user who holds a key of the tenant outside "
+            "its team.")) from exc
+    except json.JSONDecodeError as exc:  # a corrupt store, not a bad request
+        raise _store_unavailable(exc) from exc
     except ValueError as exc:
         raise field_error("body", str(exc)) from exc
     except Exception as exc:  # the store did not answer (file, Secret Manager, Postgres)
@@ -98,7 +105,8 @@ def _check_create(body: Dict[str, Any], scope: AdminScope) -> Dict[str, Any]:
         raise field_error("tenant_id", "required: the tenant the key belongs to")
     return {"tenant_id": tenant, "tier": tier, "admin": bool(body.get("admin")),
             "gateway": bool(body.get("gateway")), "team": team, "user": user,
-            "extra": {"label": label} if label is not None else None}
+            "extra": {"label": label} if label is not None else None,
+            "user_team_scope": scope.team if scope.team_bound and user is not None else None}
 
 
 async def create(body: Dict[str, Any], scope: AdminScope, audit_logger, config) -> Dict:

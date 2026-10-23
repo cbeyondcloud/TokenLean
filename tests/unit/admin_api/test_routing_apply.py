@@ -27,6 +27,7 @@ def state(monkeypatch):
     monkeypatch.setattr(config_loader, "_base_config", base)
     monkeypatch.setattr(config_loader, "_runtime_overlay", {})
     monkeypatch.setattr(routing, "_applied", {"version": 0, "sha256": None})
+    monkeypatch.setattr(routing, "_sync_state", {"failing": False, "refused": None})
     yield base
     config_loader.set_runtime_overlay({})
 
@@ -104,3 +105,53 @@ def test_poll_seconds_reads_the_config_with_a_floor():
     assert routing.poll_seconds({"admin_api": {"routing": {"poll_seconds": 2}}}) == 2.0
     assert routing.poll_seconds({"admin_api": {"routing": {"poll_seconds": 0.1}}}) == 1.0
     assert routing.poll_seconds({"admin_api": {"routing": {"poll_seconds": "x"}}}) == 5.0
+
+
+async def test_sync_never_steps_back_over_a_newer_local_apply(monkeypatch):
+    async def current_version(pool):
+        return 1
+
+    async def get_version(pool, version):
+        routing.apply_row({**ROW1, "version": 2,              # a PUT landed meanwhile
+                           "fragment": {"groups": {"G6_routing": {"tiers": {"simple": ["c"]}}}}})
+        return dict(ROW1)
+
+    monkeypatch.setattr(routing, "current_version", current_version)
+    monkeypatch.setattr(routing, "get_version", get_version)
+    await routing.sync_once(object())
+    assert routing.applied_version() == 2 and _tiers() == {"simple": ["c"]}
+
+
+async def test_a_refused_version_is_logged_once(monkeypatch, caplog):
+    async def current_version(pool):
+        return 2
+
+    async def get_version(pool, version):
+        return dict(BAD)
+
+    monkeypatch.setattr(routing, "current_version", current_version)
+    monkeypatch.setattr(routing, "get_version", get_version)
+    for _ in range(3):
+        assert await routing.sync_once(object()) is False
+    assert sum("refused" in r.getMessage() for r in caplog.records) == 1
+    assert routing.sync_failing() is True
+
+
+async def test_a_failed_startup_sync_shows_on_health(monkeypatch):
+    import main
+
+    class _Broken:
+        def acquire(self):
+            raise OSError("database unreachable")
+
+    monkeypatch.setattr(main, "_db_pool", _Broken())
+    monkeypatch.setattr(main, "_db_expected", True)
+    monkeypatch.setattr(main, "_usage_meter", object())
+    monkeypatch.setattr(main, "_audit_logger", object())
+    monkeypatch.setattr(main, "_ROUTING_STARTUP_SYNC_S", 1.0)
+    monkeypatch.setattr(main, "_service_task", lambda coro, what: coro.close())
+    monkeypatch.setattr(routing, "_sync_state", {"failing": False, "refused": None})
+    await main._start_routing_overlay()
+    assert "routing_overlay" in main._db_not_wired()
+    routing._sync_ok()
+    assert "routing_overlay" not in main._db_not_wired()

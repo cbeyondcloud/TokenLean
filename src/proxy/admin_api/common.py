@@ -21,6 +21,9 @@ from fastapi import HTTPException
 logger = logging.getLogger(__name__)
 
 
+MAX_BODY_BYTES = 1024 * 1024
+
+
 class AdminError(HTTPException):
     """An HTTPException with a structured ``detail`` (field errors for a 422)."""
 
@@ -58,11 +61,13 @@ def admin_scope(tenant_metadata: Optional[dict], api_key: str) -> AdminScope:
 async def json_object(request) -> Dict[str, Any]:
     """The request body as a JSON object; an empty body is ``{}``. Anything else is a 422."""
     raw = await request.body()
+    if len(raw) > MAX_BODY_BYTES:
+        raise AdminError(status_code=413, detail=f"request body over {MAX_BODY_BYTES} bytes")
     if not raw.strip():
         return {}
     try:
         body = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise AdminError(status_code=422, detail={"error": "invalid_request",
                                                   "errors": [{"field": "body",
                                                               "message": "not valid JSON"}]})

@@ -529,11 +529,27 @@ async def append(pool, fragment: Dict[str, Any], *, action: str, actor: str, com
 # ── Applying a version to this replica ──────────────────────────────────────
 
 _applied: Dict[str, Any] = {"version": 0, "sha256": None}
+# failing: the last attempt to read or apply the latest version failed (main's /health then
+# lists routing_overlay). refused: a stored version this replica refused (logged once).
+_sync_state: Dict[str, Any] = {"failing": False, "refused": None}
 
 
 def applied_version() -> int:
     """The version this replica runs with (0: none)."""
     return int(_applied["version"])
+
+
+def sync_failing() -> bool:
+    """Whether this replica could not read or apply the store's latest version last time."""
+    return bool(_sync_state["failing"])
+
+
+def _sync_ok() -> None:
+    _sync_state["failing"] = False
+
+
+def _sync_failed() -> None:
+    _sync_state["failing"] = True
 
 
 def apply_row(row: Optional[Dict[str, Any]]) -> bool:
@@ -550,8 +566,10 @@ def apply_row(row: Optional[Dict[str, Any]]) -> bool:
     try:
         validate_fragment(fragment)
     except FragmentError as exc:
-        logger.error("routing overlay version %s refused, keeping version %s: %s",
-                     row.get("version"), applied_version(), exc)
+        if _sync_state["refused"] != row.get("version"):
+            _sync_state["refused"] = row.get("version")
+            logger.error("routing overlay version %s refused, keeping version %s: %s",
+                         row.get("version"), applied_version(), exc)
         return False
     set_runtime_overlay(copy.deepcopy(fragment))
     _applied.update(version=int(row["version"]), sha256=row.get("fragment_sha256"))
@@ -573,9 +591,20 @@ async def sync_once(pool) -> bool:
     this replica now runs the latest version."""
     latest = await current_version(pool)
     if latest == applied_version():
+        _sync_ok()
         return True
+    if latest and latest == _sync_state["refused"]:
+        _sync_failed()
+        return False                                  # refused already: no new log line
     row = await get_version(pool, latest) if latest else None
-    return apply_row(row)
+    if row is not None and row["version"] < applied_version():
+        return True       # a newer version was applied here meanwhile (this replica's PUT)
+    applied = apply_row(row)
+    if applied:
+        _sync_ok()
+    else:
+        _sync_failed()
+    return applied
 
 
 async def run_poller(get_pool, get_config) -> None:
@@ -595,6 +624,7 @@ async def run_poller(get_pool, get_config) -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                _sync_failed()
                 logger.warning("routing overlay: could not read the latest version (this "
                                "replica keeps version %s): %s", applied_version(), exc)
         try:
