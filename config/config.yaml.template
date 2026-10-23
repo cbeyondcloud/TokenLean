@@ -38,9 +38,10 @@ rate_limit:
       requests_per_minute: 2
       requests_per_hour: 120
   # A rate-limit bucket is keyed on the AUTHENTICATED identity — the tenant + the key-bound
-  # principal + the team. `per_team` matches only a GATEWAY key's team: X-Team is trusted
-  # only from a key issued with `gateway: true` (a customer's API gateway that stamps the
-  # team on every request); every other key is team "default", so a caller cannot pick a
+  # principal + the team. `per_team` matches only an authenticated team: the team a key is
+  # bound to (`teams`, below), or a GATEWAY key's X-Team. X-Team is trusted only from a key
+  # issued with `gateway: true` (a customer's API gateway that stamps the team on every
+  # request); every other unbound key is team "default", so a caller cannot pick a
   # bucket, claim a team's limit, or split its own limit by rotating X-Team / X-User-ID.
   per_team:
     team-alpha:
@@ -69,6 +70,8 @@ rate_limit:
   # Effective cap = per-tenant override (limits.monthly_spend_cap_usd, set via the
   # portal into tenant_configs) > tier default (billing.rate_card.<tier>). Absent /
   # 0 cap means unlimited. Exempt tenants are never gated. Fail-open on Redis error.
+  # The same switch, grace and exemptions apply each team's own cap
+  # (teams.<team>.monthly_spend_cap_usd, below): 429 team_spend_cap_exceeded.
   spend_cap:
     enabled: false
     grace_pct: 0
@@ -96,6 +99,21 @@ rate_limit:
     enabled: false
     exempt_tenants: [admin, default]
     warn_pcts: [80, 90]
+# Teams under a tenant (optional). A proxy key bound to a team at issuance
+# (issue-key.sh --team NAME) carries that team on every request: usage_events.team, the
+# `team` metric label, rate_limit.per_team, and the block below. A team's block may also
+# come from the tenant's own tenant_configs overrides, and the operator's
+# tenants.<id>.teams.<team> is merged over it. `config` is merged over the tenant's config
+# for the team's requests (only its `groups` and `proxy` sections apply). No block, no
+# team-bound keys: nothing changes. See docs/config-reference.md "teams".
+# teams:
+#   payments:
+#     monthly_spend_cap_usd: 50
+#     config:
+#       groups:
+#         G5_cache: {cache_scope: tenant+model}
+#       proxy:
+#         default_model: gpt-4o-mini
 # WS25: periodic data-retention purge (default OFF — self-host keeps everything).
 # usage_days is clamped to a 400-day floor in code: usage_events is the billing
 # source of record and must outlive every invoice period.

@@ -3,7 +3,8 @@ import os
 import time
 from typing import Any, Awaitable, Dict, Optional, Tuple
 
-from config_loader import get_config
+from billing.tags import extract_tags
+from config_loader import deep_merge as config_deep_merge, get_config
 from middleware import RequestContext, apply_operator_overlay
 from middleware import cache_floor
 from middleware.g00_rate_limit import G00RateLimit
@@ -11,6 +12,7 @@ from protocols.base import routing_header_params
 from providers import get_adapter
 from tenancy.resolver import apply_caller_identity, resolve_tenant
 from tenancy.config import TenantConfigLoader, deep_merge
+from tenancy.teams import apply_team_overlay, overlay_tag
 from tracing import otel
 from middleware.g01_compression import G01Compression
 from middleware.g02_template_registry import G02TemplateRegistry
@@ -229,6 +231,10 @@ class OptimisationPipeline:
         # The key-bound principal + the trusted team (gateway keys only) that G00 limits
         # and G18 labels read — never a header a caller can choose freely.
         apply_caller_identity(ctx, headers)
+        # Usage tags (ST-2): the allow-listed request headers, for usage_events.tags. Read
+        # here, while ctx.config is still the global config, so no tenant or team overlay
+        # can change what is recorded. Attribution only: nothing selects behaviour on them.
+        ctx.usage_tags = extract_tags(headers, ctx.config)
         # I6: record actor→target when an admin key impersonates another tenant
         header_tenant = headers.get("x-tenant-id", "").strip()
         if key_is_admin and header_tenant and header_tenant != (key_tenant_id or ""):
@@ -248,10 +254,21 @@ class OptimisationPipeline:
 
         # Load per-tenant config overrides from Postgres (E3) — the LIVE mechanism (D1).
         await self._tenant_config_loader.load(ctx)
+        # Team overlay (ST-1): `teams.<team>.config`, merged over the tenant's config and
+        # BEFORE the operator overlay below, so an operator pin always wins. tenancy.teams
+        # keeps it off trust & safety, loop control and limits. A team setting counts as
+        # the tenant's own choice (tenant_config_overrides), so the groups that cap or defer
+        # to a tenant's choice treat it the same way; its fingerprint scopes the G05 cache.
+        # No team or no overlay: the same config object, nothing copied.
+        ctx.config, team_overlay = apply_team_overlay(ctx.config, ctx.tenant_id, ctx.team)
+        if team_overlay:
+            ctx.tenant_config_overrides = config_deep_merge(
+                ctx.tenant_config_overrides or {}, team_overlay)
+            ctx.team_overlay_tag = overlay_tag(team_overlay)
         # Operator per-tenant overlay (`tenants.<id>.groups.*` in config.yaml), merged ONCE
         # here so every group sees it — not only the 9 that call resolve_group_config.
-        # Applied AFTER the Postgres overlay so the operator path keeps winning, exactly as
-        # resolve_group_config already made it win for the groups that used it.
+        # Applied AFTER the Postgres and team overlays so the operator path keeps winning,
+        # exactly as resolve_group_config already made it win for the groups that used it.
         ctx.config = apply_operator_overlay(ctx.config, ctx.tenant_id)
 
         # Per-tenant default model: when the request omitted `model`, honour the tenant's

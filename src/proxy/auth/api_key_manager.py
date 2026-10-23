@@ -317,13 +317,29 @@ def is_gateway_key(metadata: Optional[dict]) -> bool:
 
     A gateway stamps ``X-Team`` on every request, overwriting whatever the calling app
     sent, so only such a key's ``X-Team`` may select a G00 bucket, a ``per_team`` limit or
-    a team metric label (``tenancy.resolver.resolve_team``); any other key is team
-    ``"default"``. Set at issuance only (``create_key(gateway=True)`` /
+    a team metric label (``tenancy.resolver.resolve_team``); any other key is its bound
+    team (``key_team``) or ``"default"``. A team binding outranks a gateway's ``X-Team``.
+    Set at issuance only (``create_key(gateway=True)`` /
     ``issue-key.sh --gateway``) — never through ``create_key(extra=…)``. Strictly a JSON
     ``true``: a trust flag must not be switched on by a stray truthy string. Legacy
     string-format keys (metadata is None) are never gateway keys.
     """
     return bool(isinstance(metadata, dict) and metadata.get("gateway") is True)
+
+
+def key_team(metadata: Optional[dict]) -> Optional[str]:
+    """The team a validated key is bound to (ST-1), or ``None``.
+
+    Set at issuance only (``create_key(team=...)``), never through ``extra``: the team
+    selects a spend cap and a config overlay (``tenancy.teams``), and it outranks a gateway
+    key's ``X-Team`` (``tenancy.resolver.resolve_team``). Any non-blank string is returned
+    stripped, so a key edited into the store by hand still binds; issuance is what keeps
+    names to the safe set. Legacy string-format keys (metadata is None) have no team.
+    """
+    team = metadata.get("team") if isinstance(metadata, dict) else None
+    if not isinstance(team, str) or not team.strip():
+        return None
+    return team.strip()
 
 
 def is_suspended(metadata: Optional[dict]) -> bool:
@@ -633,6 +649,7 @@ def create_key(
     extra: Optional[dict] = None,
     *,
     gateway: bool = False,
+    team: Optional[str] = None,
 ) -> Tuple[str, str, dict]:
     """Create a proxy key for a tenant, persist it, refresh the cache.
 
@@ -643,17 +660,23 @@ def create_key(
     per-tenant X-User-ID allowlist — WS25); reserved keys are not overridable.
     ``gateway`` marks the key as a customer API gateway's (see ``is_gateway_key``); like
     ``admin`` it is a trust flag, so it is reserved in ``extra`` and set only here.
+    ``team`` binds the key to a team of the tenant (see ``key_team``): 1-64 characters of
+    ``A-Z a-z 0-9 . _ -``, not ``default``. Reserved in ``extra`` for the same reason.
     """
+    from tenancy.teams import valid_team_name
+
     tenant_id = (tenant_id or "").strip()
     if not tenant_id:
         raise ValueError("tenant_id is required")
+    if team is not None and not valid_team_name(team):
+        raise ValueError("team must be 1-64 characters of A-Z a-z 0-9 . _ - and not 'default'")
     raw = raw_key or f"{_KEY_PREFIX}{secrets.token_hex(24)}"
     key_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     metadata: dict = {}
     if isinstance(extra, dict):
         metadata.update({k: v for k, v in extra.items()
                          if k not in ("tenant_id", "tier", "created_at", "admin", "suspended",
-                                      "contract_inactive", "ip_allowlist", "gateway")})
+                                      "contract_inactive", "ip_allowlist", "gateway", "team")})
     metadata.update({
         "tenant_id": tenant_id,
         "tier": (tier or "free").strip().lower(),
@@ -663,6 +686,8 @@ def create_key(
         metadata["admin"] = True
     if gateway:
         metadata["gateway"] = True
+    if team is not None:
+        metadata["team"] = team
 
     def add(store):
         if key_hash in store:
@@ -800,16 +825,44 @@ def delete_tenant_keys(tenant_id: str) -> int:
     return removed
 
 
-def rotate_tenant_keys(tenant_id: str) -> Tuple[str, str, dict, int]:
-    """Atomically issue a fresh key and revoke ALL existing keys for a tenant (WS24).
+def _rotated_key(newest: dict, old: dict, tenant_id: str) -> Tuple[str, str, dict]:
+    """A fresh key replacing ``newest``: its tier, extra metadata and trust flags, the
+    tenant's IP allowlist, and suspension if any old key of the tenant was suspended."""
+    raw = f"{_KEY_PREFIX}{secrets.token_hex(24)}"
+    key_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    metadata: dict = {
+        "tenant_id": tenant_id,
+        "tier": (newest.get("tier") or "free"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # Carry over extra metadata (owner_domain etc.) so rotation doesn't drop
+    # the per-tenant X-User-ID allowlist or other stamped fields.
+    for k, v in newest.items():
+        if k not in metadata and k not in ("admin", "suspended", "gateway", "ip_allowlist",
+                                           "team"):
+            metadata[k] = v
+    # The tenant's source-IP restriction, even if the newest key was issued without it.
+    cidrs = _tenant_allowlist(old, tenant_id)
+    if cidrs:
+        metadata["ip_allowlist"] = cidrs
+    if newest.get("admin"):
+        metadata["admin"] = True
+    # Trust flags are carried explicitly, never as a generic extra: a rotated gateway key
+    # stays a gateway key, and only a strict JSON true survives (is_gateway_key).
+    if newest.get("gateway") is True:
+        metadata["gateway"] = True
+    team = key_team(newest)
+    if team:
+        metadata["team"] = team
+    if any(e.get("suspended") for e in old.values()):
+        metadata["suspended"] = True
+    return raw, key_hash, metadata
 
-    One atomic store write (``_mutate_store``), so there is never a window with
-    zero valid keys nor one where both old and new coexist across a crash. The new key
-    inherits tier/admin/gateway from the newest existing key; a suspended tenant stays
-    suspended (rotation must not be a self-unsuspend loophole).
-    Returns ``(raw_key, key_hash, metadata, revoked_count)``. Raises ValueError when
-    the tenant has no keys.
-    """
+
+def _rotate(tenant_id: str, *, single: bool) -> Tuple[List[Tuple[str, str, dict]], int]:
+    """One new key per binding (unbound first, then teams by name), every old key revoked,
+    in ONE atomic store write. ``single``: refuse, writing nothing, when the tenant's keys
+    span more than one binding."""
     tenant_id = (tenant_id or "").strip()
     if not tenant_id:
         raise ValueError("tenant_id is required")
@@ -821,39 +874,59 @@ def rotate_tenant_keys(tenant_id: str) -> Tuple[str, str, dict, int]:
         }
         if not old:
             raise ValueError("tenant has no keys to rotate")
-        newest = max(old.values(), key=lambda e: e.get("created_at") or "")
-        raw = f"{_KEY_PREFIX}{secrets.token_hex(24)}"
-        key_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        metadata: dict = {
-            "tenant_id": tenant_id,
-            "tier": (newest.get("tier") or "free"),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        # Carry over extra metadata (owner_domain etc.) so rotation doesn't drop
-        # the per-tenant X-User-ID allowlist or other stamped fields.
-        for k, v in newest.items():
-            if k not in metadata and k not in ("admin", "suspended", "gateway", "ip_allowlist"):
-                metadata[k] = v
-        # The tenant's source-IP restriction, even if the newest key was issued without it.
-        cidrs = _tenant_allowlist(old, tenant_id)
-        if cidrs:
-            metadata["ip_allowlist"] = cidrs
-        if newest.get("admin"):
-            metadata["admin"] = True
-        # Trust flags are carried explicitly, never as a generic extra: a rotated gateway key
-        # stays a gateway key, and only a strict JSON true survives (is_gateway_key).
-        if newest.get("gateway") is True:
-            metadata["gateway"] = True
-        if any(e.get("suspended") for e in old.values()):
-            metadata["suspended"] = True
+        bindings: dict = {}
+        for entry in old.values():
+            bindings.setdefault(key_team(entry), []).append(entry)
+        if single and len(bindings) > 1:
+            raise ValueError(
+                f"tenant has keys for {len(bindings)} bindings (teams / unbound); "
+                "rotating them would issue one new key each - use "
+                "rotate_tenant_keys_per_binding")
+        issued = []
+        for team in sorted(bindings, key=lambda t: (t is not None, t or "")):
+            newest = max(bindings[team], key=lambda e: e.get("created_at") or "")
+            issued.append(_rotated_key(newest, old, tenant_id))
         for h in old:
             del store[h]
-        store[key_hash] = metadata
-        return True, (raw, key_hash, metadata, len(old))
+        for _raw, key_hash, metadata in issued:
+            store[key_hash] = metadata
+        return True, (issued, len(old))
 
-    raw, key_hash, metadata, revoked = _mutate_store(rotate, tenant_id)
-    logger.info("Rotated proxy key tenant=%s (revoked %d)", tenant_id, revoked)
+    issued, revoked = _mutate_store(rotate, tenant_id)
+    logger.info("Rotated proxy keys tenant=%s (issued %d, revoked %d)",
+                tenant_id, len(issued), revoked)
+    return issued, revoked
+
+
+def rotate_tenant_keys(tenant_id: str) -> Tuple[str, str, dict, int]:
+    """Atomically issue a fresh key and revoke ALL existing keys for a tenant (WS24).
+
+    One atomic store write (``_mutate_store``), so there is never a window with
+    zero valid keys nor one where both old and new coexist across a crash. The new key
+    inherits tier/admin/gateway/team from the newest existing key; a suspended tenant stays
+    suspended (rotation must not be a self-unsuspend loophole).
+    Returns ``(raw_key, key_hash, metadata, revoked_count)``. Raises ValueError when
+    the tenant has no keys, and — writing nothing — when its keys span more than one
+    binding (unbound and team-bound keys, or several teams): one new key per binding is
+    needed, and this signature can return only one. Use
+    :func:`rotate_tenant_keys_per_binding` for such a tenant.
+    """
+    issued, revoked = _rotate(tenant_id, single=True)
+    raw, key_hash, metadata = issued[0]
     return raw, key_hash, metadata, revoked
+
+
+def rotate_tenant_keys_per_binding(tenant_id: str) -> Tuple[List[Tuple[str, str, dict]], int]:
+    """Atomically issue one fresh key per binding of a tenant — its unbound keys, and each
+    team — and revoke ALL its existing keys (ST-1). Each new key takes the tier, extra
+    metadata, trust flags and team of the newest old key of its binding; the tenant's IP
+    allowlist and any suspension carry to every new key.
+
+    Returns ``([(raw_key, key_hash, metadata), ...], revoked_count)``, unbound first, then
+    teams by name. Each raw key is returned exactly once. Raises ValueError when the tenant
+    has no keys.
+    """
+    return _rotate(tenant_id, single=False)
 
 
 def list_tenants() -> List[dict]:

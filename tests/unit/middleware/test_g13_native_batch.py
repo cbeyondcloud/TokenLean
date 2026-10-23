@@ -484,6 +484,28 @@ class TestNativeBatchCostReachesTheSpendCap:
         added = await self._poll(monkeypatch, {"provider": "openai", "request_ids": ["r0", "r1"]})
         assert added == []
 
+    async def test_the_job_keeps_each_request_s_team(self):
+        redis = MagicMock()
+        redis.hset = AsyncMock()
+        items = [{"request_id": "r0", "model": "m", "spend_prefix": "t:acme:",
+                  "spend_team": "payments"},
+                 {"request_id": "r1", "model": "m", "spend_prefix": "t:acme:"}]
+        with patch.object(g13_batch, "_get_redis", return_value=redis):
+            await g13_batch._record_batch_job("job-1", "openai", items)
+        stored = json.loads(redis.hset.await_args.args[2])
+        assert stored["spend"] == {"r0": {"prefix": "t:acme:", "model": "m", "team": "payments"},
+                                   "r1": {"prefix": "t:acme:", "model": "m"}}
+
+    async def test_a_team_s_answer_is_added_to_the_team_s_counter_too(self, monkeypatch):
+        from middleware.g00_rate_limit import G00RateLimit
+        from savings.calculator import estimate_cost
+        owed = {"prefix": "t:acme:", "model": "gpt-4o-mini", "team": "payments"}
+        added = await self._poll(monkeypatch, {"provider": "openai", "request_ids": ["r0", "r1"],
+                                               "spend": {"r0": owed, "r1": owed}})
+        cost = pytest.approx(0.5 * estimate_cost(1200, 300, "gpt-4o-mini"))
+        assert added == [(G00RateLimit.spend_key("t:acme:"), cost),
+                         (G00RateLimit.team_spend_key("t:acme:", "payments"), cost)]
+
 
 @pytest.mark.asyncio
 async def test_start_batch_poller_noop_when_native_disabled():

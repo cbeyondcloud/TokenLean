@@ -21,6 +21,32 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-22
+
+### Usage tags: attribute cost to a run, a step or an agent from allow-listed headers — Enhancement (OSS)
+A new JSONB column `usage_events.tags` records the request headers on an operator allow-list
+(`billing.metering.tags.headers`; by default the ten `X-Agentic-*` identity headers an agent framework
+sends), one key per header, so cost can be summed per run, step or agent with `tags->>'run_id'`. Any other
+header is ignored. Values are trimmed, capped at 256 characters and must be printable ASCII; a value
+that looks like a credential (checked whole, before the cap) is dropped and counted, never stored. The allow-list is read from the global
+config only, so a tenant cannot widen it. Tags select nothing: they are attribution. Rows without
+allow-listed headers store NULL; `/admin/usage-export` returns the tags, without the user identity
+(`tenant_only_keys`, default `user`) when the key is bound to a team.
+- **OSS:** the tags column, allow-list, value checks and export field ship in the core proxy.
+
+### Teams under a tenant: a key bound to a team, team spend caps and team config — Enhancement (OSS)
+A proxy key can now be bound to a team of its tenant at issuance (`issue-key.sh --team NAME`,
+`create_key(team=...)`). The binding wins over any `X-Team` header, so callers cannot pick their team.
+The team is written to a new `usage_events.team` column (additive; down script in
+`infra/migrations/down/`), returned by `/admin/usage-export`, used as the `team` metric label and by
+`rate_limit.per_team`. `teams.<team>.monthly_spend_cap_usd` gives a team its own monthly ceiling under
+the tenant's: over it, a 429 `team_spend_cap_exceeded` before any provider call. `teams.<team>.config`
+is merged over the tenant's config for that team's requests (`groups` and `proxy` only; never trust &
+safety, loop control or limits, and an operator pin always wins). A team-bound key's usage export holds
+only its team's rows, and key rotation issues one new key per team. Nothing changes for a deployment
+that binds no key to a team.
+- **OSS:** team binding, team column, team caps and events, team overlays — all in the core proxy.
+
 ## 2026-10-21
 
 ### G01's Kompress fallback is removed: it never ran — Bug fix

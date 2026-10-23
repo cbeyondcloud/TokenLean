@@ -73,7 +73,7 @@ def sandbox(tmp_path):
     return tmp_path
 
 
-def _run(root, *args, backend="blob", access="ok", store=None):
+def _run(root, *args, backend="blob", access="ok", store=None, expect_gcloud=True):
     store_file, written_file, log_file = root / "store.json", root / "written.json", root / "gcloud.log"
     store_file.write_text(json.dumps(store or {}), encoding="utf-8")
     written_file.unlink(missing_ok=True)
@@ -87,7 +87,8 @@ def _run(root, *args, backend="blob", access="ok", store=None):
     }
     r = subprocess.run([_bash(), "scripts/issue-key.sh", *args, "--project", "fake-test-project"],
                        cwd=root, env=env, capture_output=True, encoding="utf-8", errors="replace")
-    assert log_file.exists(), "the fake gcloud was not the one invoked"
+    if expect_gcloud:
+        assert log_file.exists(), "the fake gcloud was not the one invoked"
     written = json.loads(written_file.read_text(encoding="utf-8")) if written_file.exists() else None
     return r, written
 
@@ -132,6 +133,28 @@ def test_an_undetectable_backend_refuses_unless_told_it_is_blob(sandbox):
     r, written = _run(sandbox, "issue", "--tenant", "NEW", "--backend", "blob", backend="unknown")
     assert r.returncode == 0, r.stdout + r.stderr
     assert [meta["tenant_id"] for meta in written.values()] == ["NEW"]
+
+
+def test_issue_binds_the_key_to_a_team(sandbox):
+    r, written = _run(sandbox, "issue", "--tenant", "ACME", "--team", "payments", backend="blob")
+    assert r.returncode == 0, r.stdout + r.stderr
+    [meta] = written.values()
+    assert meta["tenant_id"] == "ACME" and meta["team"] == "payments"
+
+
+def test_issue_without_a_team_writes_none(sandbox):
+    r, written = _run(sandbox, "issue", "--tenant", "ACME", backend="blob")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "team" not in next(iter(written.values()))
+
+
+@pytest.mark.parametrize("bad", ["has space", "a:b", "default", "x" * 65])
+def test_issue_refuses_an_invalid_team(sandbox, bad):
+    # Refused before anything is read or written (gcloud need not be called at all).
+    r, written = _run(sandbox, "issue", "--tenant", "ACME", "--team", bad, backend="blob",
+                      expect_gcloud=False)
+    assert r.returncode != 0 and "--team" in (r.stdout + r.stderr)
+    assert written is None
 
 
 # The public .env.template set GCP_PROJECT_ID to the maintainer's project, and the script

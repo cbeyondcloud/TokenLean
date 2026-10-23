@@ -582,6 +582,8 @@ Every LLM response includes detailed savings metadata:
 
 Alongside the `_token_opt` body, the same figures are emitted as machine-readable **`x-tokenlean-*` response headers** (request-id, routed-model, cache state, tokens/%/$ saved, the call's actual cost `x-tokenlean-cost-usd`, latency) on served non-streamed completions — **including cache-hit, bypass, and content-filter responses** (not the batch `202`/poll or errors) — so a FinOps pipeline attributes cost per call without parsing the body. Streams cannot carry a header after the fact, so with `observability.stream_cost_event: true` a completed stream ends with its actual cost as an SSE comment frame (`: x-tokenlean-cost {...}`), which SDKs skip and raw readers can parse.
 
+**Usage tags.** A caller can attribute cost to its own dimensions — a run, a step, an agent — by sending headers on an operator-controlled allow-list (`billing.metering.tags`; by default the `X-Agentic-*` identity headers an agent framework sends). Each listed header becomes one key of the JSONB `usage_events.tags` column (query with `tags->>'run_id'`); any other header is ignored, values are length-capped, and a value that looks like a credential is dropped, never stored.
+
 A separate **application-quality surface** (`middleware/quality_metrics.py`) records signal kept deliberately distinct from ops/savings metrics: retrieval hit-rate, context freshness, grounding coverage, and output schema-validation rate — PII-free labels only.
 
 **Dashboards (10):** Access Grafana at `https://grafana-<hash>-uc.a.run.app` — per-call, live, trends (switch bucket via the `Granularity` variable: hour/day/week/month/quarter), quarterly (all-time), billing, sla, tenant-overview, trust-safety, requests, and latency-breakup. (Dollar panels use the same config-priced estimate — see the caveat above.)
@@ -739,7 +741,8 @@ The tool-loading path is `src/proxy/middleware/g08_tool_loading.py`.
 | **Strict-BYOK mode** | When a tenant has no key of its own, requests fail closed with a **402** — no silent fallback to platform keys. RouteLLM's embedding routers and the native batch lane use the tenant's own key too |
 | Developer Keys | Proxy-issued API keys with per-user rate limits |
 | Authentication | Workload Identity (no JSON credential files) |
-| **Spend caps** | Per-tenant monthly USD ceiling (`rate_limit.spend_cap`) + budget-threshold webhook — denial-of-wallet protection |
+| **Spend caps** | Per-tenant monthly USD ceiling (`rate_limit.spend_cap`) + budget-threshold webhook — denial-of-wallet protection; per-team caps for keys bound to a team (`teams.<team>.monthly_spend_cap_usd`) |
+| **Teams** | A proxy key can be bound to a team of its tenant (`issue-key.sh --team`): the team is recorded on every usage row, can carry its own spend cap, and can have its own config overlay (`groups` / `proxy` only) — see `docs/config-reference.md` "teams" |
 | **IP allowlist** | Optional per-tenant CIDR allowlist over the `/v1/*` routes |
 | **PII redaction (G29)** | Detect + `off\|flag\|mask\|block` email/SSN/card/phone/IP (+ optional Presidio, opt-in PHI) before the provider call; **reversible masking**; PII-free audit rows |
 | **Injection guardrails (G30)** | Precision-biased prompt-injection / jailbreak detection; `allow\|flag\|block`; non-bypassable, runs before optimisation spends tokens; optional response-side `scan_response` |

@@ -135,6 +135,51 @@ does not exist or cannot be read, and a lookup that misses the cache runs off th
 If Secret Manager cannot be reached, the read is retried within seconds and the last key it
 gave is still served. So a rotated or newly added platform key takes up to that long to apply.
 
+### teams — a team level under the tenant
+
+A proxy key can be bound to a **team** of its tenant at issuance (`create_key(team=...)`,
+`scripts/issue-key.sh issue --team NAME`; 1–64 characters of `A-Z a-z 0-9 . _ -`, not
+`default`). A request's team is, in order: the key's team binding; else, for a key issued
+with `gateway: true`, its `X-Team` header; else `default` (no team). The binding wins over
+any header. The team is written to `usage_events.team` and returned by `/admin/usage-export`,
+used as the `team` metric label (bounded by `G18_observability.label_values.team`), and
+selects `rate_limit.per_team` limits. A team-bound key's `/admin/usage-export` returns **only
+its own team's rows** of its own tenant, whatever the body or query string asks for, and with no
+user identity in them (the `billing.metering.tags.tenant_only_keys` tags — default `user` — are
+removed and any `user_id` is blanked); a key with
+no team binding keeps the whole-tenant view (an admin key, its cross-tenant view).
+
+Rotating keys: `rotate_tenant_keys_per_binding(tenant)` issues **one new key per binding** — the
+tenant's unbound keys and each team — each keeping its team, tier, trust flags and extra metadata
+(the tenant's IP allowlist and any suspension carry to all), and revokes every old key in one
+store write. `rotate_tenant_keys(tenant)` keeps its single-key result for a tenant whose keys share
+one binding, and refuses, changing nothing, for a tenant with several.
+
+A team's settings live under `teams.<team>` (in this file, or in the tenant's own
+`tenant_configs` overrides), with the operator's `tenants.<id>.teams.<team>` merged over them.
+**Quote team names in YAML**: an unquoted `4421` is read as a number (still matched by its text),
+but an unquoted `no`, `on`, `yes` or `off` is a boolean and never matches a team; every team key
+that is not text is named in a warning.
+
+```yaml
+teams:
+  payments:
+    monthly_spend_cap_usd: 50      # the team's own monthly USD ceiling
+    config:                        # merged over the tenant's config for this team's requests
+      groups:
+        G5_cache: {cache_scope: tenant+model}
+      proxy:
+        default_model: gpt-4o-mini
+```
+
+| Key | Description |
+|---|---|
+| `monthly_spend_cap_usd` | The team's monthly USD cap, checked by G00 while `rate_limit.spend_cap.enabled` is on (same `grace_pct` and `exempt_tenants` as the tenant cap) against the team's own counter `t:<tenant>:team:<team>:spend:<YYYYMM>`. Over it: **429 `team_spend_cap_exceeded`** (`Retry-After: 86400`) before any provider call, and a `team_spend_cap.reached` event; `warn_pct` fires a one-shot `team_budget.threshold`. The tenant cap still applies to the team's requests. Absent or `0` = no team cap. **Negative, NaN, infinite or not a number = invalid**: the team's requests are refused (429 `team_spend_cap_exceeded`, message "misconfigured", `Retry-After: 3600`) with a warning, never treated as no cap. |
+| `config` | An overlay deep-merged over the tenant's config for the team's requests, with the `CONFIG_OVERLAYS` rules (mappings merge, a null changes nothing). It is applied after the tenant's `tenant_configs` overrides and **before** the operator's `tenants.<id>.groups` overlay, so an operator pin always wins. Limits, each dropped entry named in a warning: only the **`groups`** and **`proxy`** sections may change (so a team cannot lift a cap, switch off a gate, change metering or add a provider); **never** the groups G00 (rate limiting), G17 (loop and budget control) or G29–G32 (trust & safety), under any spelling of their key; and never a mapping replaced by a scalar or list (`G5_cache: false` is dropped — every group block must be a mapping). A team's setting is treated as the tenant's own choice. G05 folds a fingerprint of the applied overlay into its cache keys, so an answer produced under one team's overlay is never served to a request under another overlay or none; teams without an overlay share the tenant's cache as before. |
+
+The `default` team never has settings, a cap or an overlay: a deployment that binds no key to a
+team and has no `teams:` block behaves exactly as before.
+
 ### rate_limit extras
 
 | Parameter | Default | Description |
@@ -302,15 +347,25 @@ Token-savings **estimate** tuning. Reporting only — none of this affects the r
 - `provider_prompt_tokens` — provider-reported prompt tokens from the response `usage` (`z`), when the provider returns them.
 - `group_savings` — per-G-group realised token savings as JSONB (`{"G05": 3400, ...}`), non-zero steps only. Powers the portal's "savings by optimisation" view without querying the Langfuse traces blob.
 - `status_code`, `total_duration_ms`, `llm_duration_ms`, `billable` — reliability/latency observability. A non-2xx outcome is persisted as a `billable=false` row so the in-dashboard latency-percentile + error-rate panels have data; **`billable=false` rows are excluded from the request-count invoice** (invoice/quota SQL filters `COALESCE(billable, true)`).
+- `team` — the request's authenticated team (see [teams](#teams--a-team-level-under-the-tenant)): `default` for no team, `''` on rows written before the column existed.
+- `tags` — the request's **usage tags** as JSONB (`{"run_id": "…", "step": "…", "agent": "…"}`), `NULL` when the request carried none (see `billing.metering.tags` below). Query a key with `tags->>'run_id'`.
+
+Both columns are additive (`ADD COLUMN IF NOT EXISTS`, applied by the app at startup and by `infra/migrations/billing.sql`); an older release keeps inserting rows unchanged. To remove them after rolling back, run `infra/migrations/down/usage_events_team_tags.sql` by hand.
 
 (`x` = `baseline_tokens`. Billing is the request **count**, not tokens — see the two-track model in [request-flow-diagram.md](request-flow-diagram.md).)
 
-**Metering toggles** (`billing.metering.*`, both default `true`):
+**Metering toggles** (`billing.metering.*`):
 
 | Parameter | Default | Description |
 |---|---|---|
 | `group_savings_enabled` | `true` | Persist the per-group `group_savings` JSONB on each row (C1). Set `false` to drop the extra write. |
 | `persist_all_outcomes` | `true` | Persist an observability-only row for non-2xx outcomes (C2). Set `false` to restore the pre-C2 2xx-only write. Never affects billed request counts either way. |
+| `tags.enabled` | `true` | Record **usage tags**: each request header on the `tags.headers` allow-list becomes one key of `usage_events.tags`; every other header is ignored. |
+| `tags.headers` | the ten `X-Agentic-*` identity headers | Allow-list, `header name: tag key` (header names match in any case; tag keys `[a-z][a-z0-9_]*`, at most 64 entries). Default: `X-Agentic-Team: team`, `X-Agentic-User: user`, `X-Agentic-Repo: repo`, `X-Agentic-Pipeline: pipeline`, `X-Agentic-Run-Id: run_id`, `X-Agentic-Step: step`, `X-Agentic-Agent: agent`, `X-Agentic-Parent-Agent: parent_agent`, `X-Agentic-Tier: tier`, `X-Agentic-Policy-Version: policy_version`. A value set here **replaces** the default list; `{}` records nothing. |
+| `tags.max_value_chars` | `256` | Longer values are cut to this length (at most `1024`). |
+| `tags.tenant_only_keys` | `[user]` | Tag keys only tenant-level keys may read back: they are stored for every request (per-user cost and chargeback), but a **team-bound** key's `/admin/usage-export` has them removed, and any `user_id` blanked. Unbound and admin keys see them. An unreadable value hides the default. |
+
+Tag values are trimmed and must be printable ASCII; a value that looks like a credential (a provider or proxy key in any case, a bearer token — also URL-encoded as `Bearer%20…` — or a `Basic` value that decodes to `user:password`, a JWT, `user:password@` or a token as the user in a URL, a `password=…` pair, another secret-named key with a credential-shaped value, a private-key header) is **dropped, never stored**; the whole value is checked before it is cut to `max_value_chars`, so no prefix of a credential is kept. Detection looks for a credential-shaped body, not a keyword: `Basic analysis`, `token: refresh` and `ssh://git@github.com/org/repo` are kept. Dropped values are counted in `token_opt_usage_tags_dropped_total{reason="secret"}` (`reason="invalid"` for non-printable values). The settings are read from the global config only — a tenant's or team's overrides cannot change what is recorded — and an unreadable `tags` section records nothing. Tags are what the caller asserts: they never select a team, a limit, a route or a config (`usage_events.team` is the authenticated team, so the two may differ).
 
 **Observability / FinOps** (`portal.finops.*`) — tunes the Observability tab's spend forecast + anomaly detector:
 
@@ -336,7 +391,7 @@ Request throttling at the gate (token bucket). Lives at the top level, not under
 | `default.requests_per_minute` | `60` | Per-minute limit applied to all callers without an override |
 | `default.requests_per_hour` | `1000` | Per-hour limit applied to all callers without an override |
 | `per_user.<id>.requests_per_minute` / `.requests_per_hour` | *(per user)* | Override limits for a specific proxy key (matched on the key-bound principal, never an `X-User-ID` override) |
-| `per_team.<id>.requests_per_minute` / `.requests_per_hour` | *(per team)* | Override limits for a team. Matches **only a gateway key's team** — `X-Team` is trusted only from a key issued with `gateway: true`; every other key is team `default` |
+| `per_team.<id>.requests_per_minute` / `.requests_per_hour` | *(per team)* | Override limits for a team. Matches only an **authenticated** team: the team a key is bound to (see [teams](#teams--a-team-level-under-the-tenant)), or a gateway key's `X-Team` — `X-Team` is trusted only from a key issued with `gateway: true`; every other key is team `default` |
 
 > **Bucket identity.** A rate-limit bucket is keyed on the authenticated identity — tenant + key-bound principal + team — never on a client-chosen header. Sending a different `X-Team` or `X-User-ID` per request cannot open a fresh bucket, claim another team's limit, or split your own. A customer's API gateway that legitimately stamps a team per request is issued a `gateway` key, which gets one bucket per team.
 
@@ -940,7 +995,7 @@ Agent-architecture enforcement — bounds system-prompt size and tool count.
 | `langfuse_host` | `http://langfuse-svc` | **Not read by the proxy.** The Langfuse endpoint comes from the `LANGFUSE_HOST` environment variable (the local compose stack sets `http://langfuse:3000`); keys from `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`. Setting this key changes nothing |
 | `prometheus_enabled` | `true` | Expose `/metrics` Prometheus counters |
 | `capture_trace_content` | `false` | Store the raw prompt and response in Langfuse traces (all tenants share one Langfuse project). A tenant's override wins. Even when on, a request whose PII G29 or G31 found and left in place (`flag`, or a `block`) is traced without its text, and with it off spans keep only their counts |
-| `label_values.team` / `label_values.feature` | *(unset)* | Allowlist for the `team` / `feature` metric label values. A list bounds cardinality: only `default` and the listed values keep their own label; anything else is folded to `other`. `"*"` keeps every value as-is. Unset, `feature` (any caller's `X-Feature`) keeps only `default`, and `team`, already the gateway-verified team, keeps its value. |
+| `label_values.team` / `label_values.feature` | *(unset)* | Allowlist for the `team` / `feature` metric label values. A list bounds cardinality: only `default` and the listed values keep their own label; anything else is folded to `other`. `"*"` keeps every value as-is. Unset, `feature` (any caller's `X-Feature`) keeps only `default`, and `team`, already the authenticated team (the key's team binding or a gateway's `X-Team`), keeps its value. |
 | `openllmetry_enabled` | `false` | Enable OTLP auto-instrumentation (set OTLP endpoint first). Needs the `traceloop-sdk` package, which the default image does not include — install it in your image, or the proxy logs a warning and leaves the feature off. Separate from Langfuse tracing (`langfuse_enabled`) |
 | `et_weights.input` | `1.0` | ET metric input weight |
 | `et_weights.cache_read` | `0.1` | ET metric cache-read weight |
@@ -1270,7 +1325,9 @@ outlive a policy change. Per-tenant via `tenants.<id>.groups.G32_tool_eligibilit
 Core signal sites emit **PII-free** events through the OSS `events.py` seam; the **[Enterprise]**
 delivery product delivers them to a tenant's registered HTTPS endpoints (portal `/portal/webhooks`).
 On an OSS/self-host deploy no dispatcher is installed, so emission is a no-op. Event types:
-`spend_cap.reached`, `budget.threshold`, `guardrail.block`, `pii.detected`. Delivery is
+`spend_cap.reached`, `budget.threshold`, `guardrail.block`, `pii.detected`, `trial.threshold`,
+`trial.expired`, `team_spend_cap.reached`, `team_budget.threshold` (the last two carry the
+`team`; see [teams](#teams--a-team-level-under-the-tenant)). Delivery is
 HMAC-SHA256 signed (`X-TokenLean-Signature: sha256=<hex>` over the raw body, per-endpoint secret
 shown once at registration, stored Fernet-encrypted) with bounded exponential-backoff retry and a
 Redis dead-letter on final failure.

@@ -68,10 +68,19 @@ class RequestContext:
     key_principal: str = ""
     # True when the key carries the `gateway` flag (auth.api_key_manager.is_gateway_key).
     is_gateway_key: bool = False
-    # The trusted team: a gateway key's X-Team header, else "default". G00 buckets/limits and
-    # G18 team labels read THIS, never params["x_team"], which stays a raw, caller-chosen
+    # The trusted team: the team the key is bound to, else a gateway key's X-Team header, else
+    # "default". G00 buckets/limits/team caps, the team overlay, G18 team labels and
+    # usage_events.team read THIS, never params["x_team"], which stays a raw, caller-chosen
     # routing hint (G06 rules still match on it).
     team: str = "default"
+    # Fingerprint of the team config overlay applied to this request (tenancy.teams.
+    # overlay_tag); "" for none. G05 folds it into its cache keys so an answer produced under
+    # one team's overlay is never served to a request that ran under another.
+    team_overlay_tag: str = ""
+    # Usage tags (billing.tags.extract_tags): the allow-listed request headers the caller
+    # sent for attribution, stored as usage_events.tags. Caller-asserted: nothing selects
+    # behaviour on them. None = no allow-listed header on the request.
+    usage_tags: Optional[Dict[str, str]] = None
     # OpenTelemetry span for the active pipeline trace (set by tracing layer).
     otel_span: Optional[Any] = None
     # Provider adapter — set by OptimisationPipeline early in process_request.

@@ -14,6 +14,7 @@ from redis.exceptions import ResponseError
 from middleware import RequestContext
 from cache.redis_pool import get_redis as _get_redis
 from tenancy.resolver import DEFAULT_TEAM, team_tag
+from tenancy.teams import InvalidTeamCap, team_monthly_spend_cap
 from trial import trial_summary
 import events
 
@@ -139,6 +140,13 @@ class G00RateLimit:
         billing gate."""
         month = time.strftime("%Y%m", time.gmtime(now if now is not None else time.time()))
         return f"{redis_prefix}spend:{month}"
+
+    @staticmethod
+    def team_spend_key(redis_prefix: str, team: str, now: Optional[float] = None) -> str:
+        """A team's monthly running-USD spend counter (ST-1), inside its tenant's namespace
+        so the tenant's purge removes it. ``team_tag``: the name never adds a key segment."""
+        month = time.strftime("%Y%m", time.gmtime(now if now is not None else time.time()))
+        return f"{redis_prefix}team:{team_tag(team)}:spend:{month}"
 
     @staticmethod
     def trial_key(redis_prefix: str) -> str:
@@ -354,25 +362,83 @@ class G00RateLimit:
         # crossing, not on every subsequent request.
         await self._maybe_warn_budget(ctx, redis, scfg, tenant_id, redis_prefix, cap, spent)
 
+    async def _check_team_spend(self, ctx, redis, rl_cfg: Dict[str, Any]) -> None:
+        """Per-team monthly running-USD spend gate (ST-1).
+
+        The team's cap is ``teams.<team>.monthly_spend_cap_usd`` (``tenancy.teams``), read
+        against the team's own counter (``team_spend_key``, added to with the tenant's in
+        ``add_to_spend``). Same switch, grace and exemptions as the tenant's cap
+        (``rate_limit.spend_cap``); checked after it, so the tenant's ceiling still binds a
+        team. The default team (no team) has no cap. Fail-open on Redis errors."""
+        scfg = rl_cfg.get("spend_cap") or {}
+        if not scfg.get("enabled", False):
+            return
+        team = getattr(ctx, "team", "") or DEFAULT_TEAM
+        if team == DEFAULT_TEAM:
+            return
+        tenant_id = getattr(ctx, "tenant_id", "default")
+        if tenant_id in set(scfg.get("exempt_tenants") or ["admin", "default"]):
+            return
+        try:
+            cap = team_monthly_spend_cap(ctx.config, tenant_id, team)
+        except InvalidTeamCap:
+            # Set but unreadable: refused, never read as "no cap" (fail closed on config;
+            # Redis errors below still fail open, as the tenant cap does).
+            raise RateLimitExceeded(
+                retry_after=3600,
+                limit_type="team_spend_cap_exceeded",
+                scope=f"tenant={tenant_id},team={team_tag(team)},cap_invalid=true",
+            )
+        if cap is None:
+            return  # this team has no cap
+        grace = float(scfg.get("grace_pct", 0) or 0)
+        ceiling = cap * (1 + grace / 100.0)
+        redis_prefix = counter_prefix(ctx)
+        try:
+            spent = float(await redis.get(self.team_spend_key(redis_prefix, team)) or 0.0)
+        except Exception as exc:
+            logger.warning("[%s] G00 team spend check failed (fail-open): %s", ctx.request_id, exc)
+            return
+        tag = team_tag(team)
+        tier = (getattr(ctx, "pricing_tier", "") or "free").lower()
+        if spent >= ceiling:
+            events.schedule_event(tenant_id, events.TEAM_SPEND_CAP_REACHED, {
+                "team": tag, "cap_usd": round(cap, 4), "spent_usd": round(spent, 4), "tier": tier,
+            })
+            raise RateLimitExceeded(
+                retry_after=86400,
+                limit_type="team_spend_cap_exceeded",
+                scope=f"tenant={tenant_id},team={tag},cap_usd={cap:.4f},spent_usd={spent:.4f}",
+            )
+        await self._maybe_warn_budget(ctx, redis, scfg, tenant_id, redis_prefix, cap, spent,
+                                      team=team)
+
     async def _maybe_warn_budget(self, ctx, redis, scfg, tenant_id, redis_prefix,
-                                 cap: float, spent: float) -> None:
-        """Emit a one-shot ``budget.threshold`` event when spend first crosses
-        ``warn_pct``% of the cap this month. Best-effort; never breaks the request."""
+                                 cap: float, spent: float, team: Optional[str] = None) -> None:
+        """Emit a one-shot ``budget.threshold`` event (``team_budget.threshold`` for a team's
+        cap) when spend first crosses ``warn_pct``% of the cap this month. Best-effort; never
+        breaks the request."""
         warn_pct = float(scfg.get("warn_pct", 0) or 0)
         if warn_pct <= 0 or spent < cap * (warn_pct / 100.0):
             return
+        scope = f"team:{team_tag(team)}:" if team else ""
         try:
             month = time.strftime("%Y%m", time.gmtime())
-            first = await redis.set(f"{redis_prefix}budgetwarn:{month}", "1", nx=True, ex=2678400)
+            first = await redis.set(f"{redis_prefix}{scope}budgetwarn:{month}", "1",
+                                    nx=True, ex=2678400)
             if not first:
                 return  # already warned this month
         except Exception:
             return  # dedup unavailable → skip the warning rather than spam
-        events.schedule_event(tenant_id, events.BUDGET_THRESHOLD, {
+        payload = {
             "cap_usd": round(cap, 4), "spent_usd": round(spent, 4),
             "warn_pct": warn_pct,
             "tier": (getattr(ctx, "pricing_tier", "") or "free").lower(),
-        })
+        }
+        if team:
+            payload = {"team": team_tag(team), **payload}
+        events.schedule_event(tenant_id, events.TEAM_BUDGET_THRESHOLD if team
+                              else events.BUDGET_THRESHOLD, payload)
 
     async def _check_token_bucket(
         self,
@@ -483,6 +549,14 @@ class G00RateLimit:
                 raise
             except Exception as exc:
                 logger.warning("[%s] G00 spend gate error (fail-open): %s", ctx.request_id, exc)
+            # The team's own cap (ST-1), after the tenant's: a team never spends past it.
+            try:
+                await self._check_team_spend(ctx, _get_redis(), cfg)
+            except RateLimitExceeded:
+                raise
+            except Exception as exc:
+                logger.warning("[%s] G00 team spend gate error (fail-open): %s",
+                               ctx.request_id, exc)
         if not cfg.get("enabled", False):
             return ctx
 
@@ -533,18 +607,23 @@ def counter_prefix(ctx) -> str:
     return getattr(ctx, "redis_prefix", None) or f"t:{getattr(ctx, 'tenant_id', 'default')}:"
 
 
-async def add_to_spend(redis_prefix: str, cost_usd: float) -> None:
+async def add_to_spend(redis_prefix: str, cost_usd: float, team: Optional[str] = None) -> None:
     """Add one call's cost to the tenant's monthly spend counter, which ``_check_spend``
-    reads: main's for a served request, G13's for a batched one when its answer arrives, so
-    both use one key and one expiry. Nothing for a zero or unknown cost; never raises."""
+    reads, and, for a request of a team other than the default one, to the team's counter,
+    which ``_check_team_spend`` reads: main's for a served request, G13's for a batched one
+    when its answer arrives, so both use one key and one expiry. Nothing for a zero or
+    unknown cost; never raises."""
     if not cost_usd > 0:
         return
-    try:
-        key = G00RateLimit.spend_key(redis_prefix)
-        redis = _get_redis()
-        total = await redis.incrbyfloat(key, cost_usd)
-        # Set the TTL once, on the month's first accrual (~40 days: last month's key expires).
-        if float(total) <= cost_usd + 1e-9:
-            await redis.expire(key, 40 * 86400)
-    except Exception as exc:
-        logger.debug("spend counter bump failed: %s", exc)
+    keys = [G00RateLimit.spend_key(redis_prefix)]
+    if team and team != DEFAULT_TEAM:
+        keys.append(G00RateLimit.team_spend_key(redis_prefix, team))
+    for key in keys:
+        try:
+            redis = _get_redis()
+            total = await redis.incrbyfloat(key, cost_usd)
+            # Set the TTL once, on the month's first accrual (~40 days: last month's expires).
+            if float(total) <= cost_usd + 1e-9:
+                await redis.expire(key, 40 * 86400)
+        except Exception as exc:
+            logger.debug("spend counter bump failed: %s", exc)

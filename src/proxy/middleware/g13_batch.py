@@ -483,9 +483,11 @@ async def _accumulate(ctx: RequestContext, topic: str,
     queued: on a failed write, or a stream already holding ``max_backlog`` requests, the
     caller answers the request now instead of promising a result nothing will produce."""
     from middleware.g00_rate_limit import counter_prefix
+    from tenancy.resolver import DEFAULT_TEAM
     redis = _get_redis()
     stream = _stream_key(getattr(ctx, "redis_prefix", "") or "", topic)
-    payload = json.dumps({
+    impersonated = bool(getattr(ctx, "impersonator_tenant_id", None))
+    item = {
         "request_id": ctx.request_id,
         "tenant_id": getattr(ctx, "tenant_id", "default"),  # BYOK: stamp so the background
         "messages": ctx.messages,                            # flush resolves the tenant's key
@@ -498,8 +500,14 @@ async def _accumulate(ctx: RequestContext, topic: str,
         # The tenant's spend counter, which the consumer adds this request's cost to when its
         # answer arrives (main bills it, and counts it against the quota and trial, now).
         # Empty when an admin key sent it as the tenant: that spends nothing of the tenant's.
-        "spend_prefix": "" if getattr(ctx, "impersonator_tenant_id", None) else counter_prefix(ctx),
-    })
+        "spend_prefix": "" if impersonated else counter_prefix(ctx),
+    }
+    # A team's request (ST-1): its cost goes to the team's counter too. Absent for the
+    # default team, so a deployment without teams queues exactly the payload it did.
+    team = getattr(ctx, "team", "") or DEFAULT_TEAM
+    if team != DEFAULT_TEAM and not impersonated:
+        item["spend_team"] = team
+    payload = json.dumps(item)
     try:
         if max_backlog and await redis.xlen(stream) >= max_backlog:
             logger.warning("[%s] G13 stream '%s' already holds %d queued requests; "
@@ -777,8 +785,10 @@ async def _record_batch_job(job_id: str, provider: str, items: List[Dict],
     redis = _get_redis()
     request_ids = [it.get("request_id") for it in items]
     baseline_tokens = {it.get("request_id"): it.get("baseline_tokens", 0) for it in items}
-    # Whose spend counter each answer's cost goes to, and the model it is priced at.
-    spend = {it.get("request_id"): {"prefix": it["spend_prefix"], "model": it.get("model")}
+    # Whose spend counter each answer's cost goes to (and its team's, ST-1), and the model it
+    # is priced at.
+    spend = {it.get("request_id"): {"prefix": it["spend_prefix"], "model": it.get("model"),
+                                    **({"team": it["spend_team"]} if it.get("spend_team") else {})}
              for it in items if it.get("spend_prefix")}
     try:
         await redis.hset(
@@ -865,7 +875,8 @@ async def poll_batch_jobs(cfg: Dict[str, Any]) -> int:
                     })
                     owed = spend_map.get(rid) or {}
                     await _add_answer_cost(owed.get("prefix"), rid, owed.get("model") or "",
-                                           resp, adapter, cfg, native=True)
+                                           resp, adapter, cfg, native=True,
+                                           team=owed.get("team"))
                 else:
                     await _store_batch_result(
                         rid, {"status": "failed", "error": r.get("error", "batch item error")}
@@ -1070,7 +1081,8 @@ async def _flush_batch_loop(
                 logger.info("G13 batch item %s processed successfully", request_id)
                 _note_batch_provider_outcome(provider, None)
                 await _add_answer_cost(item.get("spend_prefix"), request_id, model,
-                                       response_dict, _routed_adapter, cfg)
+                                       response_dict, _routed_adapter, cfg,
+                                       team=item.get("spend_team"))
             except Exception as exc:
                 await _store_batch_result(request_id, {"status": "failed", "error": str(exc)})
                 logger.error("G13 batch item %s failed: %s", request_id, exc)
@@ -1102,17 +1114,18 @@ def _answer_cost(request_id: str, model: str, response: Dict, adapter: Any,
 
 async def _add_answer_cost(spend_prefix: Optional[str], request_id: str, model: str,
                            response: Dict, adapter: Any, cfg: Dict[str, Any],
-                           *, native: bool = False) -> None:
+                           *, native: bool = False, team: Optional[str] = None) -> None:
     """Add a batched request's answer cost to its tenant's spend counter, which the spend
-    cap reads. The request was billed, and counted against the quota and trial, when it was
-    queued; its cost is known only now. No ``spend_prefix``: an admin key sent it as the
-    tenant, or it was queued without one. Never raises: the answer is stored either way."""
+    cap reads, and to its team's when it had one (ST-1). The request was billed, and
+    counted against the quota and trial, when it was queued; its cost is known only now. No
+    ``spend_prefix``: an admin key sent it as the tenant, or it was queued without one.
+    Never raises: the answer is stored either way."""
     if not spend_prefix:
         return
     try:
         from middleware.g00_rate_limit import add_to_spend
         await add_to_spend(spend_prefix, _answer_cost(request_id, model, response, adapter,
-                                                      cfg, native=native))
+                                                      cfg, native=native), team=team)
     except Exception as exc:
         logger.warning("G13 batch item %s: its cost was not added to the spend counter: %s",
                        request_id, exc)

@@ -533,20 +533,33 @@ def _apply_model_scope(text: str, ctx) -> str:
     ptag = _params_scope_tag(ctx)
     if ptag:
         text = f"params={ptag}\n{text}"
+    ttag = _team_scope_tag(ctx)
+    if ttag:
+        text = f"team={ttag}\n{text}"
     return text
 
 
+def _team_scope_tag(ctx) -> str:
+    """The fingerprint of the team config overlay the request ran under ("" for none,
+    which keeps keys byte-identical). A team overlay can change the answer (its default
+    model, a group's knobs) while the default scope is the whole tenant, so an answer stored
+    under one overlay must not be served under another, or under none (ST-1)."""
+    tag = getattr(ctx, "team_overlay_tag", "") or ""
+    return tag if isinstance(tag, str) else ""
+
+
 def _scope_value(ctx) -> str:
-    """Combined model+verbosity+system+parameter scope for L2 (colon-joined; "" when
-    all are unscoped → byte-identical to pre-feature). Shared by L2's lookup WHERE filter
-    AND store INSERT so a row's stored scope always matches what a later lookup searches
-    for — this is what makes the isolation actually enforced on L2's READ path
+    """Combined model+verbosity+system+parameter+team-overlay scope for L2 (colon-joined;
+    "" when all are unscoped → byte-identical to pre-feature). Shared by L2's lookup WHERE
+    filter AND store INSERT so a row's stored scope always matches what a later lookup
+    searches for — this is what makes the isolation actually enforced on L2's READ path
     (unlike folding a tag into query_hash alone, which only dedupes the INSERT and is
     never consulted by SELECT)."""
     ptag = _params_scope_tag(ctx)
+    ttag = _team_scope_tag(ctx)
     return ":".join(
         p for p in (_model_scope_tag(ctx), _verbosity_scope_tag(ctx), _system_scope_tag(ctx),
-                    f"params={ptag}" if ptag else "") if p
+                    f"params={ptag}" if ptag else "", f"team={ttag}" if ttag else "") if p
     )
 
 
