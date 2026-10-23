@@ -40,9 +40,12 @@ only its hash is stored, and a listing shows neither. A key can be bound to a te
 tenant: the user becomes the request's user and rate-limit principal, and `X-User-ID` cannot replace it.
 Admin keys only; an admin key bound to a team manages only its own team's keys. Every change is audited,
 and changes are refused while the audit log is not wired. `key_store.backend: postgres` validates keys
-against the `proxy_keys` table: a revoked key is refused at once by the replica that revoked it and by
-every other within `refresh_seconds` (5 s), never later than `max_stale_seconds` (300 s). `issue-key.sh
---api URL` drives the API. The blob store stays the default.
+against the `proxy_keys` table: a revoked key is refused within `refresh_seconds` (5 s) on every replica
+(usually at once on the one that revoked it), never later than `max_stale_seconds` (300 s); the proxy
+refuses to start with it and no `DATABASE_URL`. `issue-key.sh --api URL` drives the API. The blob store
+stays the default. **Changed:** without `--api`, `issue-key.sh issue` / `revoke` now need an explicit
+`--backend blob` (the script cannot see a config-selected Postgres store, where a blob write would change
+nothing); scripts that call it must add the flag (`gcp-deploy.sh` does).
 - **OSS:** the key API, user binding, Postgres key store selection and `issue-key.sh --api` ship in the core proxy.
 
 ## 2026-10-22

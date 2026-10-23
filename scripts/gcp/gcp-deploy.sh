@@ -776,8 +776,11 @@ print(cfg.get('groups',{}).get('G6_routing',{}).get('routellm',{}).get('weak_mod
   if ! timeout 30 gcloud secrets versions access latest --secret="token-proxy-api-keys" \
        --project="$PROJECT_ID" &>/dev/null; then
     info "No proxy API keys found — issuing initial admin key via issue-key.sh..."
-    bash "${SCRIPT_DIR}/../issue-key.sh" issue --tenant admin --tier enterprise --admin --project "$PROJECT_ID" \
-      || warn "Failed to issue proxy API key — run: scripts/issue-key.sh issue --tenant admin --tier enterprise --admin"
+    # --backend blob: this first deploy's proxy reads the Secret Manager blob (no
+    # key_store.backend: postgres in the shipped config).
+    bash "${SCRIPT_DIR}/../issue-key.sh" issue --tenant admin --tier enterprise --admin --backend blob \
+      --project "$PROJECT_ID" \
+      || warn "Failed to issue proxy API key — run: scripts/issue-key.sh issue --tenant admin --tier enterprise --admin --backend blob"
   else
     info "Proxy API keys already exist — skipping key issuance (use scripts/issue-key.sh to add/revoke)"
   fi

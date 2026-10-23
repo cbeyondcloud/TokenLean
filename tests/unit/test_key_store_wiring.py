@@ -91,8 +91,18 @@ async def test_a_failed_key_store_wiring_is_reported_and_retried(wiring, monkeyp
     assert main._db_not_wired() == []
 
 
+def test_postgres_without_a_database_url_refuses_to_start(monkeypatch):
+    monkeypatch.setattr(main, "_key_store", None)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with pytest.raises(ValueError, match="DATABASE_URL"):
+        main._select_key_store({"key_store": {"backend": "postgres"}})
+    assert akm.key_store_backend_installed() is False
+    main._select_key_store({})                                   # the blob needs none
+
+
 def test_startup_selects_the_key_store_from_the_config(monkeypatch):
     monkeypatch.setattr(main, "_key_store", None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
     main._select_key_store({"key_store": {"backend": "postgres", "max_stale_seconds": 60}})
     assert main._key_store["backend"] == "postgres"
     assert akm.key_store_backend_installed() and akm.key_store_stale()

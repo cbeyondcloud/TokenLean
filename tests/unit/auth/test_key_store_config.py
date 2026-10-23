@@ -72,3 +72,15 @@ def test_while_postgres_is_pending_no_key_validates_and_no_write_happens(tmp_pat
 def test_the_blob_default_installs_nothing():
     ksc.install_pending(ksc.key_store_settings({}))
     assert akm.key_store_backend_installed() is False
+
+
+
+def test_a_stale_bound_under_twice_the_refresh_is_refused():
+    with pytest.raises(ValueError):
+        ksc.key_store_settings({"key_store": {"backend": "postgres", "refresh_seconds": 30,
+                                              "max_stale_seconds": 50}})
+    s = ksc.key_store_settings({"key_store": {"backend": "postgres", "refresh_seconds": 30,
+                                              "max_stale_seconds": 60}})
+    assert s["max_stale_seconds"] == 60
+    assert ksc.key_store_settings({"key_store": {"backend": "postgres",
+                                                 "max_stale_seconds": 0}})["max_stale_seconds"] == 0

@@ -307,11 +307,12 @@ def _select_key_store(cfg: Dict[str, Any]) -> None:
     which no key validates until :func:`_wire_database` loads the table."""
     global _key_store
     from auth import key_store_config
-    _key_store = key_store_config.key_store_settings(cfg)
+    settings = key_store_config.key_store_settings(cfg)
+    if settings["backend"] == "postgres" and not os.getenv("DATABASE_URL", ""):
+        # Refused like a typo: started, it would answer 503 to every key while looking up.
+        raise ValueError("key_store.backend is postgres but DATABASE_URL is not set")
+    _key_store = settings
     key_store_config.install_pending(_key_store)
-    if _key_store["backend"] == "postgres" and not os.getenv("DATABASE_URL", ""):
-        logger.error("key_store.backend is postgres but DATABASE_URL is not set: no proxy key "
-                     "will validate")
 
 
 def _key_store_wanted() -> bool:

@@ -60,6 +60,9 @@ MATCH_KEYS = ("keywords", "patterns", "min_prompt_tokens", "max_prompt_tokens", 
               "has_tools", "params", "user_ids")
 ACTION_KEYS = ("tier", "model", "allow_escalation", "overrides")
 MAX_FRAGMENT_BYTES = 256 * 1024
+# Every number a fragment sets is a limit, a percentage, a cost or a count: none is near
+# this, and anything past it would overflow where the proxy reads it as a float.
+MAX_NUMBER = 10 ** 15
 MAX_LIST = 100
 MAX_COMMENT = 500
 
@@ -138,8 +141,11 @@ class _Checker:
                 self.err(f"{path}.{key}", f"not admin-managed here; allowed: {', '.join(allowed)}")
 
     def number(self, value: Any, path: str, lo=None, hi=None, integer=False) -> None:
+        # Integers are compared as integers: math.isfinite on a huge int would raise.
         ok = (not isinstance(value, bool) and isinstance(value, (int, float))
-              and (not integer or isinstance(value, int)) and math.isfinite(value))
+              and (not integer or isinstance(value, int))
+              and (isinstance(value, int) or math.isfinite(value))
+              and -MAX_NUMBER <= value <= MAX_NUMBER)
         if not ok or (lo is not None and value < lo) or (hi is not None and value > hi):
             kind = "an integer" if integer else "a number"
             bounds = "" if lo is None else (f" from {lo}" + (f" to {hi}" if hi is not None else
@@ -169,9 +175,28 @@ class _Checker:
 
     # ── sections ──
 
+    def text(self, node: Any, path: str) -> None:
+        """Refuse a NUL or a lone surrogate in any key or string (Postgres JSONB cannot store
+        the one, UTF-8 cannot encode the other), with the path where it is."""
+        def bad(s: str) -> bool:
+            return "\x00" in s or any(0xD800 <= ord(ch) <= 0xDFFF for ch in s)
+
+        if isinstance(node, dict):
+            for key, value in node.items():
+                where = f"{path}.{key}" if path else str(key)
+                if isinstance(key, str) and bad(key):
+                    self.err(where, "a NUL character or a lone surrogate is not allowed")
+                self.text(value, where)
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                self.text(value, f"{path}[{i}]")
+        elif isinstance(node, str) and bad(node):
+            self.err(path, "a NUL character or a lone surrogate is not allowed")
+
     def fragment(self, fragment: Any) -> None:
         if not self.mapping(fragment, "fragment"):
             return
+        self.text(fragment, "")
         self.keys(fragment, SECTIONS, "fragment")
         if "groups" in fragment:
             self.groups(fragment["groups"], "groups")
@@ -474,6 +499,14 @@ def _row(record) -> Dict[str, Any]:
     return row
 
 
+async def current_head(pool):
+    """``(version, fragment_sha256)`` of the newest stored version; ``(0, None)`` for none."""
+    async with pool.acquire() as conn:
+        record = await conn.fetchrow("SELECT version, fragment_sha256 FROM "
+                                     "routing_overlay_versions ORDER BY version DESC LIMIT 1")
+    return (int(record["version"]), record["fragment_sha256"]) if record else (0, None)
+
+
 async def current_version(pool) -> int:
     async with pool.acquire() as conn:
         return int(await conn.fetchval(
@@ -530,7 +563,8 @@ async def append(pool, fragment: Dict[str, Any], *, action: str, actor: str, com
 
 _applied: Dict[str, Any] = {"version": 0, "sha256": None}
 # failing: the last attempt to read or apply the latest version failed (main's /health then
-# lists routing_overlay). refused: a stored version this replica refused (logged once).
+# lists routing_overlay). refused: (version, sha256) of a stored row this replica refused
+# (logged once).
 _sync_state: Dict[str, Any] = {"failing": False, "refused": None}
 
 
@@ -565,9 +599,10 @@ def apply_row(row: Optional[Dict[str, Any]]) -> bool:
     fragment = row.get("fragment")
     try:
         validate_fragment(fragment)
-    except FragmentError as exc:
-        if _sync_state["refused"] != row.get("version"):
-            _sync_state["refused"] = row.get("version")
+    except Exception as exc:  # any failure to check a stored row is a refusal, never a crash
+        head = (row.get("version"), row.get("fragment_sha256"))
+        if _sync_state["refused"] != head:
+            _sync_state["refused"] = head
             logger.error("routing overlay version %s refused, keeping version %s: %s",
                          row.get("version"), applied_version(), exc)
         return False
@@ -589,11 +624,13 @@ def poll_seconds(config: Any) -> float:
 async def sync_once(pool) -> bool:
     """Apply the store's latest version here if it is not the one applied. Returns whether
     this replica now runs the latest version."""
-    latest = await current_version(pool)
-    if latest == applied_version():
+    latest, sha = await current_head(pool)
+    # The version number AND the fragment's sha256: a database restored from a backup can
+    # reuse a number for another fragment.
+    if latest == applied_version() and (latest == 0 or sha == _applied["sha256"]):
         _sync_ok()
         return True
-    if latest and latest == _sync_state["refused"]:
+    if latest and (latest, sha) == _sync_state["refused"]:
         _sync_failed()
         return False                                  # refused already: no new log line
     row = await get_version(pool, latest) if latest else None

@@ -286,3 +286,85 @@ async def test_out_of_range_numbers_are_refused(env):
     assert r.status_code == 422
     r = await _call("GET", "/admin/routing/history?before=99999999999999999999")
     assert r.status_code == 422
+
+
+
+async def test_a_huge_integer_over_http_is_422_and_nothing_is_stored(env):
+    store, audit, _ = env
+    async with AsyncClient(transport=ASGITransport(app=main.app),
+                           base_url="http://test") as client:
+        r = await client.put("/admin/routing", headers={"Authorization": f"Bearer {ROOT}"},
+                             content='{"fragment": {"groups": {"G6_routing": {"canary_pct": 1'
+                                     + "0" * 400 + '}}}}')
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["errors"][0]["path"] == "groups.G6_routing.canary_pct"
+    assert store.rows == [] and audit.rows == []
+
+
+async def test_a_nul_character_over_http_is_422(env):
+    store, _audit, _ = env
+    r = await _put({"groups": {"G6_routing": {"tiers": {"simple": ["gpt-4o\u0000"]}}}})
+    assert r.status_code == 422
+    r = await _put(V1, comment="bad\u0000comment")
+    assert r.status_code == 422
+    assert store.rows == []
+
+
+class _Conn:
+    """Records the SQL routing.append runs; MAX(version) answers ``latest``."""
+
+    def __init__(self, latest):
+        self.latest, self.sql = latest, []
+
+    def transaction(self):
+        conn = self
+
+        class _Tx:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, *exc):
+                return False
+        return _Tx()
+
+    async def execute(self, sql, *args):
+        self.sql.append(sql)
+
+    async def fetchval(self, sql, *args):
+        self.sql.append(sql)
+        return self.latest
+
+    async def fetchrow(self, sql, *args):
+        self.sql.append(sql)
+        return {"version": args[0], "fragment": args[1], "action": args[2], "actor": args[3],
+                "created_at": None, "comment": args[4], "source_version": args[5],
+                "fragment_sha256": args[6]}
+
+
+class _Pool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        conn = self.conn
+
+        class _Acq:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, *exc):
+                return False
+        return _Acq()
+
+
+async def test_append_locks_checks_the_expected_version_and_inserts_the_next():
+    conn = _Conn(latest=4)
+    with pytest.raises(routing.VersionConflict) as exc:
+        await routing.append(_Pool(conn), V1, action="applied", actor="a", expected_version=3)
+    assert exc.value.current == 4
+    assert any("pg_advisory_xact_lock" in s for s in conn.sql)
+    assert not any(s.startswith("INSERT") for s in conn.sql)        # nothing written
+    conn = _Conn(latest=4)
+    row = await routing.append(_Pool(conn), V1, action="applied", actor="a", expected_version=4)
+    assert row["version"] == 5 and row["fragment"] == V1
+    assert row["fragment_sha256"] == routing.fragment_sha256(V1)

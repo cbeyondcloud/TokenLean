@@ -17,8 +17,10 @@ from httpx import ASGITransport, AsyncClient
 import main
 from auth import api_key_manager as akm
 
-ROOT, SRE, PLAIN = "k-root", "k-sre", "k-plain"
+ROOT, SRE, PLAIN, SRE_FREE = "k-root", "k-sre", "k-plain", "k-sre-free"
 _SEED = {
+    hashlib.sha256(SRE_FREE.encode()).hexdigest(): {"tenant_id": "acme", "tier": "free",
+                                                    "admin": True, "team": "search"},
     hashlib.sha256(ROOT.encode()).hexdigest(): {"tenant_id": "ops", "tier": "enterprise",
                                                 "admin": True},
     hashlib.sha256(SRE.encode()).hexdigest(): {"tenant_id": "acme", "tier": "enterprise",
@@ -151,7 +153,7 @@ async def test_list_never_shows_a_raw_key_or_a_hash(env):
     r = await _call("GET", "/admin/keys")
     assert r.status_code == 200
     body = r.json()
-    assert body["count"] == len(body["keys"]) == 4
+    assert body["count"] == len(body["keys"]) == 5
     text = r.text
     assert raw not in text
     for key_hash in _stored(store):
@@ -184,6 +186,10 @@ async def test_revoke_rejects_the_key_at_once_and_is_audited(env):
     assert akm.validate_proxy_key(created["key"])[0] is False
     assert audit.rows[-1]["action"] == "proxy_key.revoked"
     assert audit.rows[-1]["tenant_id"] == "acme"
+    details = audit.rows[-1]["details"]
+    assert (details["key_id"], details["tenant_id"], details["team"]) == (
+        created["key_id"], "acme", "payments")
+    assert created["key"] not in json.dumps(audit.rows[-1])
     assert (await _call("DELETE", f"/admin/keys/{created['key_id']}")).status_code == 404
 
 
@@ -284,3 +290,32 @@ async def test_an_oversized_or_too_deep_body_is_refused(env):
         r = await client.post("/admin/keys", content=deep,
                               headers={"Authorization": f"Bearer {ROOT}"})
     assert r.status_code == 422
+
+
+
+# ── independent review fixes ────────────────────────────────────────────────
+
+async def test_a_team_admin_cannot_raise_the_tier(env):
+    store, audit, _ = env
+    before = _stored(store)
+    r = await _create({"tier": "enterprise"}, key=SRE_FREE)
+    assert r.status_code == 403 and "tier" in r.text.lower()
+    assert _stored(store) == before and audit.rows == []
+    r = await _create({}, key=SRE_FREE)
+    assert r.status_code == 201 and r.json()["tier"] == "free"
+    r = await _create({}, key=SRE)                         # an enterprise team admin
+    assert r.status_code == 201 and r.json()["tier"] == "enterprise"
+    assert (await _create({"tier": "free"}, key=SRE)).status_code == 403
+    assert (await _create({"tier": "enterprise"}, key=SRE)).status_code == 201
+
+
+async def test_a_team_admin_cannot_bind_a_user_with_a_global_per_user_limit(env):
+    store, audit, cfg = env
+    cfg["rate_limit"] = {"per_user": {"vip@acme.test": {"requests_per_minute": 1000}}}
+    before = _stored(store)
+    r = await _create({"user": "vip@acme.test"}, key=SRE)
+    assert r.status_code == 403
+    assert "vip@acme.test" not in r.text
+    assert _stored(store) == before and audit.rows == []
+    r = await _create({"tenant_id": "acme", "team": "payments", "user": "vip@acme.test"})
+    assert r.status_code == 201                            # an unbound admin may

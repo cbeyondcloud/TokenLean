@@ -33,8 +33,13 @@
 #                that user's, whatever X-User-ID says. (--user stays an alias of --tenant.)
 #   --label      a note that list shows (1-128 printable characters).
 #   --key-id     the key to revoke or rotate (16-64 lowercase hex characters).
+#   --insecure   allow a plain-http URL to another host (https, or http to this machine,
+#                otherwise). Set the key without echoing it or keeping it in shell history:
+#                  read -rs TOKENLEAN_ADMIN_KEY && export TOKENLEAN_ADMIN_KEY
 #
-# Key store: without --api this script writes ONLY the Secret Manager blob. issue/revoke first read the
+# Key store: without --api this script writes ONLY the Secret Manager blob, and issue/revoke
+# then need an explicit --backend blob: a proxy whose config sets key_store.backend: postgres
+# reads Postgres, which this script cannot detect (a blob write there would change nothing). issue/revoke first read the
 # deployed Cloud Run service (PROXY_SERVICE_NAME, default token-proxy; --region or
 # GCP_REGION, default asia-south1) and refuse when it validates keys against Postgres
 # (PROXY_KEYS_BACKEND=postgres, the commercial deploy) — use the admin console there.
@@ -71,6 +76,7 @@ BIND_USER=""
 LABEL=""
 KEY_ID=""
 API_URL=""
+INSECURE="false"
 PROJECT_ID=""
 SECRET_NAME="${PROXY_KEYS_SECRET_NAME:-token-proxy-api-keys}"
 BACKEND=""
@@ -96,6 +102,7 @@ while [[ $# -gt 0 ]]; do
     --label)   LABEL="$2";      shift 2 ;;
     --key-id)  KEY_ID="$2";     shift 2 ;;
     --api)     API_URL="$2";    shift 2 ;;
+    --insecure) INSECURE="true"; shift ;;
     --project) PROJECT_ID="$2"; shift 2 ;;
     --secret)  SECRET_NAME="$2"; shift 2 ;;
     --backend) BACKEND="$2";    shift 2 ;;
@@ -116,11 +123,17 @@ die_api() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 API_CODE=""
 API_BODY=""
 NL=$'\n'
+HDR_FILE=""
+# The header file holding the admin key is removed however the script ends.
+trap 'rm -f "${HDR_FILE:-}"' EXIT
+trap 'rm -f "${HDR_FILE:-}"; exit 130' INT
+trap 'rm -f "${HDR_FILE:-}"; exit 143' TERM
 api_request() {
   # api_request METHOD PATH [JSON]: sets API_CODE and API_BODY. The admin key goes to curl
   # in a mode-600 header file, removed at once, so it never appears on a command line.
   local method="$1" path="$2" body="${3:-}" hdr out
   hdr="$(mktemp)"
+  HDR_FILE="$hdr"
   chmod 600 "$hdr"
   printf 'Authorization: Bearer %s\n' "$TOKENLEAN_ADMIN_KEY" > "$hdr"
   local args=(-sS -X "$method" -H "@${hdr}" -H "Content-Type: application/json"
@@ -235,8 +248,25 @@ api_one_key() {
   fi
 }
 
+api_url_is_safe() {
+  # https anywhere; plain http only to this machine (the admin key would cross the network
+  # in clear text), unless --insecure says so.
+  case "$API_URL" in
+    https://*) return 0 ;;
+    http://localhost|http://localhost[:/]*|http://127.*|http://\[::1\]*) return 0 ;;
+  esac
+  return 1
+}
+
 if [[ -n "$API_URL" ]]; then
   # Checked before anything is sent; the key itself is never echoed.
+  if ! api_url_is_safe; then
+    if [[ "$INSECURE" != "true" ]]; then
+      die_api "${API_URL} is not https: the admin key would cross the network in clear text. \
+Use https, or pass --insecure if this link is private."
+    fi
+    warn "--insecure: sending the admin key over plain http to ${API_URL}"
+  fi
   case "$COMMAND" in
     issue)         [[ -n "${TENANT_ID:-$USER_ID}" ]] || die_api "--tenant is required for issue" ;;
     revoke|rotate) [[ -n "$KEY_ID" ]] || die_api "--key-id is required for ${COMMAND} in admin \
@@ -314,16 +344,26 @@ print((value or 'blob').strip().lower())
 }
 
 require_blob_backend() {
-  local backend="$BACKEND"
-  if [[ -z "$backend" ]]; then
-    backend=$(detect_backend) || die "Could not read Cloud Run service '${SERVICE_NAME}' in ${REGION} \
-(project ${PROJECT_ID}) to see which key store it uses. If it validates keys against the \
-Secret Manager blob, re-run with --backend blob; otherwise pass --region or set PROXY_SERVICE_NAME."
+  # This script writes only the Secret Manager blob. A proxy whose config sets
+  # key_store.backend: postgres reads the proxy_keys table instead, and nothing here can see
+  # that setting: so a blob write needs an explicit --backend blob.
+  if [[ -z "$BACKEND" ]]; then
+    die "This script writes only the Secret Manager blob and cannot see whether the proxy \
+validates keys against a config-selected Postgres store (key_store.backend: postgres), where a \
+blob write would change nothing the proxy reads. Use the admin API (--api URL, or set \
+TOKENLEAN_ADMIN_URL), or re-run with --backend blob to confirm the proxy uses the blob store."
   fi
-  if [[ "$backend" == "postgres" ]]; then
+  if [[ "$BACKEND" == "postgres" ]]; then
+    die "--backend postgres: this script cannot write the Postgres key store. Use the admin API \
+(--api URL) instead."
+  fi
+  warn "--backend blob: writing the Secret Manager blob. If the proxy's config sets \
+key_store.backend: postgres, this changes nothing it reads; use --api URL there."
+  local detected
+  if detected=$(detect_backend) && [[ "$detected" == "postgres" ]]; then
     die "'${SERVICE_NAME}' validates keys against Postgres (PROXY_KEYS_BACKEND=postgres). This \
 script only writes the Secret Manager blob, so it would change nothing the proxy reads. Issue and \
-revoke keys from the admin console instead."
+revoke keys through the admin API (--api URL) or the admin console instead."
   fi
 }
 

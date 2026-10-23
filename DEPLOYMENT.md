@@ -183,7 +183,7 @@ gcloud redis instances import gs://<bucket>/backups/redis-xxx.rdb \
 | `gcp-deploy.sh --skip-infra` | Service-only redeploy | Code/config changes only |
 | `start-gcp.sh` | Start Cloud SQL | Resume after pause |
 | `post-deploy-check.sh` | Verify all services | After deploy OR before testing |
-| `issue-key.sh issue --user` | Issue a proxy API key to a developer | After deploy, for each developer/team |
+| `issue-key.sh issue --user` | Issue a proxy API key to a developer (add `--backend blob`, or use `--api URL` — see the script's header) | After deploy, for each developer/team |
 | `issue-key.sh revoke --user` | Revoke a developer's proxy key | Offboarding or key rotation |
 | `issue-key.sh list` | List all key holders | Audit / access review |
 
@@ -516,13 +516,13 @@ The script outputs:
 6. **Issue developer API keys:**
    ```bash
    # Issue a key for a developer or team
-   ./scripts/issue-key.sh issue --user alice@example.com
+   ./scripts/issue-key.sh issue --user alice@example.com --backend blob
 
    # List all current key holders
    ./scripts/issue-key.sh list
 
    # Revoke a user's key(s)
-   ./scripts/issue-key.sh revoke --user alice@example.com
+   ./scripts/issue-key.sh revoke --user alice@example.com --backend blob
    ```
    Keys are stored as SHA-256 hashes in Secret Manager (`token-proxy-api-keys`). Developers receive only the raw key — never LLM provider keys.
 
@@ -537,7 +537,7 @@ The script outputs:
      --region=asia-south1 --format='value(status.url)')
 
    # Issue a test key if needed
-   TEST_KEY=$(./scripts/issue-key.sh issue --user test@example.com | grep -o 'Key: [^[:space:]]*' | cut -d' ' -f2)
+   TEST_KEY=$(./scripts/issue-key.sh issue --user test@example.com --backend blob | grep -o 'Key: [^[:space:]]*' | cut -d' ' -f2)
 
    # Run the benchmark against the deployed proxy
    python examples/benchmark/run_benchmark.py \
@@ -623,9 +623,9 @@ is why a local key returns `401` on the deployed proxy and vice-versa.
 in `token-proxy-api-keys`, and prints the raw key **once**:
 
 ```bash
-./scripts/issue-key.sh issue  --user <user-id> --project <GCP_PROJECT_ID>
+./scripts/issue-key.sh issue  --user <user-id> --backend blob --project <GCP_PROJECT_ID>
 ./scripts/issue-key.sh list                    --project <GCP_PROJECT_ID>   # who holds keys
-./scripts/issue-key.sh revoke --user <user-id> --project <GCP_PROJECT_ID>
+./scripts/issue-key.sh revoke --user <user-id> --backend blob --project <GCP_PROJECT_ID>
 ```
 
 - On the **first** `gcp-deploy.sh` run, if the secret has no version, an `admin`
@@ -700,7 +700,7 @@ bash scripts/local/build-local.sh --promptfoo
   - **GCP:** you must supply a **GCP-issued** key (local keys won't authenticate —
     see [Proxy API Keys](#proxy-api-keys-local-vs-gcp)):
     ```bash
-    export PROXY_API_KEY=$(./scripts/issue-key.sh issue --user promptfoo \
+    export PROXY_API_KEY=$(./scripts/issue-key.sh issue --user promptfoo --backend blob \
       --project <GCP_PROJECT_ID> | grep -o 'Key: [^[:space:]]*' | cut -d' ' -f2)
     ./scripts/gcp/gcp-deploy.sh --skip-infra --promptfoo
     ```
@@ -1081,7 +1081,7 @@ source .env.gcp && ./scripts/gcp/gcp-deploy.sh
 source .env.gcp && ./scripts/gcp/post-deploy-check.sh
 
 # 6. Issue a proxy API key for your first developer
-./scripts/issue-key.sh issue --user YOUR_EMAIL --project YOUR_PROJECT_ID
+./scripts/issue-key.sh issue --user YOUR_EMAIL --backend blob --project YOUR_PROJECT_ID
 
 # 7. Test the proxy
 curl -H "Authorization: Bearer YOUR_PROXY_KEY" \

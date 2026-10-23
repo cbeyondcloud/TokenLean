@@ -4,6 +4,7 @@
       backend: blob            # blob (default) | postgres
       refresh_seconds: 5       # postgres: each replica re-reads every key this often (min 5)
       max_stale_seconds: 300   # postgres: refuse every key (503) after this long unrefreshed
+                               # (0 = never; else at least twice refresh_seconds)
 
 ``blob`` is the local JSON file / Secret Manager store, exactly as before: an absent section
 means it. ``postgres`` validates against the ``proxy_keys`` table (auth/pg_key_store.py),
@@ -54,8 +55,9 @@ def key_store_settings(config: Any) -> Dict[str, Any]:
         raise ValueError(f"key_store.backend must be one of {', '.join(BACKENDS)}")
     refresh = max(MIN_REFRESH_SECONDS, int(_number(section, "refresh_seconds")))
     max_stale = int(_number(section, "max_stale_seconds"))
-    if max_stale and max_stale < refresh:
-        raise ValueError("key_store.max_stale_seconds must be 0 or at least refresh_seconds")
+    if max_stale and max_stale < 2 * refresh:
+        raise ValueError("key_store.max_stale_seconds must be 0 or at least twice "
+                         "refresh_seconds (one failed refresh must not refuse every key)")
     return {"backend": backend.strip().lower(), "refresh_seconds": refresh,
             "max_stale_seconds": max_stale}
 

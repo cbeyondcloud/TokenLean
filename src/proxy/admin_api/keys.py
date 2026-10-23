@@ -68,9 +68,17 @@ def _engine_scope(scope: AdminScope) -> Dict[str, Optional[str]]:
     return {"tenant_id": None, "team": None}
 
 
-def _check_create(body: Dict[str, Any], scope: AdminScope) -> Dict[str, Any]:
+def _per_user_listed(config: Any, user: str) -> bool:
+    rate_limit = config.get("rate_limit") if isinstance(config, dict) else None
+    per_user = rate_limit.get("per_user") if isinstance(rate_limit, dict) else None
+    return isinstance(per_user, dict) and user in per_user
+
+
+def _check_create(body: Dict[str, Any], scope: AdminScope, config: Any = None) -> Dict[str, Any]:
     """The create_key arguments from a request body, or a 422 naming the first bad field, or
-    a 403 when a team-bound admin reaches outside its team."""
+    a 403 when a team-bound admin reaches outside its team: another tenant or team, a trust
+    flag, a tier other than its own (the tier selects the rate card, quota and limits), or a
+    user listed in the global rate_limit.per_user (the binding would select that limit)."""
     unknown = sorted(k for k in body if k not in CREATE_FIELDS)
     if unknown:
         raise field_error(unknown[0], f"unknown field; allowed: {', '.join(CREATE_FIELDS)}")
@@ -100,7 +108,13 @@ def _check_create(body: Dict[str, Any], scope: AdminScope) -> Dict[str, Any]:
         if body.get("admin") or body.get("gateway"):
             raise HTTPException(status_code=403, detail=(
                 "A team-bound admin key cannot issue admin or gateway keys."))
-        tenant, team = scope.caller_tenant, scope.team
+        if "tier" in body and body["tier"] != scope.caller_tier:
+            raise HTTPException(status_code=403, detail=(
+                "A team-bound admin key issues keys of its own tier only."))
+        if user is not None and _per_user_listed(config, user):
+            raise HTTPException(status_code=403, detail=(
+                "A team-bound admin key cannot bind this user: ask an unbound admin."))
+        tenant, team, tier = scope.caller_tenant, scope.team, scope.caller_tier
     elif tenant is None:
         raise field_error("tenant_id", "required: the tenant the key belongs to")
     return {"tenant_id": tenant, "tier": tier, "admin": bool(body.get("admin")),
@@ -110,7 +124,7 @@ def _check_create(body: Dict[str, Any], scope: AdminScope) -> Dict[str, Any]:
 
 
 async def create(body: Dict[str, Any], scope: AdminScope, audit_logger, config) -> Dict:
-    args = _check_create(body, scope)
+    args = _check_create(body, scope, config)
     ensure_auditable(audit_logger, config)
     tenant = args.pop("tenant_id")
     tier = args.pop("tier")

@@ -33,6 +33,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     printf '%s' "${args[$((i + 1))]}" > "$FAKE_SENT"
   fi
 done
+if [[ -n "${FAKE_CURL_EXIT:-}" ]]; then exit "$FAKE_CURL_EXIT"; fi
 printf '%s\n%s' "$FAKE_BODY" "$FAKE_STATUS"
 '''
 
@@ -54,7 +55,8 @@ def sandbox(tmp_path):
     return tmp_path
 
 
-def _run(root, *args, status=200, body=None, admin_key=ADMIN_KEY, url_env=None):
+def _run(root, *args, status=200, body=None, admin_key=ADMIN_KEY, url_env=None,
+         curl_exit=None):
     files = {n: root / f"{n}.txt" for n in ("log", "headers", "sent", "gcloud")}
     for f in files.values():
         f.unlink(missing_ok=True)
@@ -62,7 +64,11 @@ def _run(root, *args, status=200, body=None, admin_key=ADMIN_KEY, url_env=None):
            "PATH": str(root / "fakebin") + os.pathsep + os.environ.get("PATH", ""),
            "FAKE_LOG": files["log"].as_posix(), "FAKE_HEADERS": files["headers"].as_posix(),
            "FAKE_SENT": files["sent"].as_posix(), "GCLOUD_LOG": files["gcloud"].as_posix(),
-           "FAKE_STATUS": str(status), "FAKE_BODY": json.dumps(body or {})}
+           "FAKE_STATUS": str(status), "FAKE_BODY": json.dumps(body or {}),
+           "TMPDIR": (root / "tmp").as_posix()}
+    (root / "tmp").mkdir(exist_ok=True)
+    if curl_exit is not None:
+        env["FAKE_CURL_EXIT"] = str(curl_exit)
     env.pop("TOKENLEAN_ADMIN_URL", None)
     env.pop("TOKENLEAN_ADMIN_KEY", None)
     if admin_key is not None:
@@ -158,3 +164,30 @@ def test_rotate_without_the_api_says_so(sandbox):
     r, seen = _run(sandbox, "rotate", "--key-id", "0123456789abcdef", "--project", "fake-p")
     assert r.returncode != 0 and "--api" in r.stdout + r.stderr
     assert seen["gcloud"] is None
+
+
+
+# ── independent review m9 ──
+
+@pytest.mark.parametrize("curl_exit", [None, 7])
+def test_the_header_file_is_removed_whatever_happens(sandbox, curl_exit):
+    r, _seen = _run(sandbox, "list", "--api", "https://p.example.test",
+                    body={"keys": [], "count": 0}, curl_exit=curl_exit)
+    assert (r.returncode == 0) == (curl_exit is None)
+    assert list((sandbox / "tmp").iterdir()) == []
+
+
+def test_plain_http_to_another_host_is_refused_without_insecure(sandbox):
+    r, seen = _run(sandbox, "list", "--api", "http://proxy.example.test")
+    assert r.returncode != 0 and "--insecure" in r.stdout + r.stderr
+    assert seen["log"] is None
+    r, seen = _run(sandbox, "list", "--api", "http://proxy.example.test", "--insecure",
+                   body={"keys": [], "count": 0})
+    assert r.returncode == 0 and "WARN" in r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:4000", "http://localhost:4000",
+                                 "http://[::1]:4000"])
+def test_plain_http_to_this_machine_is_allowed(sandbox, url):
+    r, _seen = _run(sandbox, "list", "--api", url, body={"keys": [], "count": 0})
+    assert r.returncode == 0, r.stdout + r.stderr

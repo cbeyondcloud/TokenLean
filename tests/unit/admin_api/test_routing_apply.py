@@ -53,14 +53,14 @@ def test_a_row_reaching_a_protected_group_is_refused_and_the_old_one_kept():
 async def test_sync_once_applies_only_a_new_version(monkeypatch):
     fetched = []
 
-    async def current_version(pool):
-        return 1
+    async def current_head(pool):
+        return 1, "s1"
 
     async def get_version(pool, version):
         fetched.append(version)
         return dict(ROW1)
 
-    monkeypatch.setattr(routing, "current_version", current_version)
+    monkeypatch.setattr(routing, "current_head", current_head)
     monkeypatch.setattr(routing, "get_version", get_version)
     assert await routing.sync_once(object()) is True
     assert await routing.sync_once(object()) is True
@@ -75,15 +75,15 @@ async def test_the_poller_waits_for_the_database_then_follows_the_store(monkeypa
     async def ensure_schema(p):
         calls.append("schema")
 
-    async def current_version(p):
+    async def current_head(p):
         calls.append("version")
-        return versions["latest"]
+        return versions["latest"], f"s{versions['latest']}"
 
     async def get_version(p, v):
-        return {**ROW1, "version": v}
+        return {**ROW1, "version": v, "fragment_sha256": f"s{v}"}
 
     monkeypatch.setattr(routing, "ensure_schema", ensure_schema)
-    monkeypatch.setattr(routing, "current_version", current_version)
+    monkeypatch.setattr(routing, "current_head", current_head)
     monkeypatch.setattr(routing, "get_version", get_version)
     monkeypatch.setattr(routing, "poll_seconds", lambda cfg: 0.01)
     task = asyncio.create_task(routing.run_poller(lambda: pool["value"], lambda: {}))
@@ -108,28 +108,28 @@ def test_poll_seconds_reads_the_config_with_a_floor():
 
 
 async def test_sync_never_steps_back_over_a_newer_local_apply(monkeypatch):
-    async def current_version(pool):
-        return 1
+    async def current_head(pool):
+        return 1, "s1"
 
     async def get_version(pool, version):
         routing.apply_row({**ROW1, "version": 2,              # a PUT landed meanwhile
                            "fragment": {"groups": {"G6_routing": {"tiers": {"simple": ["c"]}}}}})
         return dict(ROW1)
 
-    monkeypatch.setattr(routing, "current_version", current_version)
+    monkeypatch.setattr(routing, "current_head", current_head)
     monkeypatch.setattr(routing, "get_version", get_version)
     await routing.sync_once(object())
     assert routing.applied_version() == 2 and _tiers() == {"simple": ["c"]}
 
 
 async def test_a_refused_version_is_logged_once(monkeypatch, caplog):
-    async def current_version(pool):
-        return 2
+    async def current_head(pool):
+        return 2, "s2"
 
     async def get_version(pool, version):
         return dict(BAD)
 
-    monkeypatch.setattr(routing, "current_version", current_version)
+    monkeypatch.setattr(routing, "current_head", current_head)
     monkeypatch.setattr(routing, "get_version", get_version)
     for _ in range(3):
         assert await routing.sync_once(object()) is False
@@ -155,3 +155,43 @@ async def test_a_failed_startup_sync_shows_on_health(monkeypatch):
     assert "routing_overlay" in main._db_not_wired()
     routing._sync_ok()
     assert "routing_overlay" not in main._db_not_wired()
+
+
+
+async def test_any_error_validating_a_stored_row_is_a_refusal_logged_once(monkeypatch, caplog):
+    async def current_head(pool):
+        return 3, "s3"
+
+    async def get_version(pool, version):
+        return {**ROW1, "version": 3, "fragment_sha256": "s3"}
+
+    def explode(fragment, base=None):
+        raise OverflowError("int too large to convert to float")
+
+    monkeypatch.setattr(routing, "current_head", current_head)
+    monkeypatch.setattr(routing, "get_version", get_version)
+    monkeypatch.setattr(routing, "validate_fragment", explode)
+    for _ in range(3):
+        assert await routing.sync_once(object()) is False      # never raises
+    assert sum("refused" in rec.getMessage() for rec in caplog.records) == 1
+    assert routing.applied_version() == 0
+
+
+async def test_the_same_version_number_with_another_fragment_is_reapplied(monkeypatch):
+    rows = {"sha": "s1", "fragment": ROW1["fragment"]}
+
+    async def current_head(pool):
+        return 1, rows["sha"]
+
+    async def get_version(pool, version):
+        return {**ROW1, "fragment": rows["fragment"], "fragment_sha256": rows["sha"]}
+
+    monkeypatch.setattr(routing, "current_head", current_head)
+    monkeypatch.setattr(routing, "get_version", get_version)
+    await routing.sync_once(object())
+    assert _tiers() == {"simple": ["b"]}
+    # Restored from a backup: version 1 again, but a different fragment.
+    rows.update(sha="s1-restored",
+                fragment={"groups": {"G6_routing": {"tiers": {"simple": ["z"]}}}})
+    await routing.sync_once(object())
+    assert _tiers() == {"simple": ["z"]}

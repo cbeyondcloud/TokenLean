@@ -160,3 +160,36 @@ def test_a_fragment_over_the_size_cap_is_refused():
 def test_touched_names_sections_tenants_and_teams_never_values():
     assert r.touched(GOOD) == {"sections": ["groups", "rate_limit", "teams", "tenants"],
                                "tenants": ["ACME-PRD-01"], "teams": ["payments", "search"]}
+
+
+
+@pytest.mark.parametrize("fragment,path", [
+    ({"groups": {"G6_routing": {"canary_pct": 10 ** 400}}}, "groups.G6_routing.canary_pct"),
+    ({"groups": {"G6_routing": {"max_escalation_cost_usd": 10 ** 400}}},
+     "groups.G6_routing.max_escalation_cost_usd"),
+    ({"rate_limit": {"per_team": {"payments": {"requests_per_minute": 10 ** 400}}}},
+     "rate_limit.per_team.payments.requests_per_minute"),
+    ({"teams": {"payments": {"monthly_spend_cap_usd": -(10 ** 400)}}},
+     "teams.payments.monthly_spend_cap_usd"),
+])
+def test_a_huge_integer_is_refused_with_its_path(fragment, path):
+    assert path in _errors(fragment)
+
+
+def test_a_huge_but_valid_integer_bound_is_accepted():
+    r.validate_fragment({"rate_limit": {"per_team": {"p": {"requests_per_hour": 10 ** 12}}}},
+                        BASE)
+
+
+@pytest.mark.parametrize("fragment,path", [
+    ({"groups": {"G6_routing": {"tiers": {"simple": ["gpt-4o\u0000"]}}}},
+     "groups.G6_routing.tiers.simple[0]"),
+    ({"groups": {"G6_routing": {"rules": [{"id": "x", "description": "a\ud800b",
+                                           "match": {"keywords": ["k"]},
+                                           "action": {"tier": "simple"}}]}}},
+     "groups.G6_routing.rules[0].description"),
+    ({"teams": {"pay\u0000ments": {"monthly_spend_cap_usd": 1}}}, "teams.pay\u0000ments"),
+])
+def test_nul_and_lone_surrogates_are_refused(fragment, path):
+    errs = _errors(fragment)
+    assert path in errs

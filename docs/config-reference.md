@@ -194,12 +194,15 @@ key_store:
 | Key | Default | Description |
 |---|---|---|
 | `backend` | `blob` | `blob`: the local JSON file (`LOCAL_PROXY_KEYS_FILE` / `STORAGE_BACKEND=local`) or the Secret Manager secret, exactly as before; an absent section means it. `postgres`: the `proxy_keys` table (needs `DATABASE_URL`), which has no size limit and serialises writers across replicas. On first wiring the blob's keys are copied in once, into an empty table only and never a revoked hash. Chosen at startup; changing it takes a restart. A value the proxy cannot use (a typo) refuses to start. |
-| `refresh_seconds` | `5` | `postgres`: how often each replica re-reads every key. A key revoked or rotated through one replica is refused **at once** by that replica and **within `refresh_seconds`** by every other. |
-| `max_stale_seconds` | `300` | `postgres`: a replica that has not managed to re-read the table for this long answers **503** to every key until it does, so a revocation is never honoured later than this, even while the database is unreachable. `0` keeps serving the last snapshot (the blob backends' behaviour). Must be `0` or at least `refresh_seconds`. |
+| `refresh_seconds` | `5` | `postgres`: how often each replica re-reads every key. A key revoked or rotated through one replica is refused **within `refresh_seconds`** by every replica — in the common case immediately by the replica that made the change (a full re-read already in flight there can briefly bring it back until the next one). |
+| `max_stale_seconds` | `300` | `postgres`: a replica that has not managed to re-read the table for this long answers **503** to every key until it does, so a revocation is never honoured later than this, even while the database is unreachable. `0` keeps serving the last snapshot (the blob backends' behaviour). Must be `0` or at least twice `refresh_seconds`. |
 
-With `postgres`, no key validates until the database is wired (requests get 503; the blob is not
-consulted, since a key revoked in Postgres may still be in it), and `/health` lists `key_store`
-under `not_wired` meanwhile. The blob backends are unchanged: a revocation reaches other replicas
+With `postgres`, the proxy refuses to start when `DATABASE_URL` is not set; no key validates until
+the database is wired (requests get 503; the blob is not consulted, since a key revoked in Postgres
+may still be in it), and `/health` lists `key_store` under `not_wired` meanwhile. **The blob
+backends do not serialise writers across processes**: with more than one replica or worker, two key
+writes at the same moment (through `/admin/keys` on different replicas) can lose one of them; use
+`postgres` there. The blob backends are unchanged: a revocation reaches other replicas
 within `KEY_FILE_CHECK_SECONDS` (local file, default 1 s) or `KEY_SECRET_CHECK_SECONDS` (Secret
 Manager, default 5 s), with `KEY_CACHE_TTL_SECONDS` (300 s) as the backstop. A host that installs
 its own Postgres store (`PROXY_KEYS_BACKEND=postgres`, the commercial deploy) keeps `backend: blob`
@@ -211,9 +214,11 @@ destructive).
 Admin proxy keys only (the `/admin/tool-governance` rule). An admin key **with no team binding**
 manages every tenant's keys; an admin key **bound to a team** manages only its own team's keys of
 its own tenant (owner decision 82's scoping): its listing is that team's whatever the query says,
-a create naming another tenant or team, asking for `admin` / `gateway`, or binding a `user` who
-already holds a key of the tenant outside that team (another team's or a tenant-level key) is
-refused (403), and another team's key is "not found" (404). Keys are named by their **`key_id`**, the first 16 hex
+a create naming another tenant or team, asking for `admin` / `gateway` or a `tier` other than its
+own (it defaults to its own: the tier selects the rate card, quota and limits), binding a `user`
+who already holds a key of the tenant outside that team (another team's or a tenant-level key), or
+binding a `user` listed in `rate_limit.per_user` (a global map: the binding would select that limit;
+an unbound admin key may) is refused (403), and another team's key is "not found" (404). Keys are named by their **`key_id`**, the first 16 hex
 characters of the key's sha256 (a longer prefix up to the whole hash also works). The raw key is in
 the response **exactly once** — on create and on rotate, with `Cache-Control: no-store` — and the
 store keeps only its hash; a listing shows neither.
@@ -237,7 +242,10 @@ to a team-bound key. Every change writes one `audit_events` row (`proxy_key.crea
 `proxy_key.revoked`, `proxy_key.rotated`) for the key's tenant, `user_id` = the actor
 `admin-key:<tenant>[:team=<team>]:key=<key_id>`, `details` = the key's ids and binding — never
 the key or its hash. `scripts/issue-key.sh --api URL` drives this API (the admin key from
-`TOKENLEAN_ADMIN_KEY`, never the command line).
+`TOKENLEAN_ADMIN_KEY`, never the command line: set it with `read -rs TOKENLEAN_ADMIN_KEY`; a
+plain-http URL to another host needs `--insecure`). Without `--api` the script writes only the
+Secret Manager blob, and `issue` / `revoke` then need an explicit `--backend blob`: the script cannot
+see `key_store.backend: postgres` in the proxy's config.
 
 | Key | Default | Description |
 |---|---|---|
@@ -278,7 +286,8 @@ matching `params: {x_agentic_classification: [...]}`. Team limits are `monthly_s
 **Validation.** A fragment is checked whole before anything is stored: types and ranges, models
 offered by a configured provider (`providers[].models` or `model_prefixes`), provider names, rule
 ids unique, regex patterns compiled and free of nested repeats, team names and tenant ids, no
-nulls, at most 256 KiB. **Refused at any depth**: the protected groups a team overlay can never
+nulls, no NUL character or lone surrogate in any key or string, every number within ±10^15, at most
+256 KiB. **Refused at any depth**: the protected groups a team overlay can never
 change either — G00 (rate limiting), G17 (loop and budget control), G29–G32 (trust & safety) —
 under any spelling of their key; every other group; any section or key not listed above (so
 `rate_limit` beyond `per_team`, `providers`, `billing`, the judge / RouteLLM / Jev URLs, which decide
@@ -291,8 +300,9 @@ applied. Strings are taken literally: no `${VAR}` expansion.
 Postgres (`DATABASE_URL`), with who (`admin-key:<tenant>:key=<key_id>`), when and an optional
 comment; nothing is overwritten. A write holds a transaction advisory lock, and may name the version
 it expects to replace (`expected_version`; otherwise **409** with `current_version`), so two admins
-on different replicas cannot overwrite each other unseen. The replica that stored a version applies
-it at once; every other replica checks the latest version number every
+on different replicas cannot overwrite each other unseen. **A control plane should always send
+`expected_version`** (the `version` it last read): without it, a PUT replaces whatever is current. The replica that stored a version applies
+it at once; every other replica checks the latest version (number and fragment sha256) every
 `admin_api.routing.poll_seconds` (default `5`) and applies a new one when it sees it — so a change
 is live everywhere within that interval. Applying swaps the process config object: a request
 already in flight finishes with the config it started with. Each replica re-checks a stored

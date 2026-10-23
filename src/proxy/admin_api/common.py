@@ -40,6 +40,7 @@ class AdminScope:
     caller_tenant: str
     team: Optional[str]
     actor: str
+    caller_tier: str = "free"
 
     @property
     def team_bound(self) -> bool:
@@ -55,7 +56,8 @@ def admin_scope(tenant_metadata: Optional[dict], api_key: str) -> AdminScope:
     team = key_team(meta)
     caller_key = key_id(hashlib.sha256((api_key or "").encode("utf-8")).hexdigest())
     actor = f"admin-key:{tenant}" + (f":team={team}" if team else "") + f":key={caller_key}"
-    return AdminScope(caller_tenant=tenant, team=team, actor=actor)
+    tier = str(meta.get("tier") or "free")
+    return AdminScope(caller_tenant=tenant, team=team, actor=actor, caller_tier=tier)
 
 
 async def json_object(request) -> Dict[str, Any]:
