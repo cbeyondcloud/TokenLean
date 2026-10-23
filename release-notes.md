@@ -21,6 +21,33 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-23
+
+### Routing rules and team limits over HTTP: validated, versioned, applied without a restart — Enhancement (OSS)
+`/admin/routing` lets an admin set routing rules and team limits as an overlay on the config, the way an
+agentic control plane generates them: a tier -> model map for every tenant, one tenant or one team, G6
+routing rules, team spend caps and `rate_limit.per_team`. A fragment is checked whole first; an invalid one
+gets a 422 listing every problem's path and nothing is applied. Beyond per-team limits it can never touch
+rate limiting (G00), nor loop control (G17), trust & safety (G29-G32) or any other section. Every apply and rollback is a new
+Postgres version with who and when (`GET` current and history, `POST .../rollback`). The writing replica
+applies it at once, the others within `admin_api.routing.poll_seconds` (5 s); requests in flight are
+unaffected. Every change is audited. With nothing set, the config is exactly as before.
+- **OSS:** the endpoint, validation, version store and hot apply ship in the core proxy.
+
+### Proxy keys over HTTP, bound to a user and a team, with a Postgres key store — Enhancement (OSS)
+`/admin/keys` creates, lists, revokes and rotates proxy keys. The raw key is shown once (create, rotate);
+only its hash is stored, and a listing shows neither. A key can be bound to a team and to a user of its
+tenant: the user becomes the request's user and rate-limit principal, and `X-User-ID` cannot replace it.
+Admin keys only; an admin key bound to a team manages only its own team's keys. Every change is audited,
+and changes are refused while the audit log is not wired. `key_store.backend: postgres` validates keys
+against the `proxy_keys` table: a revoked key is refused within `refresh_seconds` (5 s) on every replica
+(usually at once on the one that revoked it), never later than `max_stale_seconds` (300 s); the proxy
+refuses to start with it and no `DATABASE_URL`. `issue-key.sh --api URL` drives the API. The blob store
+stays the default. **Changed:** without `--api`, `issue-key.sh issue` / `revoke` now need an explicit
+`--backend blob` (the script cannot see a config-selected Postgres store, where a blob write would change
+nothing); scripts that call it must add the flag (`gcp-deploy.sh` does).
+- **OSS:** the key API, user binding, Postgres key store selection and `issue-key.sh --api` ship in the core proxy.
+
 ## 2026-10-22
 
 ### Usage tags: attribute cost to a run, a step or an agent from allow-listed headers — Enhancement (OSS)

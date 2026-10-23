@@ -112,7 +112,7 @@ async def test_the_blob_import_skips_revoked_hashes(pool, monkeypatch):
     await pg_key_store.replace_all(pool, {"a": {"tenant_id": "A"}})
     await pg_key_store.replace_all(pool, {})
     from auth import api_key_manager as km
-    monkeypatch.setattr(km, "_load_full_store",
+    monkeypatch.setattr(km, "_load_blob_store",
                         lambda: {"a": {"tenant_id": "A"}, "b": {"tenant_id": "B"}})
     await pg_key_store.import_blob_store_once(pool)
     assert set(await pg_key_store.load_all(pool)) == {"b"}

@@ -3,7 +3,7 @@ import re
 import threading
 import logging
 import time
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import yaml
 from prometheus_client import Counter
@@ -17,6 +17,11 @@ CONFIG_RELOAD_FAILURES = Counter(
 )
 
 _config: Dict[str, Any] = {}
+# The runtime overlay (ST-10, admin_api/routing.py): an admin-managed fragment merged over the
+# loaded config, set through set_runtime_overlay. _base_config is the loaded config without
+# it; with no overlay, _config IS _base_config (the same object, exactly as before).
+_base_config: Optional[Dict[str, Any]] = None
+_runtime_overlay: Dict[str, Any] = {}
 _lock = threading.RLock()
 _RELOAD_INTERVAL = int(os.getenv("CONFIG_RELOAD_INTERVAL_SECONDS", "60"))
 # Steps applied to every freshly loaded config before it goes live (register_post_load).
@@ -214,7 +219,10 @@ def _refuse_a_shrunken_reload(new: Dict[str, Any]) -> None:
     without an error (no rate_limit means no rate limit or spend cap; no providers, no
     routing). The running config stays; removing a section on purpose takes a restart."""
     with _lock:
-        running = set(_config)
+        # Judged against the loaded file, not the runtime overlay: a section only the overlay
+        # adds is not "lost" by a file that never had it.
+        running = set(_base_config if _runtime_overlay and _base_config is not None
+                      else _config)
     dropped = sorted(running - set(new))
     if dropped:
         raise ValueError(f"the new config has no {', '.join(dropped)} section, which the "
@@ -223,7 +231,7 @@ def _refuse_a_shrunken_reload(new: Dict[str, Any]) -> None:
 
 
 def _load_once(reload: bool = False) -> Dict[str, Any]:
-    global _config
+    global _config, _base_config
     raw = (
         _load_from_gcs(os.getenv("CONFIG_GCS_BUCKET", ""),
                        os.getenv("CONFIG_GCS_BLOB", "config/config.yaml"))
@@ -251,7 +259,8 @@ def _load_once(reload: bool = False) -> Dict[str, Any]:
             logger.warning("Config post-load step %s failed: %s",
                            getattr(step, "__qualname__", step), exc)
     with _lock:
-        _config = raw
+        _base_config = raw
+        _config = deep_merge(raw, _runtime_overlay) if _runtime_overlay else raw
     logger.info("Config loaded successfully")
     return _config
 
@@ -292,6 +301,29 @@ def load_config(required: bool = False) -> Dict[str, Any]:
 def get_config() -> Dict[str, Any]:
     with _lock:
         return _config
+
+
+def get_base_config() -> Dict[str, Any]:
+    """The loaded config without the runtime overlay (what a fragment is validated against)."""
+    with _lock:
+        return _base_config if _base_config is not None else _config
+
+
+def set_runtime_overlay(overlay: Optional[Dict[str, Any]]) -> None:
+    """Make ``overlay`` the runtime overlay: merged over the loaded config with the
+    CONFIG_OVERLAYS rules (``deep_merge``), now and after every reload. The merged config is
+    a NEW object, so a request holding the previous one finishes with it. Its strings are
+    taken literally (no ${VAR} expansion). An empty overlay restores the loaded object."""
+    import copy
+    global _config, _base_config, _runtime_overlay
+    overlay = copy.deepcopy(overlay) if overlay else {}
+    with _lock:
+        if not overlay and not _runtime_overlay:
+            return                                   # nothing set, nothing to undo
+        if _base_config is None:
+            _base_config = _config
+        _runtime_overlay = overlay
+        _config = deep_merge(_base_config, overlay) if overlay else _base_config
 
 
 def get_group_config(group_key: str) -> Dict[str, Any]:

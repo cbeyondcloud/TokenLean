@@ -132,7 +132,7 @@ source .env.gcp
 ### Step 5: Issue Proxy API Keys
 
 ```bash
-./scripts/issue-key.sh issue --user developer@example.com
+./scripts/issue-key.sh issue --user developer@example.com --backend blob
 ```
 
 ### Optional: Prompt quality eval

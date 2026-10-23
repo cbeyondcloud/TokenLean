@@ -114,6 +114,21 @@ rate_limit:
 #         G5_cache: {cache_scope: tenant+model}
 #       proxy:
 #         default_model: gpt-4o-mini
+# Where proxy keys are validated (optional; absent = blob, as before). blob: the local key file
+# or the Secret Manager secret. postgres: the proxy_keys table (DATABASE_URL): each replica
+# re-reads it every refresh_seconds, so a key revoked through /admin/keys or any replica is
+# refused everywhere within that; a replica that cannot re-read for max_stale_seconds refuses
+# every key (503). Chosen at startup. See docs/config-reference.md "key_store".
+# key_store:
+#   backend: postgres
+#   refresh_seconds: 5
+#   max_stale_seconds: 300
+# The admin HTTP APIs (/admin/keys, /admin/routing): changes are refused while the audit log
+# is not wired, unless require_audit is false. See docs/config-reference.md "/admin/keys".
+# admin_api:
+#   require_audit: true
+#   routing:
+#     poll_seconds: 5          # replicas check for a newer /admin/routing version this often
 # WS25: periodic data-retention purge (default OFF — self-host keeps everything).
 # usage_days is clamped to a 400-day floor in code: usage_events is the billing
 # source of record and must outlive every invoice period.

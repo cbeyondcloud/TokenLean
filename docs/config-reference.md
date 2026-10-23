@@ -36,6 +36,8 @@ to fix, not a storage blip. Shipped profiles live in `config/profiles/` (e.g.
 | `proxy` | Port, log level, CORS, default model |
 | `providers` | LLM provider endpoints (keys in Secret Manager — not here) |
 | `rate_limit` | G0 request throttling + per-tier/per-tenant limits + optional monthly quota gate |
+| `key_store` | Where proxy keys are validated: the blob (file / Secret Manager, default) or Postgres |
+| `admin_api` | The admin HTTP APIs (`/admin/keys`, `/admin/routing`): audit requirement, routing overlay polling |
 | `retention` | Optional periodic purge of aged `audit_events` / `usage_events` / expired `cache_l2` (default OFF) |
 | `groups` | Per-group enable/disable + tuning parameters |
 | `savings` | Token-savings **estimate** tuning (reporting only — never billed) |
@@ -150,7 +152,7 @@ removed and any `user_id` is blanked); a key with
 no team binding keeps the whole-tenant view (an admin key, its cross-tenant view).
 
 Rotating keys: `rotate_tenant_keys_per_binding(tenant)` issues **one new key per binding** — the
-tenant's unbound keys and each team — each keeping its team, tier, trust flags and extra metadata
+tenant's unbound keys and each team, and within either each bound user (see "/admin/keys") — each keeping its team, user, tier, trust flags and extra metadata
 (the tenant's IP allowlist and any suspension carry to all), and revokes every old key in one
 store write. `rotate_tenant_keys(tenant)` keeps its single-key result for a tenant whose keys share
 one binding, and refuses, changing nothing, for a tenant with several.
@@ -179,6 +181,158 @@ teams:
 
 The `default` team never has settings, a cap or an overlay: a deployment that binds no key to a
 team and has no `teams:` block behaves exactly as before.
+
+### key_store — where proxy keys are validated
+
+```yaml
+key_store:
+  backend: blob            # blob (default) | postgres
+  refresh_seconds: 5       # postgres: each replica re-reads every key this often (min 5)
+  max_stale_seconds: 300   # postgres: refuse every key (503) after this long unrefreshed; 0 = never
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `backend` | `blob` | `blob`: the local JSON file (`LOCAL_PROXY_KEYS_FILE` / `STORAGE_BACKEND=local`) or the Secret Manager secret, exactly as before; an absent section means it. `postgres`: the `proxy_keys` table (needs `DATABASE_URL`), which has no size limit and serialises writers across replicas. On first wiring the blob's keys are copied in once, into an empty table only and never a revoked hash. Chosen at startup; changing it takes a restart. A value the proxy cannot use (a typo) refuses to start. |
+| `refresh_seconds` | `5` | `postgres`: how often each replica re-reads every key. A key revoked or rotated through one replica is refused **within `refresh_seconds`** by every replica — in the common case immediately by the replica that made the change (a full re-read already in flight there can briefly bring it back until the next one). |
+| `max_stale_seconds` | `300` | `postgres`: a replica that has not managed to re-read the table for this long answers **503** to every key until it does, so a revocation is never honoured later than this, even while the database is unreachable. `0` keeps serving the last snapshot (the blob backends' behaviour). Must be `0` or at least twice `refresh_seconds`. |
+
+With `postgres`, the proxy refuses to start when `DATABASE_URL` is not set; no key validates until
+the database is wired (requests get 503; the blob is not consulted, since a key revoked in Postgres
+may still be in it), and `/health` lists `key_store` under `not_wired` meanwhile. **The blob
+backends do not serialise writers across processes**: with more than one replica or worker, two key
+writes at the same moment (through `/admin/keys` on different replicas) can lose one of them; use
+`postgres` there. The blob backends are unchanged: a revocation reaches other replicas
+within `KEY_FILE_CHECK_SECONDS` (local file, default 1 s) or `KEY_SECRET_CHECK_SECONDS` (Secret
+Manager, default 5 s), with `KEY_CACHE_TTL_SECONDS` (300 s) as the backstop. A host that installs
+its own Postgres store (`PROXY_KEYS_BACKEND=postgres`, the commercial deploy) keeps `backend: blob`
+here. Tables: `infra/migrations/proxy_keys.sql` (down: `infra/migrations/down/proxy_keys.sql`,
+destructive).
+
+### /admin/keys — proxy keys over HTTP
+
+Admin proxy keys only (the `/admin/tool-governance` rule). An admin key **with no team binding**
+manages every tenant's keys; an admin key **bound to a team** manages only its own team's keys of
+its own tenant (owner decision 82's scoping): its listing is that team's whatever the query says,
+a create naming another tenant or team, asking for `admin` / `gateway` or a `tier` other than its
+own (it defaults to its own: the tier selects the rate card, quota and limits), binding a `user`
+who already holds a key of the tenant outside that team (another team's or a tenant-level key), or
+binding a `user` listed in `rate_limit.per_user` (a global map: the binding would select that limit;
+an unbound admin key may) is refused (403), and another team's key is "not found" (404). Keys are named by their **`key_id`**, the first 16 hex
+characters of the key's sha256 (a longer prefix up to the whole hash also works). The raw key is in
+the response **exactly once** — on create and on rotate, with `Cache-Control: no-store` — and the
+store keeps only its hash; a listing shows neither.
+
+| Method and path | Request | Success |
+|---|---|---|
+| `POST /admin/keys` | `{tenant_id, team?, user?, tier?, label?, admin?, gateway?}` — `tenant_id` required for an unbound admin key (a team-bound one defaults to its own tenant and team); `team` 1–64 of `A-Z a-z 0-9 . _ -`, not `default`; `user` 1–128 of `A-Z a-z 0-9 . _ @ + -`; `tier` `free` (default) or `enterprise`; `label` 1–128 printable ASCII; unknown fields refused | **201** `{key, key_id, tenant_id, team, user, tier, admin, gateway, suspended, label, created_at, notice}` |
+| `GET /admin/keys?tenant_id=&team=&user=` | optional filters | **200** `{keys: [{key_id, tenant_id, team, user, tier, admin, gateway, suspended, label, created_at}], count}` |
+| `DELETE /admin/keys/{key_id}` | — | **200** `{revoked: true, key_id, ...}` |
+| `POST /admin/keys/{key_id}/rotate` | — | **200** `{key, key_id, replaced_key_id, ...}`: a new key with the same tenant, team, user, tier, trust flags, label and extra metadata (and the tenant's IP allowlist and the key's suspension); the old key is revoked in the same store write |
+
+Errors: **401** no or invalid key; **403** not an admin key, or a team-bound admin key reaching
+outside its team; **404** no key with that id in the caller's scope (also a malformed id);
+**409** an id prefix that names more than one key; **413** a body over 1 MiB; **422** an invalid body,
+`{"detail": {"error": "invalid_request", "errors": [{"field", "message"}]}}`; **503** the key
+store is unavailable, or the audit log is not wired (below).
+
+A key bound to a **user** is that user: the request's `user_id` and G00 rate-limit principal
+(`rate_limit.per_user`), and an `X-User-ID` override does not apply to it, as no `X-Team` applies
+to a team-bound key. Every change writes one `audit_events` row (`proxy_key.created`,
+`proxy_key.revoked`, `proxy_key.rotated`) for the key's tenant, `user_id` = the actor
+`admin-key:<tenant>[:team=<team>]:key=<key_id>`, `details` = the key's ids and binding — never
+the key or its hash. `scripts/issue-key.sh --api URL` drives this API (the admin key from
+`TOKENLEAN_ADMIN_KEY`, never the command line: set it with `read -rs TOKENLEAN_ADMIN_KEY`; a
+plain-http URL to another host needs `--insecure`). Without `--api` the script writes only the
+Secret Manager blob, and `issue` / `revoke` then need an explicit `--backend blob`: the script cannot
+see `key_store.backend: postgres` in the proxy's config.
+
+| Key | Default | Description |
+|---|---|---|
+| `admin_api.require_audit` | `true` | Refuse admin changes (`/admin/keys`, `/admin/routing`) with **503** while the audit log is not wired (`DATABASE_URL` unset or the database not reached yet), so no change goes unrecorded. `false` allows them; the would-be audit row is then logged as a warning. A row that fails to write after the change is logged at ERROR with its content. |
+
+### /admin/routing — routing rules and team limits over HTTP
+
+An admin-managed **fragment** of this config — routing rules and team limits — set over HTTP,
+validated, versioned and applied without a restart. It is an overlay: deep-merged over the
+loaded config (this file, the params files and `CONFIG_OVERLAYS`) with the `CONFIG_OVERLAYS`
+rules (mappings merge key by key, a list or scalar replaces). It may hold only these paths, which
+are where the proxy already reads routing and team limits:
+
+```yaml
+groups:
+  G6_routing: {...}                    # routing for every tenant
+rate_limit:
+  per_team: {<team>: {requests_per_minute, requests_per_hour}}
+teams:
+  <team>: {monthly_spend_cap_usd, config: {groups: {G6_routing: {...}},
+                                           proxy: {default_model, fallback_request_model}}}
+tenants:
+  <tenant>:
+    groups: {G6_routing: {...}}        # one tenant's routing (tier -> model map, rules)
+    teams:  {<team>: {...}}            # one team of one tenant: same block as teams.<team>
+```
+
+`G6_routing` here may set `enabled`, `tiers`, `tiers_by_provider`, `rules`, `strategy`,
+`strategy_weights`, `canary_pct`, `on_unreachable_tier`, `on_unconfigured_model`,
+`allow_escalation_above_requested`, `max_escalation_cost_usd`, `cascade_confidence_threshold` and
+`expected_output_tokens_estimate`, with the meanings in "G6_routing" below. A tier -> model map per
+tenant is `tenants.<id>.groups.G6_routing.tiers`, per team
+`tenants.<id>.teams.<team>.config.groups.G6_routing.tiers`; a route chosen by a request header (for
+example a data classification an agent framework sends as `X-Agentic-Classification`) is a G6 rule
+matching `params: {x_agentic_classification: [...]}`. Team limits are `monthly_spend_cap_usd` (see
+"teams") and `rate_limit.per_team`.
+
+**Validation.** A fragment is checked whole before anything is stored: types and ranges, models
+offered by a configured provider (`providers[].models` or `model_prefixes`), provider names, rule
+ids unique, regex patterns compiled and free of nested repeats, team names and tenant ids, no
+nulls, no NUL character or lone surrogate in any key or string, every number within ±10^15, at most
+256 KiB. **Refused at any depth**: the protected groups a team overlay can never
+change either — G00 (rate limiting), G17 (loop and budget control), G29–G32 (trust & safety) —
+under any spelling of their key; every other group; any section or key not listed above (so
+`rate_limit` beyond `per_team`, `providers`, `billing`, the judge / RouteLLM / Jev URLs, which decide
+where prompt text is sent). An invalid fragment gets **422** listing every problem with its path —
+`{"detail": {"error": "invalid_fragment", "errors": [{"path": "groups.G6_routing.tiers.simple[0]",
+"message": "model 'x' is not offered by any configured provider"}]}}` — and nothing is stored or
+applied. Strings are taken literally: no `${VAR}` expansion.
+
+**Versions and hot apply.** Every apply and rollback is a new row of `routing_overlay_versions` in
+Postgres (`DATABASE_URL`), with who (`admin-key:<tenant>:key=<key_id>`), when and an optional
+comment; nothing is overwritten. A write holds a transaction advisory lock, and may name the version
+it expects to replace (`expected_version`; otherwise **409** with `current_version`), so two admins
+on different replicas cannot overwrite each other unseen. **A control plane should always send
+`expected_version`** (the `version` it last read): without it, a PUT replaces whatever is current. The replica that stored a version applies
+it at once; every other replica checks the latest version (number and fragment sha256) every
+`admin_api.routing.poll_seconds` (default `5`) and applies a new one when it sees it — so a change
+is live everywhere within that interval. Applying swaps the process config object: a request
+already in flight finishes with the config it started with. Each replica re-checks a stored
+fragment's shape before applying it and refuses (keeping its current version, with an error log)
+one that reaches a protected group (logged once). A replica that could not read or apply the latest
+version (the database down at startup, or a refused row) lists `routing_overlay` under `/health`'s
+`not_wired` until it can, since until then it serves without the admin-set routing and team limits.
+With no version stored, or the empty fragment, the config is
+the loaded config object itself — exactly as without this feature. Table:
+`infra/migrations/routing_overlay.sql` (down: `infra/migrations/down/routing_overlay.sql`).
+
+| Method and path | Request | Success |
+|---|---|---|
+| `GET /admin/routing` | — | **200** `{version, fragment, action, applied_by, applied_at, comment, source_version, fragment_sha256, replica_version}` (`version: 0`, `fragment: {}` when none; `replica_version` is the version this replica runs) |
+| `PUT /admin/routing` | `{fragment, expected_version?, comment?}` | **200** the new version, as above |
+| `GET /admin/routing/history?limit=50&before=<version>` | `limit` 1–200 | **200** `{versions: [...newest first], next_before}` |
+| `GET /admin/routing/versions/{version}` | — | **200** that version; **404** none |
+| `POST /admin/routing/rollback` | `{version, expected_version?, comment?}` — `version: 0` means no overlay | **200** a new version with that version's fragment (`action: rolled_back`, `source_version`), re-validated against today's config (**422** if it no longer is valid); **404** no such version |
+
+Admin keys **without a team binding** only: the fragment is one document for every tenant, so a
+team-bound admin key gets **403** (as does a non-admin key; **401** without a key). **503** when
+the database is not wired, the store does not answer, or (`admin_api.require_audit`) the audit log
+is not wired. Every change writes one `audit_events` row (`routing_overlay.applied` /
+`routing_overlay.rolled_back`) for the caller's tenant, with the version, the previous version, the
+rolled-back-to version, the fragment's sha256, the comment and what it reaches (sections, tenants,
+teams) — never its values.
+
+| Key | Default | Description |
+|---|---|---|
+| `admin_api.routing.poll_seconds` | `5` | How often each replica checks for a newer overlay version (minimum 1). Read at every check, so a hot reload changes it. |
 
 ### rate_limit extras
 

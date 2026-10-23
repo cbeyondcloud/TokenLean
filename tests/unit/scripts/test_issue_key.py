@@ -95,39 +95,43 @@ def _run(root, *args, backend="blob", access="ok", store=None, expect_gcloud=Tru
 
 def test_revoke_refuses_on_a_postgres_backend_and_writes_nothing(sandbox):
     r, written = _run(sandbox, "revoke", "--tenant", "ACME", backend="postgres",
-                      store={"h1": {"tenant_id": "ACME", "tier": "free"}})
+                      store={"h1": {"tenant_id": "ACME", "tier": "free"}}, expect_gcloud=False)
     assert r.returncode != 0
     assert "postgres" in (r.stdout + r.stderr).lower()
     assert written is None
 
 
 def test_issue_refuses_on_a_postgres_backend_and_writes_nothing(sandbox):
-    r, written = _run(sandbox, "issue", "--tenant", "ACME", backend="postgres")
+    r, written = _run(sandbox, "issue", "--tenant", "ACME", backend="postgres",
+                      expect_gcloud=False)
     assert r.returncode != 0
     assert written is None
 
 
 def test_revoke_on_the_blob_backend_removes_only_that_tenant(sandbox):
-    r, written = _run(sandbox, "revoke", "--tenant", "ACME", backend="blob",
+    r, written = _run(sandbox, "revoke", "--tenant", "ACME", "--backend", "blob", backend="blob",
                       store={"h1": {"tenant_id": "ACME"}, "h2": {"tenant_id": "OTHER"}})
     assert r.returncode == 0, r.stdout + r.stderr
     assert written == {"h2": {"tenant_id": "OTHER"}}
 
 
 def test_a_failed_read_aborts_instead_of_overwriting_the_store(sandbox):
-    r, written = _run(sandbox, "issue", "--tenant", "NEW", backend="blob", access="unavailable")
+    r, written = _run(sandbox, "issue", "--tenant", "NEW", "--backend", "blob", backend="blob",
+                      access="unavailable")
     assert r.returncode != 0
     assert written is None
 
 
 def test_first_issue_proceeds_when_the_secret_has_no_version_yet(sandbox):
-    r, written = _run(sandbox, "issue", "--tenant", "NEW", backend="blob", access="notfound")
+    r, written = _run(sandbox, "issue", "--tenant", "NEW", "--backend", "blob", backend="blob",
+                      access="notfound")
     assert r.returncode == 0, r.stdout + r.stderr
     assert [meta["tenant_id"] for meta in written.values()] == ["NEW"]
 
 
 def test_an_undetectable_backend_refuses_unless_told_it_is_blob(sandbox):
-    r, written = _run(sandbox, "issue", "--tenant", "NEW", backend="unknown")
+    r, written = _run(sandbox, "issue", "--tenant", "NEW", backend="unknown",
+                      expect_gcloud=False)
     assert r.returncode != 0 and "--backend blob" in (r.stdout + r.stderr)
     assert written is None
     r, written = _run(sandbox, "issue", "--tenant", "NEW", "--backend", "blob", backend="unknown")
@@ -136,14 +140,15 @@ def test_an_undetectable_backend_refuses_unless_told_it_is_blob(sandbox):
 
 
 def test_issue_binds_the_key_to_a_team(sandbox):
-    r, written = _run(sandbox, "issue", "--tenant", "ACME", "--team", "payments", backend="blob")
+    r, written = _run(sandbox, "issue", "--tenant", "ACME", "--team", "payments",
+                      "--backend", "blob", backend="blob")
     assert r.returncode == 0, r.stdout + r.stderr
     [meta] = written.values()
     assert meta["tenant_id"] == "ACME" and meta["team"] == "payments"
 
 
 def test_issue_without_a_team_writes_none(sandbox):
-    r, written = _run(sandbox, "issue", "--tenant", "ACME", backend="blob")
+    r, written = _run(sandbox, "issue", "--tenant", "ACME", "--backend", "blob", backend="blob")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "team" not in next(iter(written.values()))
 
@@ -185,3 +190,34 @@ def test_the_template_placeholder_is_refused_before_any_call(sandbox):
     r, calls = _run_with_env_file(sandbox, "GCP_PROJECT_ID=your-gcp-project-id\n")
     assert r.returncode != 0 and "placeholder" in r.stdout + r.stderr
     assert "--project" not in calls
+
+
+
+# ── a config-selected Postgres store cannot be seen from here (independent review I3) ──
+
+@pytest.mark.parametrize("command", [("issue", "--tenant", "ACME"),
+                                     ("revoke", "--tenant", "ACME")])
+def test_a_blob_write_needs_an_explicit_backend_blob(sandbox, command):
+    # Even when the Cloud Run service shows no PROXY_KEYS_BACKEND, the proxy may validate
+    # against Postgres through key_store.backend in its config, which this script cannot read.
+    r, written = _run(sandbox, *command, backend="blob",
+                      store={"h1": {"tenant_id": "ACME"}}, expect_gcloud=False)
+    out = r.stdout + r.stderr
+    assert r.returncode != 0
+    assert "--backend blob" in out and "--api" in out and "key_store.backend" in out
+    assert written is None
+
+
+def test_an_explicit_blob_write_warns_and_proceeds(sandbox):
+    r, written = _run(sandbox, "revoke", "--tenant", "ACME", "--backend", "blob", backend="blob",
+                      store={"h1": {"tenant_id": "ACME"}, "h2": {"tenant_id": "OTHER"}})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "key_store.backend" in r.stdout + r.stderr
+    assert written == {"h2": {"tenant_id": "OTHER"}}
+
+
+def test_an_explicit_blob_write_still_refuses_a_service_that_says_postgres(sandbox):
+    r, written = _run(sandbox, "issue", "--tenant", "ACME", "--backend", "blob",
+                      backend="postgres")
+    assert r.returncode != 0 and "postgres" in (r.stdout + r.stderr).lower()
+    assert written is None

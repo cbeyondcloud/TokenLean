@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 from datetime import datetime, timezone
@@ -33,24 +34,44 @@ _CACHE_LOADED_AT: float = 0.0
 # install it: the process-local write lock cannot serialise their writes.
 # Optional on_change(tenant_id) is called after every lifecycle write, so the other
 # instances can re-read that tenant now rather than at their next cache refresh.
+# Optional max_stale_seconds (ST-9): when the backend's refresher has not replaced the cache
+# for longer than this, no key validates (key_store_stale): a revocation made on another
+# instance is then never honoured later than this bound, even while the store is
+# unreachable. 0 (the default) keeps serving the last snapshot, as the blob backends do.
 _BACKEND_LOAD = None
 _BACKEND_PERSIST = None
 _BACKEND_TRANSACT = None
 _BACKEND_ON_CHANGE = None
+_BACKEND_MAX_STALE_SECONDS = 0.0
 
 
 def install_key_store_backend(load_fn, persist_fn, name: str = "external",
-                              transact_fn=None, on_change=None) -> None:
+                              transact_fn=None, on_change=None,
+                              max_stale_seconds: float = 0) -> None:
     global _BACKEND_LOAD, _BACKEND_PERSIST, _BACKEND_TRANSACT, _BACKEND_ON_CHANGE
+    global _BACKEND_MAX_STALE_SECONDS
     _BACKEND_LOAD, _BACKEND_PERSIST = load_fn, persist_fn
     _BACKEND_TRANSACT, _BACKEND_ON_CHANGE = transact_fn, on_change
+    _BACKEND_MAX_STALE_SECONDS = max(0.0, float(max_stale_seconds or 0))
     logger.info("key-store backend installed: %s", name)
 
 
 def reset_key_store_backend() -> None:
     """Restore the OSS blob backend (used by tests)."""
     global _BACKEND_LOAD, _BACKEND_PERSIST, _BACKEND_TRANSACT, _BACKEND_ON_CHANGE
+    global _BACKEND_MAX_STALE_SECONDS
     _BACKEND_LOAD = _BACKEND_PERSIST = _BACKEND_TRANSACT = _BACKEND_ON_CHANGE = None
+    _BACKEND_MAX_STALE_SECONDS = 0.0
+
+
+def key_store_stale() -> bool:
+    """Whether an installed backend's cache is older than its ``max_stale_seconds`` (its
+    refresher has not reached the store for that long). Then no key validates: a key revoked
+    elsewhere must not keep working past the bound. Always False for the blob backends and
+    for a backend installed without a bound."""
+    if _BACKEND_LOAD is None or _BACKEND_MAX_STALE_SECONDS <= 0:
+        return False
+    return time.monotonic() - _CACHE_LOADED_AT > _BACKEND_MAX_STALE_SECONDS
 
 
 def replace_cache(store: dict) -> None:
@@ -59,6 +80,14 @@ def replace_cache(store: dict) -> None:
     global _KEY_CACHE, _CACHE_LOADED_AT, _last_version_check
     _KEY_CACHE = store
     _CACHE_LOADED_AT = _last_version_check = time.monotonic()
+
+
+def clear_cache() -> None:
+    """Empty the validate cache and mark it never loaded (a backend that is not wired yet:
+    with a staleness bound, :func:`key_store_stale` then holds until a load replaces it)."""
+    global _KEY_CACHE, _CACHE_LOADED_AT
+    _KEY_CACHE = {}
+    _CACHE_LOADED_AT = float("-inf")
 
 
 def replace_tenants_in_cache(tenant_ids, entries: dict) -> None:
@@ -263,6 +292,10 @@ def validate_proxy_key(api_key: str) -> Tuple[bool, Optional[str], Optional[dict
     Developers never see LLM provider keys — only their proxy key.
     """
     now = time.monotonic()
+    if key_store_stale():
+        logger.warning("key store not refreshed for over %ss: refusing every key until it is",
+                       int(_BACKEND_MAX_STALE_SECONDS))
+        return False, None, None
 
     def _cold_or_stale() -> bool:
         return not _KEY_CACHE or (time.monotonic() - _CACHE_LOADED_AT) > _CACHE_TTL_SECONDS
@@ -340,6 +373,29 @@ def key_team(metadata: Optional[dict]) -> Optional[str]:
     if not isinstance(team, str) or not team.strip():
         return None
     return team.strip()
+
+
+def key_user(metadata: Optional[dict]) -> Optional[str]:
+    """The user a validated key is bound to (ST-9), or ``None``.
+
+    Set at issuance only (``create_key(user=...)``), never through ``extra``: the user is the
+    key's identity (main uses it as the request's user and rate-limit principal, and an
+    ``X-User-ID`` override cannot replace it). Read like ``key_team``: any non-blank string,
+    stripped. Legacy string-format keys have no user.
+    """
+    user = metadata.get("user") if isinstance(metadata, dict) else None
+    if not isinstance(user, str) or not user.strip():
+        return None
+    return user.strip()
+
+
+_USER_NAME = re.compile(r"[A-Za-z0-9._@+-]{1,128}")
+
+
+def valid_user_name(name) -> bool:
+    """Whether ``name`` may be bound to a proxy key: 1-128 of ``A-Z a-z 0-9 . _ @ + -`` (an
+    e-mail address or a directory id), safe in a log field and a Redis key segment."""
+    return isinstance(name, str) and bool(_USER_NAME.fullmatch(name))
 
 
 def is_suspended(metadata: Optional[dict]) -> bool:
@@ -539,6 +595,12 @@ def _load_full_store() -> dict:
             # fresh read; None here means the seam was misused — refuse to write blind.
             raise RuntimeError("key-store backend returned no data for a write path")
         return data
+    return _load_blob_store()
+
+
+def _load_blob_store() -> dict:
+    """Read the COMPLETE blob store (local file or Secret Manager), whatever backend is
+    installed: the one-time import into Postgres reads it while Postgres is being wired."""
     if _using_local_backend():
         if not _LOCAL_PROXY_KEYS_FILE:
             raise RuntimeError("LOCAL_PROXY_KEYS_FILE must be set for key-store writes")
@@ -587,7 +649,7 @@ def _persist_store(store: dict) -> None:
     _CACHE_LOADED_AT = time.monotonic()
 
 
-def _mutate_store(mutation, tenant_id: str):
+def _mutate_store(mutation, tenant_id: str, *, announce: bool = True):
     """Apply ``mutation(store) -> (changed, result)`` to the current full store, persist
     it when ``changed``, refresh the cache and return ``result``.
 
@@ -595,7 +657,8 @@ def _mutate_store(mutation, tenant_id: str):
     it, so a write from another instance is never overwritten by a stale snapshot. An
     exception from ``mutation`` propagates and nothing is written. The process lock is
     held on both paths, so one process never queues more than one write on the backend.
-    A successful call is then announced for ``tenant_id`` (see ``_announce_change``).
+    A successful call is then announced for ``tenant_id`` (see ``_announce_change``), unless
+    ``announce`` is False (the caller announces the tenant it learnt from the store).
     """
     global _KEY_CACHE, _CACHE_LOADED_AT
     with _STORE_WRITE_LOCK:
@@ -608,7 +671,8 @@ def _mutate_store(mutation, tenant_id: str):
             changed, result = mutation(store)
             if changed:
                 _persist_store(store)
-    _announce_change(tenant_id)
+    if announce:
+        _announce_change(tenant_id)
     return result
 
 
@@ -650,6 +714,8 @@ def create_key(
     *,
     gateway: bool = False,
     team: Optional[str] = None,
+    user: Optional[str] = None,
+    user_team_scope: Optional[str] = None,
 ) -> Tuple[str, str, dict]:
     """Create a proxy key for a tenant, persist it, refresh the cache.
 
@@ -662,6 +728,11 @@ def create_key(
     ``admin`` it is a trust flag, so it is reserved in ``extra`` and set only here.
     ``team`` binds the key to a team of the tenant (see ``key_team``): 1-64 characters of
     ``A-Z a-z 0-9 . _ -``, not ``default``. Reserved in ``extra`` for the same reason.
+    ``user`` binds the key to a user (see ``key_user``): 1-128 characters of
+    ``A-Z a-z 0-9 . _ @ + -``. Reserved in ``extra`` too. ``user_team_scope`` (a
+    team-bound admin issuing the key) refuses, with :class:`KeyScopeError` and nothing
+    written, a ``user`` who already holds a key of this tenant outside that team (another
+    team's, or a tenant-level one): a team's admin must not take another team's user.
     """
     from tenancy.teams import valid_team_name
 
@@ -670,13 +741,16 @@ def create_key(
         raise ValueError("tenant_id is required")
     if team is not None and not valid_team_name(team):
         raise ValueError("team must be 1-64 characters of A-Z a-z 0-9 . _ - and not 'default'")
+    if user is not None and not valid_user_name(user):
+        raise ValueError("user must be 1-128 characters of A-Z a-z 0-9 . _ @ + -")
     raw = raw_key or f"{_KEY_PREFIX}{secrets.token_hex(24)}"
     key_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     metadata: dict = {}
     if isinstance(extra, dict):
         metadata.update({k: v for k, v in extra.items()
                          if k not in ("tenant_id", "tier", "created_at", "admin", "suspended",
-                                      "contract_inactive", "ip_allowlist", "gateway", "team")})
+                                      "contract_inactive", "ip_allowlist", "gateway", "team",
+                                      "user")})
     metadata.update({
         "tenant_id": tenant_id,
         "tier": (tier or "free").strip().lower(),
@@ -688,10 +762,17 @@ def create_key(
         metadata["gateway"] = True
     if team is not None:
         metadata["team"] = team
+    if user is not None:
+        metadata["user"] = user
 
     def add(store):
         if key_hash in store:
             raise ValueError("key already exists")
+        if user is not None and user_team_scope is not None:
+            for entry in store.values():
+                if (isinstance(entry, dict) and entry.get("tenant_id") == tenant_id
+                        and key_user(entry) == user and key_team(entry) != user_team_scope):
+                    raise KeyScopeError("that user holds a key of this tenant outside the team")
         # The tenant's source-IP restriction applies to every key it holds: a key issued
         # after the CIDRs were set would otherwise be an unrestricted way in.
         cidrs = _tenant_allowlist(store, tenant_id)
@@ -860,9 +941,11 @@ def _rotated_key(newest: dict, old: dict, tenant_id: str) -> Tuple[str, str, dic
 
 
 def _rotate(tenant_id: str, *, single: bool) -> Tuple[List[Tuple[str, str, dict]], int]:
-    """One new key per binding (unbound first, then teams by name), every old key revoked,
-    in ONE atomic store write. ``single``: refuse, writing nothing, when the tenant's keys
-    span more than one binding."""
+    """One new key per binding (unbound first, then teams by name; within each, keys bound
+    to no user first, then users by name), every old key revoked, in ONE atomic store write.
+    A binding is the key's team and user (ST-9): a team's users each keep a key of their
+    own. ``single``: refuse, writing nothing, when the tenant's keys span more than one
+    binding."""
     tenant_id = (tenant_id or "").strip()
     if not tenant_id:
         raise ValueError("tenant_id is required")
@@ -876,15 +959,19 @@ def _rotate(tenant_id: str, *, single: bool) -> Tuple[List[Tuple[str, str, dict]
             raise ValueError("tenant has no keys to rotate")
         bindings: dict = {}
         for entry in old.values():
-            bindings.setdefault(key_team(entry), []).append(entry)
+            bindings.setdefault((key_team(entry), key_user(entry)), []).append(entry)
         if single and len(bindings) > 1:
             raise ValueError(
-                f"tenant has keys for {len(bindings)} bindings (teams / unbound); "
+                f"tenant has keys for {len(bindings)} bindings (teams / users / unbound); "
                 "rotating them would issue one new key each - use "
                 "rotate_tenant_keys_per_binding")
         issued = []
-        for team in sorted(bindings, key=lambda t: (t is not None, t or "")):
-            newest = max(bindings[team], key=lambda e: e.get("created_at") or "")
+        def order(binding):
+            team, user = binding
+            return (team is not None, team or "", user is not None, user or "")
+
+        for binding in sorted(bindings, key=order):
+            newest = max(bindings[binding], key=lambda e: e.get("created_at") or "")
             issued.append(_rotated_key(newest, old, tenant_id))
         for h in old:
             del store[h]
@@ -918,13 +1005,13 @@ def rotate_tenant_keys(tenant_id: str) -> Tuple[str, str, dict, int]:
 
 def rotate_tenant_keys_per_binding(tenant_id: str) -> Tuple[List[Tuple[str, str, dict]], int]:
     """Atomically issue one fresh key per binding of a tenant — its unbound keys, and each
-    team — and revoke ALL its existing keys (ST-1). Each new key takes the tier, extra
-    metadata, trust flags and team of the newest old key of its binding; the tenant's IP
-    allowlist and any suspension carry to every new key.
+    team; within either, each bound user (ST-9) — and revoke ALL its existing keys (ST-1).
+    Each new key takes the tier, extra metadata, trust flags, team and user of the newest old
+    key of its binding; the tenant's IP allowlist and any suspension carry to every new key.
 
     Returns ``([(raw_key, key_hash, metadata), ...], revoked_count)``, unbound first, then
-    teams by name. Each raw key is returned exactly once. Raises ValueError when the tenant
-    has no keys.
+    teams by name (keys with no user before users by name). Each raw key is returned exactly
+    once. Raises ValueError when the tenant has no keys.
     """
     return _rotate(tenant_id, single=False)
 
@@ -976,3 +1063,143 @@ def list_tenants() -> List[dict]:
         agg.setdefault("ip_allowlist", [])            # as _tenant_allowlist chooses it
         agg["ip_allowlist_mixed"] = len(key_lists.get(tid, ())) > 1
     return sorted(tenants.values(), key=lambda t: t["tenant_id"])
+
+
+# ─── One key at a time (ST-9: the /admin/keys API) ────────────────────────────
+# A key is named by its key_id: the first KEY_ID_LENGTH hex characters of its sha256, the
+# store's own key. The raw key is never stored, so it can never be listed; the full hash is
+# not handed out either. A longer hex prefix (up to the whole hash) names a key too.
+# revoke_key / rotate_key take a scope (tenant, team) and check it INSIDE the store write,
+# against the current store, so a key outside the scope is "not found" and nothing is
+# written.
+
+KEY_ID_LENGTH = 16
+
+
+class KeyScopeError(PermissionError):
+    """A key change outside the caller's scope (a user bound outside the caller's team)."""
+_KEY_ID = re.compile(r"[0-9a-f]{16,64}")
+
+
+class AmbiguousKeyId(ValueError):
+    """A key id that names more than one stored key (pass a longer prefix)."""
+
+
+def key_id(key_hash: str) -> str:
+    """The public id of a stored key: its hash's first KEY_ID_LENGTH hex characters."""
+    return str(key_hash)[:KEY_ID_LENGTH]
+
+
+def valid_key_id(value) -> bool:
+    """Whether ``value`` is shaped like a key id: 16-64 lowercase hex characters."""
+    return isinstance(value, str) and bool(_KEY_ID.fullmatch(value))
+
+
+def key_view(key_hash: str, entry) -> dict:
+    """What the admin API shows of a stored key: never the raw key, never the full hash."""
+    if not isinstance(entry, dict):  # legacy string-format entry: its user id
+        return {"key_id": key_id(key_hash), "tenant_id": str(entry), "team": None,
+                "user": None, "tier": "legacy", "admin": False, "gateway": False,
+                "suspended": False, "label": None, "created_at": None}
+    label = entry.get("label")
+    return {
+        "key_id": key_id(key_hash),
+        "tenant_id": entry.get("tenant_id", "default"),
+        "team": key_team(entry),
+        "user": key_user(entry),
+        "tier": entry.get("tier", "free"),
+        "admin": is_admin_key(entry),
+        "gateway": is_gateway_key(entry),
+        "suspended": is_suspended(entry),
+        "label": label if isinstance(label, str) else None,
+        "created_at": entry.get("created_at") or entry.get("created"),
+    }
+
+
+def _in_scope(entry, tenant_id: Optional[str], team: Optional[str]) -> bool:
+    view_tenant = entry.get("tenant_id", "default") if isinstance(entry, dict) else str(entry)
+    if tenant_id is not None and view_tenant != tenant_id:
+        return False
+    if team is not None and (not isinstance(entry, dict) or key_team(entry) != team):
+        return False
+    return True
+
+
+def _find_key(store: dict, wanted: str, tenant_id: Optional[str],
+              team: Optional[str]) -> Optional[str]:
+    """The hash ``wanted`` names within the scope, or None. Raises AmbiguousKeyId when the
+    prefix names more than one key of the whole store; a 16-character id practically never
+    does (two keys would need the same first 64 bits of their hashes)."""
+    if not valid_key_id(wanted):
+        return None
+    hits = [h for h in store if h.startswith(wanted)]
+    if len(hits) > 1:
+        raise AmbiguousKeyId("key id names more than one key: pass a longer prefix")
+    if not hits or not _in_scope(store[hits[0]], tenant_id, team):
+        return None
+    return hits[0]
+
+
+def list_keys(tenant_id: Optional[str] = None, team: Optional[str] = None,
+              user: Optional[str] = None) -> List[dict]:
+    """Every stored key as :func:`key_view` shows it, filtered by tenant, team and user
+    (``None``: any), oldest first. A fresh read of the store: run it on a worker thread."""
+    store = _load_full_store()
+    views = [key_view(h, e) for h, e in store.items() if _in_scope(e, tenant_id, team)]
+    if user is not None:
+        views = [v for v in views if v["user"] == user]
+    return sorted(views, key=lambda v: (v["tenant_id"], v["created_at"] or "", v["key_id"]))
+
+
+def revoke_key(wanted: str, *, tenant_id: Optional[str] = None,
+               team: Optional[str] = None) -> Optional[dict]:
+    """Remove the one key ``wanted`` names, if it is in the scope. Returns its view, or None
+    (not found, or outside the scope: nothing written). With the Postgres backend the hash
+    is recorded as revoked, so no later write can bring it back."""
+    found: dict = {}
+
+    def remove(store):
+        key_hash = _find_key(store, wanted, tenant_id, team)
+        if key_hash is None:
+            return False, None
+        view = key_view(key_hash, store.pop(key_hash))
+        found["tenant"] = view["tenant_id"]
+        return True, view
+
+    view = _mutate_store(remove, "", announce=False)
+    if view is not None:
+        _announce_change(found["tenant"])
+        logger.info("Revoked proxy key %s tenant=%s", view["key_id"], view["tenant_id"])
+    return view
+
+
+def rotate_key(wanted: str, *, tenant_id: Optional[str] = None,
+               team: Optional[str] = None) -> Optional[Tuple[str, str, dict, dict]]:
+    """Replace the one key ``wanted`` names, if it is in the scope, in ONE store write: a new
+    key with the same binding (tenant, team, user), tier, trust flags and extra metadata, the
+    tenant's IP allowlist, and the key's suspension; the old key is revoked. Returns
+    ``(raw_key, key_hash, metadata, old_view)``, the raw key exactly once, or None (not found
+    or outside the scope: nothing written)."""
+    found: dict = {}
+
+    def rotate(store):
+        key_hash = _find_key(store, wanted, tenant_id, team)
+        if key_hash is None or not isinstance(store[key_hash], dict):
+            return False, None
+        entry = store[key_hash]
+        tenant = entry.get("tenant_id", "default")
+        raw, new_hash, metadata = _rotated_key(entry, {key_hash: entry}, tenant)
+        cidrs = _tenant_allowlist(store, tenant)
+        if cidrs:
+            metadata["ip_allowlist"] = cidrs
+        found["tenant"] = tenant
+        old_view = key_view(key_hash, store.pop(key_hash))
+        store[new_hash] = metadata
+        return True, (raw, new_hash, metadata, old_view)
+
+    result = _mutate_store(rotate, "", announce=False)
+    if result is not None:
+        _announce_change(found["tenant"])
+        logger.info("Rotated proxy key %s -> %s tenant=%s", result[3]["key_id"],
+                    key_id(result[1]), found["tenant"])
+    return result
