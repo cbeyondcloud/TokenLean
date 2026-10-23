@@ -64,6 +64,9 @@ GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
 GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
 # Every model route is a chat completion inside the proxy, whatever the client's protocol.
 GEN_AI_OPERATION = "chat"
+# The client chooses the model string: capped on a span so no request can export an
+# arbitrarily long name.
+_MAX_MODEL_CHARS = 128
 
 
 def _settings(config: Any, env: Mapping[str, str] = os.environ) -> Dict[str, Any]:
@@ -247,7 +250,7 @@ def start_request_span(ctx: Any, headers: Any) -> Any:
     if not _otel_available or _tracer is None:
         return _NoOpSpan()
     try:
-        model = str(getattr(ctx, "model", "") or "")
+        model = str(getattr(ctx, "model", "") or "")[:_MAX_MODEL_CHARS]
         span = _tracer.start_span(f"{GEN_AI_OPERATION} {model}".strip(),
                                   context=parent_context(headers), kind=SpanKind.SERVER)
         span.set_attribute(GEN_AI_OPERATION_NAME, GEN_AI_OPERATION)
@@ -283,7 +286,7 @@ def finish_request_span(ctx: Any, status: Any, response: Any = None) -> None:
         return
     try:
         ctx.otel_request_span_ended = True
-        model = str(getattr(ctx, "model", "") or "")
+        model = str(getattr(ctx, "model", "") or "")[:_MAX_MODEL_CHARS]
         span.update_name(f"{GEN_AI_OPERATION} {model}".strip())
         span.set_attribute(GEN_AI_REQUEST_MODEL, model)
         provider = str(getattr(getattr(ctx, "provider_adapter", None), "name", "") or "")
@@ -292,7 +295,8 @@ def finish_request_span(ctx: Any, status: Any, response: Any = None) -> None:
             span.set_attribute(GEN_AI_SYSTEM, provider)
         reported = response.get("model") if isinstance(response, dict) else None
         span.set_attribute(GEN_AI_RESPONSE_MODEL,
-                           str(reported or getattr(ctx, "routed_model", "") or model))
+                           str(reported or getattr(ctx, "routed_model", "") or model)
+                           [:_MAX_MODEL_CHARS])
         calls = [c for c in (getattr(ctx, "provider_calls", None) or []) if isinstance(c, dict)]
         if calls:
             span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, _tokens(calls, "prompt_tokens"))

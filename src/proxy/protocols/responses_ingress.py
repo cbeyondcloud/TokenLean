@@ -24,8 +24,8 @@ Request mapping:
   the reply comes back as a ``custom_tool_call`` item, streamed or not;
 * ``text.format`` → ``response_format``; ``text.verbosity`` → ``verbosity``;
   ``reasoning.effort`` → ``reasoning_effort``; ``max_output_tokens`` → ``max_tokens``;
-  ``tool_choice``, ``parallel_tool_calls``, ``temperature``, ``top_p``, ``prompt_cache_key``
-  and the other chat parameters of the same name → as they are.
+  ``tool_choice`` and ``parallel_tool_calls`` (only with tools), ``temperature``, ``top_p``,
+  ``prompt_cache_key`` and the other chat parameters of the same name → as they are.
 
 Anything it cannot honour is refused with a 400 naming the field (``UnsupportedRequestField``);
 ``store``, ``include``, ``metadata`` and ``client_metadata`` are accepted and never sent
@@ -45,12 +45,13 @@ from protocols.base import (
     _log_dropped, safe_json_dumps,
 )
 
-# Body fields carried as the chat parameter of the same name.
-_DIRECT_PARAMS = ("temperature", "top_p", "parallel_tool_calls", "prompt_cache_key",
-                  "prompt_cache_retention", "safety_identifier", "user", "service_tier")
+# Body fields carried as the chat parameter of the same name. (``parallel_tool_calls`` and
+# ``tool_choice`` are carried only with tools: a chat provider rejects them alone.)
+_DIRECT_PARAMS = ("temperature", "top_p", "prompt_cache_key", "prompt_cache_retention",
+                  "safety_identifier", "user", "service_tier")
 # Body fields the translation reads (not copied as params).
 _TRANSLATED = frozenset({"model", "input", "instructions", "tools", "tool_choice", "text",
-                         "reasoning", "max_output_tokens", "stream"})
+                         "reasoning", "max_output_tokens", "stream", "parallel_tool_calls"})
 # Accepted and never forwarded: stateless (``store``), output options that only a native
 # Responses upstream could honour (``include``, ``stream_options``), the caller's own
 # labels (``metadata``, echoed back, and ``client_metadata``, which carries session and
@@ -81,8 +82,10 @@ _KNOWN = _TRANSLATED | frozenset(_DIRECT_PARAMS) | _NOT_FORWARDED | frozenset(
 # thread. They are never needed to serve the request, so the pipeline never sees them:
 # nothing downstream can log, match on or forward them.
 _PRIVATE_HEADERS = frozenset({"originator", "user-agent", "session-id", "session_id",
-                              "thread-id", "thread_id", "x-client-request-id"})
-_PRIVATE_HEADER_PREFIXES = ("x-codex-",)
+                              "thread-id", "thread_id", "conversation-id", "conversation_id",
+                              "x-client-request-id", "chatgpt-account-id",
+                              "openai-organization", "openai-project"})
+_PRIVATE_HEADER_PREFIXES = ("x-codex-", "x-openai-", "x-stainless-")
 
 _ROLES = {"user": "user", "assistant": "assistant", "system": "system", "developer": "system"}
 _TEXT_PARTS = ("input_text", "output_text", "text")
@@ -185,8 +188,10 @@ def _items_to_messages(items: List[Any]) -> List[Dict[str, Any]]:
         itype = item.get("type") or ("message" if "role" in item else None)
         if itype == "message":
             role = item.get("role")
-            if role not in _ROLES:
+            if not isinstance(role, str) or role not in _ROLES:
                 raise _refuse(f"{where}.role must be user, assistant, system or developer")
+            if item.get("content") == []:
+                continue   # nothing said: a provider rejects an empty text block
             out.append({"role": _ROLES[role], "content": _content(item.get("content"), where)})
         elif itype == "reasoning":
             continue
@@ -362,10 +367,12 @@ def responses_usage(usage: Any) -> Optional[Dict[str, Any]]:
 
 
 def _status(finish: Any) -> Tuple[str, Optional[Dict[str, str]]]:
+    """A finish reason as the Response status. Only a truncated answer is ``incomplete``. A
+    content-filter finish (the proxy's own G29/G30/G31 block, served as a refusal message,
+    or a provider's filter) completes: a client such as Codex retries an incomplete response
+    as a stream error, and every retry of a block would be served and billed again."""
     if finish == "length":
         return "incomplete", {"reason": "max_output_tokens"}
-    if finish == "content_filter":
-        return "incomplete", {"reason": "content_filter"}
     return "completed", None
 
 
@@ -434,10 +441,14 @@ class ResponsesProtocol(IngressProtocol):
         tools, custom = _tools(body.get("tools"))
         messages = _messages(body)
         params: Dict[str, Any] = {}
+        choice = (_tool_choice(body["tool_choice"]) if body.get("tool_choice") is not None
+                  else None)
         if tools:
             params["tools"] = tools
-        if body.get("tool_choice") is not None:
-            params["tool_choice"] = _tool_choice(body["tool_choice"])
+            if choice is not None:
+                params["tool_choice"] = choice
+            if body.get("parallel_tool_calls") is not None:
+                params["parallel_tool_calls"] = body["parallel_tool_calls"]
         _text_params(body.get("text"), params)
         reasoning = body.get("reasoning")
         if reasoning is not None:
@@ -445,8 +456,11 @@ class ResponsesProtocol(IngressProtocol):
                 raise _refuse("reasoning must be an object")
             if reasoning.get("effort") is not None:
                 params["reasoning_effort"] = reasoning["effort"]
-        if body.get("max_output_tokens") is not None:
-            params["max_tokens"] = body["max_output_tokens"]
+        limit = body.get("max_output_tokens")
+        if limit is not None:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise _refuse("max_output_tokens must be a positive integer")
+            params["max_tokens"] = limit
         if "stream" in body:
             params["stream"] = bool(body["stream"])
         for name in _DIRECT_PARAMS:
@@ -557,7 +571,7 @@ class _ResponsesStream(StreamTranslator):
     whole at the end: ``function_call`` or, for a tool the request declared custom,
     ``custom_tool_call`` with the unwrapped input. Every item ends with
     ``response.output_item.done``, and the stream with ``response.completed`` (or
-    ``response.incomplete`` for a truncated or filtered answer, ``response.failed`` for an
+    ``response.incomplete`` for a truncated answer, ``response.failed`` for an
     upstream error), which carries the Response id and usage: a client that needs them
     (Codex builds items only from ``output_item.done`` and ends a turn only on a terminal
     event) never sees a stream close without one.
@@ -571,7 +585,8 @@ class _ResponsesStream(StreamTranslator):
         self._finish: Any = None
         self._output: List[Dict[str, Any]] = []
         self._open: Optional[Dict[str, Any]] = None   # the live text/reasoning item
-        self._calls: Dict[int, Dict[str, str]] = {}
+        self._calls: List[Dict[str, str]] = []        # tool calls, in the order they began
+        self._slots: Dict[int, Dict[str, str]] = {}   # stream index -> its current call
 
     def _event(self, etype: str, **data: Any) -> str:
         payload = {"type": etype, "sequence_number": self._seq, **data}
@@ -646,7 +661,13 @@ class _ResponsesStream(StreamTranslator):
             if not isinstance(tc, dict):
                 continue
             idx = tc.get("index") or 0  # `or 0` so an explicit null cannot key the dict
-            slot = self._calls.setdefault(idx, {"id": "", "name": "", "args": ""})
+            slot = self._slots.get(idx)
+            # A new id on an index whose call already has one is a new call (a provider that
+            # numbers parallel calls all 0): never merge two calls' arguments.
+            if slot is None or (tc.get("id") and slot["id"] and tc["id"] != slot["id"]):
+                slot = {"id": "", "name": "", "args": ""}
+                self._slots[idx] = slot
+                self._calls.append(slot)
             if tc.get("id"):
                 slot["id"] = tc["id"]
             fn = tc.get("function") or {}
@@ -656,8 +677,7 @@ class _ResponsesStream(StreamTranslator):
                 slot["args"] += fn["arguments"]
 
     def _emit_calls(self) -> Iterable[str]:
-        for idx in sorted(self._calls):
-            slot = self._calls[idx]
+        for slot in self._calls:
             if not slot["name"]:
                 continue
             index = len(self._output)

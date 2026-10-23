@@ -250,6 +250,37 @@ def test_switched_off_the_request_span_is_a_no_op(memory):
     otel.finish_request_span(ctx, "200", None)       # no error
 
 
+def test_a_long_model_name_is_capped_on_the_span(memory):
+    exporter = memory()
+    ctx = _ctx(model="m" * 5000)
+    ctx.otel_request_span = otel.start_request_span(ctx, {})
+    otel.finish_request_span(ctx, "400", None)
+    (span,) = exporter.get_finished_spans()
+    assert len(span.attributes["gen_ai.request.model"]) <= 128
+    assert len(span.name) <= 133
+
+
+class _FailingPipeline(_Pipeline):
+    async def process_request(self, ctx, request_headers=None):
+        ctx.otel_span = otel.start_span("proxy-pipeline", ctx)
+        raise RuntimeError("a stage blew up")
+
+
+def test_a_request_whose_pipeline_raises_still_ends_its_span(monkeypatch, memory):
+    exporter = memory()
+    monkeypatch.setattr(main, "_authenticate", _fake_auth)
+    monkeypatch.setattr(main, "get_config", lambda: _CFG)
+    monkeypatch.setattr(main, "_pipeline", _FailingPipeline())
+    monkeypatch.setattr(main, "_usage_meter", None)
+    client = TestClient(main.app, raise_server_exceptions=False)
+    resp = client.post("/v1/chat/completions", json=_BODIES["/v1/chat/completions"],
+                       headers={"Authorization": "Bearer tok-x", "traceparent": _TRACEPARENT})
+    assert resp.status_code == 500
+    request, _ = _spans(exporter)
+    assert request.attributes["http.response.status_code"] == 500
+    assert format(request.parent.span_id, "016x") == _SPAN
+
+
 def test_finishing_a_context_without_a_request_span_is_harmless():
     otel.finish_request_span(None, "500", None)
     otel.finish_request_span(SimpleNamespace(), "200", None)

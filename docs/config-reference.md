@@ -362,11 +362,11 @@ answers 404.
 | `reasoning` items | dropped: their encrypted content is readable only by the model that wrote it |
 | `tools` of type `function` | a function tool (`strict` kept) |
 | `tools` of type `custom` (Codex's `apply_patch`, with a lark grammar) | a function with one string parameter, `input`, whose description carries the grammar; the call comes back as a `custom_tool_call` item |
-| `tool_choice` (`auto`, `none`, `required`, a function or custom tool by name), `parallel_tool_calls` | as they are |
+| `tool_choice` (`auto`, `none`, `required`, a function or custom tool by name), `parallel_tool_calls` | as they are, when the request has tools (without tools both are left out: a chat provider rejects them alone) |
 | `text.format` (`text`, `json_object`, `json_schema`) | `response_format` |
 | `text.verbosity` | `verbosity` (dropped for a provider without it) |
 | `reasoning.effort` | `reasoning_effort` (G12 and G25 read it; stripped for a model that does not reason) |
-| `max_output_tokens` | `max_tokens` |
+| `max_output_tokens` | `max_tokens` (a positive integer, else a 400) |
 | `temperature`, `top_p`, `prompt_cache_key`, `prompt_cache_retention`, `safety_identifier`, `user`, `service_tier` | the chat parameter of the same name (`prompt_cache_key` is the provider's cache key, which G21 may set itself, as on the chat route) |
 | `store`, `include`, `stream_options`, `max_tool_calls`, `metadata`, `client_metadata` | accepted, never sent upstream (`metadata` is echoed in the Response) |
 | `previous_response_id`, `conversation`, `background`, `prompt`, `truncation: auto`, `top_logprobs` | a 400 naming the field |
@@ -377,16 +377,20 @@ Also refused with a 400 that names the field: a tool other than `function` or `c
 cannot carry, an `input_file` part, an `input_image` given by `file_id`, and an image inside a tool
 output.
 
-**Privacy.** The headers a Responses client sends to identify itself — `originator`, `user-agent`,
-`session-id`, `thread-id`, `x-client-request-id` and every `x-codex-*` header — are kept from the
-pipeline entirely, and `client_metadata` never becomes a parameter, so none of them reaches a
-provider, a routing rule or a log. `traceparent` and the `X-Agentic-*` headers are read as on every
+**Privacy.** These request headers, which identify the client, its user, machine, session or
+thread, are kept from the pipeline entirely: `originator`, `user-agent`, `session-id`, `thread-id`,
+`conversation-id`, `x-client-request-id`, `chatgpt-account-id`, `openai-organization`,
+`openai-project`, and every `x-codex-*`, `x-openai-*` and `x-stainless-*` header. `client_metadata`
+never becomes a parameter. So none of them reaches a provider, a routing rule or a log.
+`prompt_cache_key` is different: it is the provider's cache key, sent as on the chat route, and
+Codex sets it to its thread id. `traceparent` and the `X-Agentic-*` headers are read as on every
 route.
 
 **Output.** One item per thing the model produced, in order: a `reasoning` item (when the provider
 streams reasoning text), the assistant `message` (`output_text`), then a `function_call` per tool
 call, or a `custom_tool_call` (with the unwrapped `input`) for a tool the request declared
-`custom`. The Response `id` is `resp_` followed by the proxy's request id. A stream is these SSE
+`custom`. The Response `id` is `resp_` followed by the proxy's request id without its dashes. A
+stream is these SSE
 events, each an `event:` line and a `data:` line with a `sequence_number`:
 
 | Event | When |
@@ -399,7 +403,7 @@ events, each an `event:` line and a `data:` line with a `sequence_number`:
 | `response.custom_tool_call_input.delta`, `.done` | a custom tool call, sent whole at the end |
 | `response.output_item.done` | an item ends: every item gets one |
 | `response.completed` | last, with the whole Response and its `usage` |
-| `response.incomplete` | last instead, when the answer hit `max_output_tokens` or a content filter (`incomplete_details.reason`) |
+| `response.incomplete` | last instead, when the answer hit `max_output_tokens` (`incomplete_details.reason`). A content-filter finish, such as a G29/G30/G31 block served as a refusal, ends with `response.completed`: a client like Codex retries an incomplete response, and each retry would be another billed block |
 | `response.failed` | last instead, when the provider failed (`error.code` `server_error` or `rate_limit_exceeded`): never a stream that just closes |
 
 `usage` carries `input_tokens`, `input_tokens_details.cached_tokens` (cache reads),
@@ -408,7 +412,8 @@ events, each an `event:` line and a `data:` line with a `sequence_number`:
 provider reported none. A refusal before the stream starts uses the OpenAI error envelope
 (`error.type` `invalid_request_error`, `authentication_error`, `permission_error`,
 `rate_limit_error` or `server_error`), with `Retry-After` kept on a 429. G13 never defers a
-Responses request: the route admits no `batch_topic`.
+Responses request: the route admits no `batch_topic` (unless an operator lists it in
+`ingress.extra_allowed_params`).
 
 Lost in translation to a chat provider: encrypted reasoning carried between turns, and
 grammar-constrained output for custom tools (the grammar is only described to the model). A

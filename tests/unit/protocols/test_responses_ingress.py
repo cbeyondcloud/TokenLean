@@ -219,7 +219,7 @@ def test_text_format_and_reasoning_map_to_chat_params():
                             "strict": True, "schema": schema}, "verbosity": "low"},
         "reasoning": {"effort": "high", "summary": "auto"},
         "max_output_tokens": 900, "temperature": 0.2, "top_p": 0.9, "stream": True,
-        "tool_choice": "auto", "parallel_tool_calls": True,
+        "tools": [_EXEC_TOOL], "tool_choice": "auto", "parallel_tool_calls": True,
         "prompt_cache_key": "thread-123",
     })
     assert params["response_format"] == {"type": "json_schema", "json_schema": {
@@ -252,6 +252,35 @@ def test_tool_choice_maps(choice, expected):
     _, _, _, params = _parse({"model": "m", "input": "x", "tools": [_EXEC_TOOL, _PATCH_TOOL],
                               "tool_choice": choice})
     assert params["tool_choice"] == expected
+
+
+@pytest.mark.parametrize("tools", [None, []])
+def test_tool_settings_without_tools_are_not_sent(tools):
+    # Codex sends tool_choice and parallel_tool_calls on every request, tool-less ones too;
+    # OpenAI rejects either without tools.
+    body = {"model": "m", "input": "x", "tool_choice": "auto", "parallel_tool_calls": True}
+    if tools is not None:
+        body["tools"] = tools
+    _, _, _, params = _parse(body)
+    assert not {"tools", "tool_choice", "parallel_tool_calls"} & set(params)
+
+
+def test_a_non_string_role_is_refused_naming_the_field():
+    with pytest.raises(UnsupportedRequestField, match=r"input\[0\]\.role"):
+        _parse({"model": "m", "input": [{"role": ["user"], "content": "x"}]})
+
+
+def test_a_message_with_no_content_parts_is_left_out():
+    _, messages, _, _ = _parse({"model": "m", "input": [
+        {"role": "user", "content": "hi"},
+        {"type": "message", "role": "assistant", "content": []}]})
+    assert messages == [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.parametrize("value", ["abc", True, -1, 1.5])
+def test_max_output_tokens_must_be_a_positive_integer(value):
+    with pytest.raises(UnsupportedRequestField, match="max_output_tokens"):
+        _parse({"model": "m", "input": "x", "max_output_tokens": value})
 
 
 def test_a_hosted_tool_choice_is_refused():
@@ -321,6 +350,9 @@ def test_client_identifying_headers_are_kept_from_the_pipeline():
                "x-codex-turn-metadata": "{}", "x-codex-beta-features": "remote_compaction_v2",
                "X-Agentic-Run-Id": "run-1", "traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01",
                "X-Team": "payments"}
+    headers.update({"conversation-id": "c", "conversation_id": "c", "chatgpt-account-id": "a",
+                    "openai-organization": "o", "openai-project": "p",
+                    "x-openai-subagent": "s", "x-stainless-os": "Linux"})
     kept = RESPONSES.pipeline_headers(headers)
     assert {k.lower() for k in kept} == {"authorization", "x-agentic-run-id", "traceparent",
                                          "x-team"}
@@ -430,6 +462,33 @@ def test_a_truncated_answer_ends_incomplete():
     resp = events[-1][1]["response"]
     assert resp["status"] == "incomplete"
     assert resp["incomplete_details"] == {"reason": "max_output_tokens"}
+
+
+def test_a_content_filter_block_completes_so_the_client_does_not_retry_it():
+    # A G29/G30/G31 block is a served refusal (finish_reason content_filter). Codex treats
+    # response.incomplete as a retryable stream error; each retry would be a billed block.
+    proto, *_ = _parse({"model": "m", "input": "x"})
+    events = _run_stream(proto, [{"choices": [{"delta": {"content": "Blocked."},
+                                               "finish_reason": "content_filter"}]}])
+    assert events[-1][0] == "response.completed"
+    assert events[-1][1]["response"]["incomplete_details"] is None
+    resp = proto.serialise_response({"choices": [{"finish_reason": "content_filter",
+                                                  "message": {"content": "Blocked."}}]})
+    assert resp["status"] == "completed"
+
+
+def test_parallel_calls_that_reuse_an_index_stay_apart():
+    proto, *_ = _parse({"model": "m", "input": "x", "tools": [_EXEC_TOOL]})
+    events = _run_stream(proto, [
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {
+            "name": "exec_command", "arguments": '{"cmd":"ls"}'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_2", "function": {
+            "name": "exec_command", "arguments": '{"cmd":"pwd"}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    ])
+    done = [d["item"] for e, d in events if e == "response.output_item.done"]
+    assert [(i["call_id"], i["arguments"]) for i in done] == [
+        ("call_1", '{"cmd":"ls"}'), ("call_2", '{"cmd":"pwd"}')]
 
 
 def test_an_upstream_failure_ends_the_stream_failed_never_silently():

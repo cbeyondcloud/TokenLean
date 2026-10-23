@@ -647,7 +647,7 @@ class RequestContext:
     no_cache: bool = False             # G29 masked PII → must not read/write shared cache
 
     # ── Multi-protocol ingress (#4) ─────────────────────────────────────────
-    ingress_protocol: str = "openai"   # "openai" | "anthropic" | "gemini" → usage_events.protocol
+    ingress_protocol: str = "openai"   # "openai" | "anthropic" | "gemini" | "responses" → usage_events.protocol
 
     @property
     def current_token_count(self) -> int:

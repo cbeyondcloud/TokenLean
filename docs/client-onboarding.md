@@ -142,7 +142,8 @@ wire_api = "responses"
 env_key = "TOKENLEAN_API_KEY"    # the environment variable holding your proxy key
 ```
 Codex's identifying headers (`originator`, `user-agent`, `session-id`, `thread-id`,
-`x-client-request-id`, `x-codex-*`) and its `client_metadata` never reach the provider.
+`x-client-request-id`, `x-codex-*`) and its `client_metadata` never reach the provider. Its
+`prompt_cache_key` (the thread id) is sent as the provider's cache key, as on the chat route.
 
 ### Java
 ```java

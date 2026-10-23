@@ -2394,6 +2394,14 @@ async def _serve_core(
             },
             headers={"Retry-After": str(exc.retry_after)},
         )
+    except HTTPException as exc:
+        # Not a refusal handled above, so no outcome is recorded (as before), but the request
+        # span still ends: the trace shows the request failed instead of losing it.
+        finish_request_span(ctx, exc.status_code)
+        raise
+    except Exception:
+        finish_request_span(ctx, "500")
+        raise
 
     # Trust & Safety block (G30 injection guardrail / G29 PII policy) — a served
     # content-filter refusal (HTTP 200, finish_reason="content_filter"). Billed once
