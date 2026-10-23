@@ -1056,6 +1056,12 @@ def outgoing_params_for(ctx, adapter: ProviderAdapter, model: str,
                 _raised.get("to"), model, _raised.get("effort"),
             )
     outgoing = apply_context_management(outgoing, adapter, eff_cfg, ctx.tenant_id)
+    # W3C trace context for the provider (tracing.forward_traceparent, off by default): the
+    # request span as the parent, merged into any extra headers the adapter set itself.
+    from tracing.otel import outgoing_trace_headers
+    trace_headers = outgoing_trace_headers(ctx)
+    if trace_headers:
+        outgoing["extra_headers"] = {**(outgoing.get("extra_headers") or {}), **trace_headers}
     return outgoing
 
 

@@ -40,7 +40,7 @@ from auth.api_key_manager import (
 )
 from net.client_ip import ClientIPMiddleware, request_client_ip
 from net.ip_allowlist import ip_allowed
-from tracing.otel import TraceIdHeaderMiddleware
+from tracing.otel import TraceIdHeaderMiddleware, finish_request_span, start_request_span
 from config_loader import get_config, get_fallback_request_model, load_config, start_hot_reload
 from tenancy.resolver import resolve_tenant
 from providers import get_adapter, get_provider_entry
@@ -1382,6 +1382,8 @@ def _record_outcome(ctx, start_ts: float, status: str, response=None) -> None:
     are never billed; batch-deferred (202) is billed separately at defer (C1b)."""
     tenant_id = getattr(ctx, "tenant_id", "default") if ctx is not None else "default"
     elapsed_ms = (time.time() - start_ts) * 1000
+    # The request span ends with the outcome, carrying the served model and the tokens.
+    finish_request_span(ctx, status, response)
     llm_ms = getattr(ctx, "llm_elapsed_ms", 0.0) if ctx is not None else 0.0
     try:
         REQUEST_DURATION_MS.labels(tenant_id=tenant_id, status=status).observe(elapsed_ms)
@@ -2299,6 +2301,9 @@ async def _serve_core(
         model=model, params=params, config=cfg,
     )
     ctx.ingress_protocol = ingress_protocol
+    # The request span (ST-5): the whole request, a child of the caller's span when the
+    # request carries a W3C traceparent; ended with the outcome (_record_outcome).
+    ctx.otel_request_span = start_request_span(ctx, headers)
     # Read when the response starts (TraceIdHeaderMiddleware): its X-Trace-ID, on every path.
     state = getattr(request, "state", None)
     if state is not None:

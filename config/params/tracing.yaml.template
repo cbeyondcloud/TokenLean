@@ -1,8 +1,11 @@
 # ── OpenTelemetry tracing configuration ───────────────────────────────────────
 # Copy to config/params/tracing.yaml and fill in values.
 # All keys are merged under ctx.config["tracing"] and read once at proxy startup (a change
-# applies at the next start). Each request is one trace: its pipeline span, with every
-# stage span under it.
+# applies at the next start). Each request is one trace: its request span ("chat <model>",
+# with the OpenTelemetry gen_ai.* attributes), the pipeline span under it and every stage
+# span under that. A request carrying a W3C `traceparent` (and `tracestate`) header joins the
+# caller's trace: the request span is a child of the caller's span. A malformed header is
+# ignored (a new trace). A caller's "not sampled" flag is honoured.
 #
 # OSS stack: opentelemetry-sdk (Apache-2) + Jaeger (Apache-2)
 
@@ -25,3 +28,8 @@ tracing:
 
   # Sampling ratio (1.0 = 100%, 0.1 = 10%).  Use 1.0 in dev, lower in prod.
   sample_rate: 1.0
+
+  # Send the request span's W3C trace context (`traceparent`, `tracestate`) to the provider
+  # on every call, so a provider that traces can join the trace. Off by default: no trace id
+  # leaves for a provider unless you turn this on. Only a literal `true` turns it on.
+  forward_traceparent: false

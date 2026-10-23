@@ -10,9 +10,16 @@ Exports via OTLP gRPC to Jaeger (or any OTLP collector), set up once at startup 
 ``configure`` from the ``tracing`` config block: ``enabled``, ``otlp_endpoint``,
 ``sample_rate`` and ``service_name``. The OTEL_EXPORTER_OTLP_ENDPOINT environment variable
 wins for the endpoint, and with no ``enabled`` set it is what turns export on. Until then,
-and whenever it is off, every span is a no-op. Each stage span is a child of the request's
-pipeline span (``ctx.otel_span``), so a request is one trace, and ``TraceIdHeaderMiddleware``
-names it on the response as X-Trace-ID (``propagate_trace_id_header``, on by default).
+and whenever it is off, every span is a no-op.
+
+A request is one trace. Its request span (``start_request_span``, ``ctx.otel_request_span``)
+covers the whole request, carries the OpenTelemetry GenAI semantic-convention attributes, and
+is a child of the caller's span when the request carries a valid W3C ``traceparent`` (and
+``tracestate``); a malformed one is ignored and the request starts a new trace. The pipeline
+span (``ctx.otel_span``) sits under it, each stage span under that, and
+``TraceIdHeaderMiddleware`` names the trace on the response as X-Trace-ID
+(``propagate_trace_id_header``, on by default). ``forward_traceparent`` (off by default) sends
+the request span's context to the provider on every call.
 
 OSS stack: opentelemetry-sdk (Apache-2), opentelemetry-exporter-otlp (Apache-2).
 Gracefully no-ops when opentelemetry is not installed so unit tests run without
@@ -27,7 +34,8 @@ logger = logging.getLogger(__name__)
 # ── Optional OTel import (graceful no-op if SDK not installed) ────────────────
 try:
     from opentelemetry import trace
-    from opentelemetry.trace import StatusCode
+    from opentelemetry.trace import SpanKind, StatusCode
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
     _sdk_available = True
 except Exception:  # ImportError
     trace = None
@@ -38,7 +46,24 @@ _otel_available = False          # True once configure() has set up an exporter
 _tracer = None
 _provider = None
 _propagate_header = False        # tracing.propagate_trace_id_header, while spans are exported
+_forward_traceparent = False     # tracing.forward_traceparent, while spans are exported
 TRACE_ID_HEADER = b"x-trace-id"
+# W3C trace context (https://www.w3.org/TR/trace-context/): the headers read from a request
+# and, with forward_traceparent on, written on the provider call.
+_TRACE_CONTEXT_HEADERS = ("traceparent", "tracestate")
+
+# OpenTelemetry GenAI semantic-convention attributes set on the request span. A backend's
+# dashboards key on these names, so they are pinned by a test. gen_ai.provider.name is the
+# current name; gen_ai.system is the older one, still read by many backends, set alongside.
+GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
+GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
+GEN_AI_SYSTEM = "gen_ai.system"
+GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
+GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
+GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+# Every model route is a chat completion inside the proxy, whatever the client's protocol.
+GEN_AI_OPERATION = "chat"
 
 
 def _settings(config: Any, env: Mapping[str, str] = os.environ) -> Dict[str, Any]:
@@ -62,15 +87,18 @@ def _settings(config: Any, env: Mapping[str, str] = os.environ) -> Dict[str, Any
             "endpoint": endpoint, "insecure": endpoint.startswith("http://"),
             "sample_rate": rate,
             "service_name": str(block.get("service_name") or "token-opt-proxy"),
-            "propagate_trace_id_header": bool(block.get("propagate_trace_id_header", True))}
+            "propagate_trace_id_header": bool(block.get("propagate_trace_id_header", True)),
+            # Strictly True: an unexpanded "false" string must not send trace ids upstream.
+            "forward_traceparent": block.get("forward_traceparent") is True}
 
 
 def configure(config: Any, exporter: Any = None) -> bool:
     """Set up pipeline tracing from the proxy config (once, at startup; a change applies at
     the next start). ``exporter`` replaces the OTLP exporter (tests). Returns whether spans
     are now exported."""
-    global _otel_available, _tracer, _provider, _propagate_header
+    global _otel_available, _tracer, _provider, _propagate_header, _forward_traceparent
     s = _settings(config)
+    _forward_traceparent = False
     if not (_sdk_available and s["enabled"]):
         _otel_available, _tracer, _provider = False, None, None
         logger.info("OTel pipeline tracing is off%s", "" if _sdk_available else
@@ -96,6 +124,7 @@ def configure(config: Any, exporter: Any = None) -> bool:
                                       schema_url="https://opentelemetry.io/schemas/1.11.0")
         _otel_available = True
         _propagate_header = s["propagate_trace_id_header"]
+        _forward_traceparent = s["forward_traceparent"]
         logger.info("OTel pipeline tracing → %s (sample rate %s)", s["endpoint"],
                     s["sample_rate"])
         return True
@@ -145,7 +174,10 @@ def start_span(name: str, ctx: Any) -> Any:
         return _NoOpSpan()
 
     try:
+        # Under the pipeline span; the pipeline span itself goes under the request span.
         parent = getattr(ctx, "otel_span", None)
+        if parent is None or isinstance(parent, _NoOpSpan):
+            parent = getattr(ctx, "otel_request_span", None)
         context = (trace.set_span_in_context(parent)
                    if parent is not None and not isinstance(parent, _NoOpSpan) else None)
         span = _tracer.start_span(name, context=context)
@@ -179,13 +211,133 @@ def end_span(span: Any, *, error: Optional[Exception] = None) -> None:
         logger.debug("OTel end_span failed: %s", exc)
 
 
+def _trace_context_carrier(headers: Any) -> Dict[str, str]:
+    """The W3C trace-context headers of a request, by lower-case name."""
+    if not hasattr(headers, "items"):
+        return {}
+    return {str(k).lower(): v for k, v in headers.items()
+            if str(k).lower() in _TRACE_CONTEXT_HEADERS and isinstance(v, str)}
+
+
+def parent_context(headers: Any) -> Any:
+    """The caller's span, from the request's ``traceparent`` (and ``tracestate``), as the
+    OTel context a span starts under; None when there is none or it is malformed (the W3C
+    propagator rejects a bad version, length, case or an all-zero id), so the request starts
+    a new trace instead. Never raises."""
+    if not _otel_available:
+        return None
+    carrier = _trace_context_carrier(headers)
+    if not carrier.get("traceparent"):
+        return None
+    try:
+        context = TraceContextTextMapPropagator().extract(carrier)
+        if not trace.get_current_span(context).get_span_context().is_valid:
+            return None
+        return context
+    except Exception as exc:
+        logger.debug("traceparent ignored: %s", exc)
+        return None
+
+
+def start_request_span(ctx: Any, headers: Any) -> Any:
+    """Start the request span: the whole request, as a child of the caller's span when
+    ``headers`` carry a valid ``traceparent``, else a new trace's root. A server span (the
+    proxy is answering a caller), named ``chat <model>`` as the GenAI conventions name an
+    inference span. ``finish_request_span`` ends it. A no-op span when tracing is off."""
+    if not _otel_available or _tracer is None:
+        return _NoOpSpan()
+    try:
+        model = str(getattr(ctx, "model", "") or "")
+        span = _tracer.start_span(f"{GEN_AI_OPERATION} {model}".strip(),
+                                  context=parent_context(headers), kind=SpanKind.SERVER)
+        span.set_attribute(GEN_AI_OPERATION_NAME, GEN_AI_OPERATION)
+        span.set_attribute(GEN_AI_REQUEST_MODEL, model)
+        span.set_attribute("proxy.request_id", str(getattr(ctx, "request_id", "") or ""))
+        span.set_attribute("proxy.ingress_protocol",
+                           str(getattr(ctx, "ingress_protocol", "") or ""))
+        return span
+    except Exception as exc:
+        logger.debug("OTel start_request_span failed: %s", exc)
+        return _NoOpSpan()
+
+
+def _tokens(calls: Any, key: str) -> int:
+    total = 0
+    for call in calls:
+        try:
+            total += int(call.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def finish_request_span(ctx: Any, status: Any, response: Any = None) -> None:
+    """End the request span once, at the request's outcome (``main._record_outcome``), with
+    what is known by then: the provider and model that served, the tokens of every provider
+    call the request paid for (none on a cache hit or a refusal), the HTTP status and the
+    tenant. A 5xx marks the span as an error. A second call (another exit path) does nothing;
+    so does a context without a request span. Never raises."""
+    span = getattr(ctx, "otel_request_span", None) if ctx is not None else None
+    if (span is None or isinstance(span, _NoOpSpan)
+            or getattr(ctx, "otel_request_span_ended", False)):
+        return
+    try:
+        ctx.otel_request_span_ended = True
+        model = str(getattr(ctx, "model", "") or "")
+        span.update_name(f"{GEN_AI_OPERATION} {model}".strip())
+        span.set_attribute(GEN_AI_REQUEST_MODEL, model)
+        provider = str(getattr(getattr(ctx, "provider_adapter", None), "name", "") or "")
+        if provider:
+            span.set_attribute(GEN_AI_PROVIDER_NAME, provider)
+            span.set_attribute(GEN_AI_SYSTEM, provider)
+        reported = response.get("model") if isinstance(response, dict) else None
+        span.set_attribute(GEN_AI_RESPONSE_MODEL,
+                           str(reported or getattr(ctx, "routed_model", "") or model))
+        calls = [c for c in (getattr(ctx, "provider_calls", None) or []) if isinstance(c, dict)]
+        if calls:
+            span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, _tokens(calls, "prompt_tokens"))
+            span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, _tokens(calls, "completion_tokens"))
+        span.set_attribute("proxy.tenant_id", str(getattr(ctx, "tenant_id", "") or ""))
+        try:
+            code = int(status)
+        except (TypeError, ValueError):
+            code = 0
+        if code:
+            span.set_attribute("http.response.status_code", code)
+        if code >= 500:
+            span.set_status(StatusCode.ERROR)
+        span.end()
+    except Exception as exc:
+        logger.debug("OTel finish_request_span failed: %s", exc)
+
+
+def outgoing_trace_headers(ctx: Any) -> Dict[str, str]:
+    """The W3C trace-context headers for a provider call (the request span as the parent),
+    when ``tracing.forward_traceparent`` is on and spans are exported; otherwise none, so no
+    trace id goes to a provider by default."""
+    if not (_otel_available and _forward_traceparent):
+        return {}
+    span = getattr(ctx, "otel_request_span", None)
+    if span is None or isinstance(span, _NoOpSpan):
+        return {}
+    try:
+        carrier: Dict[str, str] = {}
+        TraceContextTextMapPropagator().inject(carrier, context=trace.set_span_in_context(span))
+        return {k: v for k, v in carrier.items() if k in _TRACE_CONTEXT_HEADERS}
+    except Exception as exc:
+        logger.debug("OTel trace-context inject failed: %s", exc)
+        return {}
+
+
 def response_trace_id(ctx: Any) -> str:
-    """The trace id a response names in X-Trace-ID: its request's pipeline span
-    (``ctx.otel_span``), while spans are exported and ``tracing.propagate_trace_id_header`` is
-    on (the default). Empty otherwise, and the header is left out."""
+    """The trace id a response names in X-Trace-ID: its request's trace (the pipeline span
+    ``ctx.otel_span``, else the request span), while spans are exported and
+    ``tracing.propagate_trace_id_header`` is on (the default). Empty otherwise, and the header
+    is left out."""
     if not (_otel_available and _propagate_header):
         return ""
-    return get_trace_id(getattr(ctx, "otel_span", None))
+    return (get_trace_id(getattr(ctx, "otel_span", None))
+            or get_trace_id(getattr(ctx, "otel_request_span", None)))
 
 
 class TraceIdHeaderMiddleware:
