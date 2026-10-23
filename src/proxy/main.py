@@ -66,7 +66,7 @@ from middleware.g18_observability import (
     MODEL_LOCKOUT_STATE,
     price_billed_call,
 )
-from protocols import OPENAI, ANTHROPIC, GEMINI
+from protocols import OPENAI, ANTHROPIC, GEMINI, RESPONSES
 from protocols.base import UnsupportedRequestField, header_params
 import events
 from middleware import RequestContext, record_provider_call
@@ -2240,15 +2240,19 @@ async def chat_completions(request: Request):
 async def _serve_core(
     request: Request, request_id: str, _request_start: float,
     messages: list, model: str, params: dict, user_id: str, api_key: str,
-    tenant_metadata, ingress_protocol: str,
+    tenant_metadata, ingress_protocol: str, headers: Optional[Dict[str, str]] = None,
 ):
     """Shared request core — OpenAI-shaped in, OpenAI-shaped Response out.
 
-    The protocol routes (OpenAI / Anthropic / Gemini) parse their wire format into
-    (messages, model, params) and call this; the non-OpenAI routes then translate the
+    The protocol routes (OpenAI / Anthropic / Gemini / Responses) parse their wire format
+    into (messages, model, params) and call this; the non-OpenAI routes then translate the
     returned Response back to their protocol (#4). All optimisation, resilience, and
     billing live here, protocol-agnostic; ``ctx.ingress_protocol`` flows to the usage row.
+    ``headers`` is the request-header view the pipeline gets (the adapter's
+    ``pipeline_headers``); None means every request header, as before.
     """
+    if headers is None:
+        headers = dict(request.headers)
     # Client omitted `model` → flag it so the pipeline resolves the tenant default, then
     # apply the global placeholder so RequestContext.create has a concrete model.
     params["_model_defaulted"] = not bool(model)
@@ -2259,7 +2263,7 @@ async def _serve_core(
     # ctx.params is persisted by G13, so infrastructure headers and a caller's own routing
     # hints stay out (the pipeline gives the routing rules every X-* header separately), and
     # the native-SDK proxy credential (x-api-key / x-goog-api-key) never enters it.
-    params.update(header_params(request.headers))
+    params.update(header_params(headers))
 
     # G7 RAG: derive rag_query from the last user message when x_rag_collection is set
     if "x_rag_collection" in params and "rag_query" not in params:
@@ -2302,7 +2306,7 @@ async def _serve_core(
 
     # Run the request-side pipeline (authoritative stage order: middleware/pipeline.py)
     try:
-        ctx = await _pipeline.process_request(ctx, request_headers=dict(request.headers))
+        ctx = await _pipeline.process_request(ctx, request_headers=headers)
     except UnconfiguredModelError as exc:
         # G6_routing.on_unconfigured_model: reject. Refused before any provider call and
         # never billed, instead of being answered by proxy.default_model.
@@ -2900,10 +2904,15 @@ async def _serve_protocol(request: Request, proto, *, path_model: str = "",
     Auth/parse/pipeline errors are serialised into the caller's protocol."""
     _request_start = time.time()
     request_id = str(uuid.uuid4())
+    # The instance that serves this request (itself for a stateless adapter).
+    proto = proto.for_request(request_id)
     try:
         user_id, api_key, tenant_metadata = await _authenticate(request, proto)
         body = await request.json()
-        messages, model, params = proto.parse_request(body, dict(request.headers), path_model)
+        extra = ({"extra_allowed": _ingress_extra_allowed_params(get_config())}
+                 if proto.admits_extra_params else {})
+        messages, model, params = proto.parse_request(body, dict(request.headers), path_model,
+                                                      **extra)
         if force_stream:
             params["stream"] = True
     except HTTPException as exc:
@@ -2921,7 +2930,8 @@ async def _serve_protocol(request: Request, proto, *, path_model: str = "",
     want_stream = bool(params.get("stream")) and not array_wrap
     try:
         resp = await _serve_core(request, request_id, _request_start, messages, model, params,
-                                 user_id, api_key, tenant_metadata, proto.name)
+                                 user_id, api_key, tenant_metadata, proto.name,
+                                 headers=proto.pipeline_headers(request.headers))
     except HTTPException as exc:
         eb, st = proto.serialise_error(exc.status_code, _detail_str(exc))
         return JSONResponse(status_code=st, content=eb)
@@ -2932,6 +2942,26 @@ async def _serve_protocol(request: Request, proto, *, path_model: str = "",
 async def anthropic_messages(request: Request):
     """Anthropic Messages API ingress (Claude SDK / Claude Code point here one-line)."""
     return await _serve_protocol(request, ANTHROPIC)
+
+
+@app.post("/v1/responses")
+async def responses_create(request: Request):
+    """OpenAI Responses API ingress (ST-4): Codex and the OpenAI SDK's ``client.responses``
+    reach every configured provider through the same pipeline. Stateless (no response is
+    stored); streaming and non-streaming."""
+    return await _serve_protocol(request, RESPONSES)
+
+
+# Everything else under /v1/responses needs stored responses (retrieve, delete, cancel,
+# input_items) or a feature this route does not offer (compact, input_tokens).
+_RESPONSES_STATELESS = ("This proxy is stateless: it stores no responses and serves only "
+                        "POST /v1/responses. Send the whole conversation in each request.")
+
+
+@app.api_route("/v1/responses/{rest:path}", methods=["GET", "POST", "DELETE"])
+async def responses_not_served(rest: str):
+    body, st = RESPONSES.serialise_error(404, _RESPONSES_STATELESS, "not_found")
+    return JSONResponse(status_code=st, content=body)
 
 
 @app.post("/v1beta/models/{model}:generateContent")
