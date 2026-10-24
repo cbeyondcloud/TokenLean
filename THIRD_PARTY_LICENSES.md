@@ -32,7 +32,7 @@ redistributed as part of** the Apache-2.0 Work.
 | Prometheus | Metrics scraping | Apache-2.0 | Service (network) |
 | Alertmanager (GCP deploy) | Alert routing | Apache-2.0 | Service (network) |
 | Jaeger | Distributed tracing (OTLP) | Apache-2.0 | Service (network) |
-| **Grafana** | Dashboards | **AGPL-3.0** | **Service only — see note** |
+| **Grafana** | Dashboards (full stack; LITE's optional `grafana` profile) | **AGPL-3.0** | **Service only — see note** |
 | Langfuse (server) | LLM observability backend | MIT, except its `ee/` directories (Langfuse's enterprise license) | Service (network) |
 | Apache Tika (`tika-sidecar`) | Document text extraction (G03) | Apache-2.0 (its image runs OpenJDK 21: GPL-2.0 with the Classpath Exception) | Service (HTTP sidecar) |
 | LLMLingua / LLMLingua-2 (`llmlingua-sidecar`) | Prompt compression (G01) | MIT | Service (HTTP sidecar) |
