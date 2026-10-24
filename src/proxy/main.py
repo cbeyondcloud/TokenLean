@@ -1835,7 +1835,11 @@ def _stream_response(ctx, call_model, call_kwargs, outgoing_params, request_id, 
             except Exception as exc:
                 logger.debug("[%s] streaming _record_outcome failed: %s", request_id, exc)
 
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
+    # The request id is known before the first chunk, so it goes with the headers: a caller
+    # that abandons the stream (or whose stream fails before the cost frame) can still find
+    # the call's usage row. The routed model is not sent: failover may still change it.
+    return StreamingResponse(event_gen(), media_type="text/event-stream",
+                             headers={"x-tokenlean-request-id": request_id})
 
 
 def _price_stream(ctx, usage: Dict, generated_text: str, request_id: str) -> None:
@@ -2957,6 +2961,7 @@ async def _translate_response(protocol, resp, *, want_stream: bool = False,
                               protocol.keepalive_seconds(get_config())),
             media_type=protocol.stream_media_type,
             status_code=resp.status_code,
+            headers={k: v for k, v in resp.headers.items() if k.lower().startswith("x-")},
         )
     # JSONResponse — re-serialise the OpenAI body. `_token_opt` (OpenAI-only) is dropped;
     # the x-* savings headers are preserved.
