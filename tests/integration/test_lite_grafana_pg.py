@@ -8,9 +8,9 @@ datasource reaches the database TEST_PG_DSN names:
     TEST_GRAFANA_URL=http://127.0.0.1:3000  TEST_GRAFANA_PASSWORD=<admin password>
     TEST_PG_DSN=postgresql://...            TEST_GRAFANA_LANGFUSE=on|off (default off)
 
-Grafana interpolates template variables in the browser, so the test renders the panel the
-way tests/integration/test_lite_dashboards_pg.py does and sends the SQL through
-/api/ds/query: what is proven here is that the provisioned set and datasource work.
+Grafana interpolates template variables in the browser, so the test renders the panel with
+tests/grafana_template.py (Grafana 10.4's rules) and sends the SQL through /api/ds/query:
+what is proven here is that the provisioned set and datasource work.
 The test replaces usage_events in the database's public schema.
 """
 import asyncio
@@ -99,7 +99,8 @@ def test_the_datasource_answers_a_team_filtered_panel():
                              and (r["team"] or "default") == team and r["billable"])
         body = {"from": "now-7d", "to": "now", "queries": [{
             "refId": "A", "datasource": {"type": "postgres", "uid": "app-postgres"},
-            "rawSql": render(sql, {"tenant": TENANTS[0], "team": team}), "format": "table"}]}
+            "rawSql": render(sql, {"tenant": TENANTS[0], "team": team}, "billing.json"),
+            "format": "table"}]}
         frame = _api("/api/ds/query", body)["results"]["A"]["frames"][0]
         assert frame["data"]["values"] == [[expected[team]]], team
     assert len(set(expected.values())) == 3

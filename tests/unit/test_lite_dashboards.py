@@ -29,8 +29,13 @@ ALL_LITE = LITE_SET + LANGFUSE_ONLY
 PROMETHEUS_ONLY = ("latency-breakup.json", "trust-safety.json")
 WITH_TEAM = tuple(f for f in ALL_LITE if f not in PROMETHEUS_ONLY)
 
-TENANT_FILTER = "('${tenant}' = '.*' OR tenant_id = '${tenant}')"
-TEAM_FILTER = "('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}')"
+# Grafana quotes a list variable itself (tests/grafana_template.py), so the queries never wrap
+# one in quotes. The team is ${team:sqlstring} with All = the literal '.*'. The tenant variable
+# is also the Prometheus panels' regex, so its All must stay .* and it is compared
+# percent-encoded: All renders '.%2A', and a quote can never reach the SQL.
+TENANT_FILTER = "('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}')"
+TEAM_FILTER = ("(${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = "
+               "${team:sqlstring})")
 TEAM_VALUE = "COALESCE(NULLIF(team, ''), 'default')"
 
 
@@ -90,7 +95,7 @@ def test_each_dashboard_has_a_team_variable_over_usage_events(fname):
     query = var["query"]
     assert "FROM usage_events" in query and TEAM_VALUE in query
     assert TENANT_FILTER in query                     # lists the chosen tenant's teams
-    assert var["includeAll"] is True and var["allValue"] == ".*"
+    assert var["includeAll"] is True and var["allValue"] == "'.*'"   # inserted as is
     assert var.get("multi") is False                  # the panels compare one value
     assert var["current"] == {"value": "$__all", "text": "All"}
     assert var.get("refresh") == 2                    # re-listed when the time range changes
@@ -112,6 +117,73 @@ def test_the_full_stack_dashboards_keep_working_without_a_team_choice():
         for var in variables(load(fname)):
             if var.get("name") == "team":
                 assert var["current"]["value"] == "$__all"
+
+
+# ── A list variable's value stays a string literal (the team picker lists usage_events.team,
+#    which a gateway's X-Team sets to any text; user_id and model are the caller's too) ──
+
+
+_EVERY_DASHBOARD = tuple(sorted(p.name for p in DASHBOARD_DIR.glob("*.json")))
+_HOSTILE = ("t' OR true OR 't", ") GROUP BY 1; DELETE FROM usage_events; --",
+            "x\\' OR true --", 'q"uote', "IS NULL OR true OR")
+_SAFE_FORMATS = {"sqlstring", "percentencode"}
+
+
+def _sql_texts(dashboard: dict) -> list:
+    """(where, sql) for every SQL panel target and every SQL-datasource variable query."""
+    out = [(f"{p.get('title')!r} {t.get('refId')}", t["rawSql"])
+           for p in panels(dashboard) for t in p.get("targets", []) or [] if t.get("rawSql")]
+    out += [(f"${v['name']}", v["query"]) for v in variables(dashboard)
+            if isinstance(v.get("query"), str) and _uid(v) not in ("", "prometheus")
+            and v.get("type") == "query"]
+    return out
+
+
+def _defaults(dashboard: dict) -> dict:
+    out = {}
+    for var in variables(dashboard):
+        current = (var.get("current") or {}).get("value", var.get("query", ""))
+        out[var["name"]] = str(current[0] if isinstance(current, list) else current)
+    return out
+
+
+@pytest.mark.parametrize("fname", _EVERY_DASHBOARD)
+def test_a_list_variable_reaches_sql_only_in_a_format_that_quotes_it(fname):
+    """Without a format Grafana's SQL datasource wraps an includeAll value in quotes itself, so
+    '${v}' renders ''value'': every chosen value is a syntax error and its quote-free text is
+    SQL. ${v:sqlstring} is a whole literal; '${v:percentencode}' can hold no quote."""
+    import re
+    lists = {v["name"] for v in variables(load(fname)) if v.get("includeAll")}
+    for where, sql in _sql_texts(load(fname)):
+        for m in re.finditer(r"(.?)\$\{(\w+)(?::(\w+))?\}|(.?)\$(\w+)\b", sql):
+            name = m.group(2) or m.group(5)
+            if name not in lists:
+                continue
+            fmt, before = m.group(3), m.group(1) or ""
+            assert fmt in _SAFE_FORMATS, f"{fname} {where}: ${name} without a quoting format"
+            if fmt == "sqlstring":
+                assert before != "'", f"{fname} {where}: ${{{name}:sqlstring}} quoted twice"
+            else:
+                assert before == "'", f"{fname} {where}: ${{{name}:percentencode}} unquoted"
+
+
+@pytest.mark.parametrize("fname", _EVERY_DASHBOARD)
+def test_any_value_of_a_list_variable_stays_inside_a_string_literal(fname):
+    """Rendered the way Grafana 10.4 renders it, a chosen value, All, and hostile values give
+    the same SQL once string literals are set aside: the value can never become SQL."""
+    from tests.grafana_template import ALL, render, skeleton
+    d = load(fname)
+    lists = [v["name"] for v in variables(d) if v.get("includeAll")]
+    for where, sql in _sql_texts(d):
+        used = [n for n in lists if "$" + n in sql or "${" + n in sql]
+        for name in used:
+            shapes = {}
+            for value in (ALL, "payments") + _HOSTILE:
+                rendered = render(sql, variables(d), {**_defaults(d), name: value}, "a", "b")
+                shapes[value] = skeleton(rendered)
+            assert len(set(shapes.values())) == 1, (
+                f"{fname} {where}: ${name} changes the SQL: "
+                f"{[v for v in shapes if shapes[v] != shapes[ALL]]}")
 
 
 # ── Provisioning: deploy/lite's optional Grafana (`up --grafana`) loads exactly the set ──

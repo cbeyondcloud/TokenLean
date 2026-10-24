@@ -28,7 +28,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT SUM(tokens_saved) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') AND ('${user_id}' = 'All' OR user_id = '${user_id}')",
+          "rawSql": "SELECT SUM(tokens_saved) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND (${user_id:sqlstring} = 'All' OR user_id = ${user_id:sqlstring})",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -77,7 +77,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT ROUND(SUM(cost_saved_usd), 2) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') AND ('${user_id}' = 'All' OR user_id = '${user_id}')",
+          "rawSql": "SELECT ROUND(SUM(cost_saved_usd), 2) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND (${user_id:sqlstring} = 'All' OR user_id = ${user_id:sqlstring})",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -127,7 +127,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT ROUND(AVG(CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 1) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') AND ('${user_id}' = 'All' OR user_id = '${user_id}')",
+          "rawSql": "SELECT ROUND(AVG(CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 1) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND (${user_id:sqlstring} = 'All' OR user_id = ${user_id:sqlstring})",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -176,7 +176,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT COUNT(*) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') AND ('${user_id}' = 'All' OR user_id = '${user_id}')",
+          "rawSql": "SELECT COUNT(*) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND (${user_id:sqlstring} = 'All' OR user_id = ${user_id:sqlstring})",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -224,7 +224,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT COUNT(DISTINCT NULLIF(user_id, '')) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}')",
+          "rawSql": "SELECT COUNT(DISTINCT NULLIF(user_id, '')) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring})",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -272,7 +272,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('${granularity}', timestamp) AS time, SUM(tokens_saved) AS tokens_saved FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') AND ('${user_id}' = 'All' OR user_id = '${user_id}') GROUP BY 1 ORDER BY 1",
+          "rawSql": "SELECT date_trunc('${granularity}', timestamp) AS time, SUM(tokens_saved) AS tokens_saved FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND (${user_id:sqlstring} = 'All' OR user_id = ${user_id:sqlstring}) GROUP BY 1 ORDER BY 1",
           "format": "time_series",
           "datasource": {
             "type": "postgres",
@@ -298,7 +298,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('${granularity}', timestamp) AS time, user_id AS metric, COUNT(*) AS calls FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') GROUP BY 1, 2 ORDER BY 1",
+          "rawSql": "SELECT date_trunc('${granularity}', timestamp) AS time, user_id AS metric, COUNT(*) AS calls FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) GROUP BY 1, 2 ORDER BY 1",
           "format": "time_series",
           "datasource": {
             "type": "postgres",
@@ -332,7 +332,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT key AS group, SUM(value::int) AS total_saved FROM usage_events, jsonb_each_text(group_savings) WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') AND ('${user_id}' = 'All' OR user_id = '${user_id}') GROUP BY 1 ORDER BY total_saved DESC LIMIT 10",
+          "rawSql": "SELECT key AS group, SUM(value::int) AS total_saved FROM usage_events, jsonb_each_text(group_savings) WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND (${user_id:sqlstring} = 'All' OR user_id = ${user_id:sqlstring}) GROUP BY 1 ORDER BY total_saved DESC LIMIT 10",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -384,7 +384,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('${granularity}', timestamp) AS time, user_id AS metric, ROUND(SUM(cost_saved_usd), 4) AS cost_saved FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') GROUP BY 1, 2 ORDER BY 1",
+          "rawSql": "SELECT date_trunc('${granularity}', timestamp) AS time, user_id AS metric, ROUND(SUM(cost_saved_usd), 4) AS cost_saved FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) GROUP BY 1, 2 ORDER BY 1",
           "format": "time_series",
           "datasource": {
             "type": "postgres",
@@ -419,7 +419,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT to_char(date_trunc('${granularity}', timestamp), 'YYYY-MM-DD') AS period, SUM(tokens_saved) AS tokens_saved, ROUND(SUM(cost_saved_usd), 2) AS cost_saved FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') AND ('${user_id}' = 'All' OR user_id = '${user_id}') GROUP BY 1 ORDER BY MIN(timestamp)",
+          "rawSql": "SELECT to_char(date_trunc('${granularity}', timestamp), 'YYYY-MM-DD') AS period, SUM(tokens_saved) AS tokens_saved, ROUND(SUM(cost_saved_usd), 2) AS cost_saved FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND (${user_id:sqlstring} = 'All' OR user_id = ${user_id:sqlstring}) GROUP BY 1 ORDER BY MIN(timestamp)",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -462,7 +462,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT routed_model AS model, COUNT(*) AS calls FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') AND ('${user_id}' = 'All' OR user_id = '${user_id}') GROUP BY 1 ORDER BY calls DESC",
+          "rawSql": "SELECT routed_model AS model, COUNT(*) AS calls FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND (${user_id:sqlstring} = 'All' OR user_id = ${user_id:sqlstring}) GROUP BY 1 ORDER BY calls DESC",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -514,7 +514,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('${granularity}', timestamp) AS period, user_id, COUNT(*) AS calls, SUM(tokens_saved) AS tokens_saved, ROUND(AVG(CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 1) AS avg_pct_saving, ROUND(SUM(cost_saved_usd), 4) AS cost_saved_usd FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') AND ('${user_id}' = 'All' OR user_id = '${user_id}') GROUP BY 1, 2 ORDER BY 1 DESC, tokens_saved DESC",
+          "rawSql": "SELECT date_trunc('${granularity}', timestamp) AS period, user_id, COUNT(*) AS calls, SUM(tokens_saved) AS tokens_saved, ROUND(AVG(CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 1) AS avg_pct_saving, ROUND(SUM(cost_saved_usd), 4) AS cost_saved_usd FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND (${user_id:sqlstring} = 'All' OR user_id = ${user_id:sqlstring}) GROUP BY 1, 2 ORDER BY 1 DESC, tokens_saved DESC",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -582,7 +582,7 @@
           "text": "All"
         },
         "includeAll": true,
-        "allValue": "All",
+        "allValue": "'All'",
         "multi": false,
         "refresh": 2
       },
@@ -613,11 +613,11 @@
           "type": "postgres",
           "uid": "app-postgres"
         },
-        "definition": "SELECT DISTINCT COALESCE(NULLIF(team, ''), 'default') AS team FROM usage_events WHERE $__timeFilter(timestamp) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') ORDER BY 1",
-        "query": "SELECT DISTINCT COALESCE(NULLIF(team, ''), 'default') AS team FROM usage_events WHERE $__timeFilter(timestamp) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') ORDER BY 1",
+        "definition": "SELECT DISTINCT COALESCE(NULLIF(team, ''), 'default') AS team FROM usage_events WHERE $__timeFilter(timestamp) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') ORDER BY 1",
+        "query": "SELECT DISTINCT COALESCE(NULLIF(team, ''), 'default') AS team FROM usage_events WHERE $__timeFilter(timestamp) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') ORDER BY 1",
         "includeAll": true,
         "multi": false,
-        "allValue": ".*",
+        "allValue": "'.*'",
         "current": {
           "value": "$__all",
           "text": "All"

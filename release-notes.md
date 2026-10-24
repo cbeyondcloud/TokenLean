@@ -51,7 +51,11 @@ changes. `tracing.forward_traceparent` (off by default) also sends the trace con
 Every dashboard that reads `usage_events` (Live Calls, Requests Explorer, Billing, SLA, Trends,
 Quarterly, Per Call) has a **Team** picker next to the tenant picker, and every one of its usage
 panels honours it; rows written before teams existed count as `default`. *All*, the default, filters
-nothing, so the full stack's dashboards look as before. `deploy/lite/local/up --grafana` starts
+nothing, so the full stack's dashboards look as before. Every picker's value now reaches the
+SQL quoted by Grafana itself (`${team:sqlstring}`; the tenant, which is also the Prometheus
+regex, percent-encoded), so a team or user name can never end a string literal and run as SQL
+(a gateway's `X-Team` is free text), and choosing a tenant, user or model no longer turns the
+SQL panels into a syntax error. `deploy/lite/local/up --grafana` starts
 Grafana and Prometheus with the LITE set (eight dashboards; Per Call only with `--langfuse`; Tenant
 Overview left out), provisioned read-only from `deploy/lite/grafana/`, whose datasource files any
 other Grafana can mount. Grafana runs as the unmodified upstream image, as in the full stack.

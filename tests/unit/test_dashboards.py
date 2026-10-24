@@ -437,7 +437,8 @@ class TestTrustSafetyContextTrust:
 
 SAVINGS_DASHBOARDS = ["live.json", "per-call.json", "quarterly.json", "trends.json"]
 LANGFUSE_ROW = "needs Langfuse tracing"
-TENANT_FILTER = "('${tenant}' = '.*' OR tenant_id = '${tenant}')"
+# Percent-encoded, so a quote in a value can never reach the SQL (tests/grafana_template.py).
+TENANT_FILTER = "('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}')"
 _DDL = Path(__file__).parent.parent.parent / "src" / "proxy" / "billing" / "models.py"
 # What a query may name besides usage_events' columns and its own aliases.
 _SQL_WORDS = frozenset("""
@@ -490,7 +491,7 @@ def _appdb_queries(fname: str, variables: bool = True) -> list:
 def _unknown_names(sql: str, columns: set) -> set:
     bare = re.sub(r"'[^']*'", " ", sql)                     # string literals (and ${...} in them)
     bare = re.sub(r'"[^"]*"', " ", bare)                    # quoted aliases
-    bare = re.sub(r"\$__\w+|\$\{\w+\}|\$\w+", " ", bare)     # Grafana macros and variables
+    bare = re.sub(r"\$__\w+|\$\{\w+(?::\w+)?\}|\$\w+", " ", bare)   # macros and variables
     aliases = {a.lower() for a in re.findall(r"\bAS\s+([A-Za-z_]\w*)", sql, re.I)}
     names = {n.lower() for n in re.findall(r"[A-Za-z_]\w*", bare)}
     return names - columns - _SQL_WORDS - aliases
