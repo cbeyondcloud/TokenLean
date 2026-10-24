@@ -27,7 +27,10 @@ cannot contain commas. Unset, nothing changes. A missing, unreadable or non-mapp
 to start and a hot reload keeps the running config — because an overlay that exists to switch
 features off must never be dropped quietly. Such an error is not retried: it is the operator's
 to fix, not a storage blip. Shipped profiles live in `config/profiles/` (e.g.
-`agentic.yaml`, the gateway-only LITE profile used by `deploy/lite/`).
+`agentic.yaml`, the gateway-only LITE profile used by `deploy/lite/`: behaviour-changing
+optimisations off; teams on, with `rate_limit.spend_cap.enabled` so each team's cap is
+enforced, the usage tags recorded, and `key_store.backend: postgres`, so it needs
+`DATABASE_URL`).
 
 ## Top-level sections
 
@@ -662,7 +665,7 @@ Both columns are additive (`ADD COLUMN IF NOT EXISTS`, applied by the app at sta
 | `tags.max_value_chars` | `256` | Longer values are cut to this length (at most `1024`). |
 | `tags.tenant_only_keys` | `[user]` | Tag keys only tenant-level keys may read back: they are stored for every request (per-user cost and chargeback), but a **team-bound** key's `/admin/usage-export` has them removed, and any `user_id` blanked. Unbound and admin keys see them. An unreadable value hides the default. |
 
-Tag values are trimmed and must be printable ASCII; a value that looks like a credential (a provider or proxy key in any case, a bearer token — also URL-encoded as `Bearer%20…` — or a `Basic` value that decodes to `user:password`, a JWT, `user:password@` or a token as the user in a URL, a `password=…` pair, another secret-named key with a credential-shaped value, a private-key header) is **dropped, never stored**; the whole value is checked before it is cut to `max_value_chars`, so no prefix of a credential is kept. Detection looks for a credential-shaped body, not a keyword: `Basic analysis`, `token: refresh` and `ssh://git@github.com/org/repo` are kept. Dropped values are counted in `token_opt_usage_tags_dropped_total{reason="secret"}` (`reason="invalid"` for non-printable values). The settings are read from the global config only — a tenant's or team's overrides cannot change what is recorded — and an unreadable `tags` section records nothing. Tags are what the caller asserts: they never select a team, a limit, a route or a config (`usage_events.team` is the authenticated team, so the two may differ).
+Tag values are trimmed and must be printable ASCII; a value that looks like a credential (a provider or proxy key in any case, a bearer token — also URL-encoded as `Bearer%20…` — or a `Basic` value that decodes to `user:password`, a JWT, `user:password@` or a token as the user in a URL, a `password=…` pair, another secret-named key with a credential-shaped value, a private-key header) is **dropped, never stored**; the whole value is checked before it is cut to `max_value_chars`, so no prefix of a credential is kept. Detection looks for a credential-shaped body, not a keyword: `Basic analysis`, `token: refresh` and `ssh://git@github.com/org/repo` are kept. Also dropped: registry and platform tokens (Hugging Face `hf_…`, npm `npm_…`, PyPI `pypi-AgE…`, Stripe live and test keys), Slack webhook URLs and a signed URL's `sig=` (Azure SAS). Bare hex or base64 strings are kept: commit SHAs and run ids look the same. When a tag key arrives more than once (a header sent twice, or two allow-listed headers mapped to one key), the first value in the request decides, stored or dropped; later ones are ignored. Dropped values are counted in `token_opt_usage_tags_dropped_total{reason="secret"}` (`reason="invalid"` for non-printable values, `reason="duplicate"` for a repeated key). The settings are read from the global config only — a tenant's or team's overrides cannot change what is recorded — and an unreadable `tags` section records nothing. Tags are what the caller asserts: they never select a team, a limit, a route or a config (`usage_events.team` is the authenticated team, so the two may differ).
 
 **Observability / FinOps** (`portal.finops.*`) — tunes the Observability tab's spend forecast + anomaly detector:
 

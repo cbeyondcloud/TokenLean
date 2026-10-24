@@ -47,6 +47,38 @@ names that trace. A malformed header starts a new trace and is never an error. W
 changes. `tracing.forward_traceparent` (off by default) also sends the trace context to the provider.
 - **OSS:** trace-context extraction, the request span and its attributes ship in the core proxy.
 
+### LITE dashboards with a Team picker, and an optional Grafana in the LITE stack — Enhancement (OSS)
+Every dashboard that reads `usage_events` (Live Calls, Requests Explorer, Billing, SLA, Trends,
+Quarterly, Per Call) has a **Team** picker next to the tenant picker, and every one of its usage
+panels honours it; rows written before teams existed count as `default`. *All*, the default, filters
+nothing, so the full stack's dashboards look as before. `deploy/lite/local/up --grafana` starts
+Grafana and Prometheus with the LITE set (eight dashboards; Per Call only with `--langfuse`; Tenant
+Overview left out), provisioned read-only from `deploy/lite/grafana/`, whose datasource files any
+other Grafana can mount. Grafana runs as the unmodified upstream image, as in the full stack.
+- **OSS:** the dashboards, the provisioning files and the compose profile.
+
+### LITE profile with teams: team spend caps, usage tags and the Postgres key store on — Enhancement (OSS)
+The LITE profile (`config/profiles/agentic.yaml`) now runs the team level: each team's monthly spend
+cap is enforced (a `429` before any provider call; the tenant has no cap unless you set one), the
+`X-Agentic-*` usage tags are recorded, and proxy keys live in Postgres (`key_store.backend:
+postgres`), so `/admin/keys` and `/admin/routing` work on the LITE stack. The LITE smoke now issues a
+team-bound key, checks its usage row, its team cap and its revocation. `deploy/lite/cloud/` adds the
+proxy environment and the Helm values for a managed Postgres and Redis (no chart yet).
+`LITE_PROJECT` runs a second LITE stack beside the first, and the bash scripts work from Git Bash.
+- **OSS:** the profile, the smoke, the cloud templates.
+
+### A live stream sends x-tokenlean-request-id with its headers — Enhancement (OSS)
+The request id is known before the first chunk, so streams (OpenAI, Anthropic and Gemini routes) now
+carry `x-tokenlean-request-id`: a caller that abandons a stream can still find the call's usage row.
+The routed model stays off stream headers, since failover may still change it.
+- **OSS:** core proxy.
+
+### Usage tags: more credential shapes dropped; the first of a repeated tag decides — Bug fix
+Hugging Face, npm and PyPI tokens, Stripe test keys, Slack webhook URLs and signed-URL signatures
+(`sig=`) are now dropped like other credentials. When a tag arrives twice, the first value decides;
+a later header can no longer override it or stand in for a value dropped as a credential (counted as
+`reason="duplicate"`).
+
 ## 2026-10-23
 
 ### Routing rules and team limits over HTTP: validated, versioned, applied without a restart — Enhancement (OSS)
