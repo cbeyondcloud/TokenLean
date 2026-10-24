@@ -1,0 +1,4 @@
+# Mounted as langfuse.yaml when the stack runs without Langfuse: no Langfuse datasource.
+apiVersion: 1
+
+datasources: []

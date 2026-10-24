@@ -5,7 +5,8 @@
 .DESCRIPTION
   down.ps1 [-Purge]
 
-  -Purge  also delete the volumes (Postgres, Redis, Qdrant data). .env.lite is kept, so the
+  -Purge  also delete the volumes (Postgres, Redis, Qdrant, Prometheus, Grafana data; the
+          Postgres data holds the proxy keys issued through /admin/keys). .env.lite is kept, so the
           next up.ps1 reuses the same keys and passwords on fresh databases.
 
   Engine: $env:CONTAINER_ENGINE = 'docker' (default) or 'podman'.
@@ -23,6 +24,8 @@ if (Test-Path $LiteEnvFile) {
     $env:REDIS_PASSWORD = 'unused'
     $envFile = Join-Path $LiteDir '.env.lite.template'
 }
+# An .env.lite from before the grafana profile has no Grafana password; stopping needs none.
+if (-not $env:GRAFANA_ADMIN_PASSWORD) { $env:GRAFANA_ADMIN_PASSWORD = 'unused' }
 
 $downArgs = @('down', '--remove-orphans')
 if ($Purge) { $downArgs += '--volumes' }

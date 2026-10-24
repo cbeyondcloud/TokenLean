@@ -1,0 +1,19 @@
+# The LITE dashboard set: the OSS dashboards compose mounts into /etc/grafana/dashboards/lite
+# (Live Calls, Requests Explorer, Billing, Latency Breakup, SLA, Trust & Safety, Trends,
+# Quarterly). Tenant Overview is left out: an org runs LITE as one tenant with teams under it,
+# and the dashboards that read usage_events have a `team` picker.
+# The repository is the source: edits in the UI are not saved (copy a dashboard to change it).
+apiVersion: 1
+
+providers:
+  - name: tokenlean-lite
+    orgId: 1
+    folder: TokenLean LITE
+    type: file
+    disableDeletion: true
+    editable: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /etc/grafana/dashboards/lite
+      foldersFromFilesStructure: false

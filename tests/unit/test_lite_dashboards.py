@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 _REPO = Path(__file__).resolve().parents[2]
 DASHBOARD_DIR = _REPO / "dashboard" / "dashboards"
@@ -111,3 +112,112 @@ def test_the_full_stack_dashboards_keep_working_without_a_team_choice():
         for var in variables(load(fname)):
             if var.get("name") == "team":
                 assert var["current"]["value"] == "$__all"
+
+
+# ── Provisioning: deploy/lite's optional Grafana (`up --grafana`) loads exactly the set ──
+
+
+_LITE = _REPO / "deploy" / "lite"
+_GRAFANA = _LITE / "grafana"
+_PROV = _GRAFANA / "provisioning"
+_LITE_DIR_IN_GRAFANA = "/etc/grafana/dashboards/lite/"
+_LANGFUSE_DIR_IN_GRAFANA = "/etc/grafana/dashboards/langfuse/"
+
+
+def _compose_service(name: str) -> dict:
+    text = (_LITE / "local" / "docker-compose.lite.yml").read_text(encoding="utf-8")
+    return yaml.safe_load(text)["services"][name]
+
+
+def _mounts(service: str) -> list:
+    """(source, target) of each bind mount, with the trailing :ro dropped. A source may hold
+    a colon (`${VAR:-default}`); a target never does."""
+    out = []
+    for vol in _compose_service(service).get("volumes", []):
+        for mode in (":ro", ":rw"):
+            vol = vol[:-len(mode)] if vol.endswith(mode) else vol
+        source, _, target = vol.rpartition(":")
+        if source.startswith("."):
+            out.append((source, target))
+    return out
+
+
+def _yaml(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def _datasource_uids(dashboard: dict) -> set:
+    uids = {_uid(v) for v in variables(dashboard) if _uid(v)}
+    for panel in panels(dashboard):
+        uids |= {_uid(panel)} | {_uid(t) for t in panel.get("targets", []) or []}
+    return {u for u in uids if u and not u.startswith("$") and u != "-- Grafana --"}
+
+
+def test_grafana_mounts_exactly_the_lite_set():
+    mounts = _mounts("grafana")
+    lite = {t[len(_LITE_DIR_IN_GRAFANA):]: s for s, t in mounts
+            if t.startswith(_LITE_DIR_IN_GRAFANA)}
+    langfuse = {t[len(_LANGFUSE_DIR_IN_GRAFANA):]: s for s, t in mounts
+                if t.startswith(_LANGFUSE_DIR_IN_GRAFANA)}
+    assert sorted(lite) == sorted(LITE_SET)
+    assert sorted(langfuse) == sorted(LANGFUSE_ONLY)
+    for name, source in {**lite, **langfuse}.items():
+        assert source == f"../../../dashboard/dashboards/{name}"   # the shipped files, as is
+    assert not [t for _, t in mounts if any(n in t for n in NOT_IN_LITE)]
+
+
+def test_dashboard_providers_load_the_lite_folder_and_per_call_only_with_langfuse():
+    lite = _yaml(_PROV / "dashboards" / "lite.yaml")["providers"]
+    assert [p["options"]["path"] for p in lite] == [_LITE_DIR_IN_GRAFANA.rstrip("/")]
+    on = _yaml(_PROV / "dashboards" / "langfuse-on.yaml")["providers"]
+    assert [p["options"]["path"] for p in on] == [_LANGFUSE_DIR_IN_GRAFANA.rstrip("/")]
+    assert not _yaml(_PROV / "dashboards" / "langfuse-off.yaml").get("providers")
+    names = [p["name"] for p in lite + on]
+    assert len(set(names)) == len(names)
+    for p in lite + on:
+        assert p["type"] == "file" and p.get("allowUiUpdates") is False   # the repo is the source
+
+
+def test_the_langfuse_files_are_chosen_by_one_variable():
+    mounts = dict((t, s) for s, t in _mounts("grafana"))
+    for kind in ("datasources", "dashboards"):
+        source = mounts[f"/etc/grafana/provisioning/{kind}/langfuse.yaml"]
+        assert source == f"../grafana/provisioning/{kind}/langfuse-${{LITE_GRAFANA_LANGFUSE:-off}}.yaml"
+        for value in ("on", "off"):
+            assert (_PROV / kind / f"langfuse-{value}.yaml").is_file()
+    for script in ("up.sh", "up.ps1"):
+        assert "LITE_GRAFANA_LANGFUSE" in (_LITE / "local" / script).read_text(encoding="utf-8")
+
+
+def test_every_datasource_the_set_reads_is_provisioned():
+    lite = {d["uid"] for d in _yaml(_PROV / "datasources" / "lite.yaml")["datasources"]}
+    on = {d["uid"] for d in _yaml(_PROV / "datasources" / "langfuse-on.yaml")["datasources"]}
+    assert not _yaml(_PROV / "datasources" / "langfuse-off.yaml").get("datasources")
+    for fname in LITE_SET:
+        assert _datasource_uids(load(fname)) <= lite, fname
+    for fname in LANGFUSE_ONLY:
+        assert _datasource_uids(load(fname)) <= lite | on, fname
+    assert "langfuse-postgres" in on and "langfuse-postgres" not in lite
+
+
+def test_datasources_take_their_credentials_from_the_environment():
+    for name in ("lite.yaml", "langfuse-on.yaml"):
+        for ds in _yaml(_PROV / "datasources" / name)["datasources"]:
+            password = (ds.get("secureJsonData") or {}).get("password")
+            if ds["type"] == "postgres":
+                assert password and password.startswith("${"), (name, ds["uid"])
+                assert ds["url"].startswith("${") and ds["user"].startswith("${")
+            assert ds.get("editable") is False
+
+
+def test_prometheus_scrapes_the_proxy_with_the_scrape_token_file():
+    prom = _yaml(_GRAFANA / "prometheus.yml")
+    jobs = prom["scrape_configs"]
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job["static_configs"][0]["targets"] == ["proxy:8080"]
+    auth = job["authorization"]
+    assert auth.get("type", "Bearer") == "Bearer" and "credentials" not in auth
+    target = dict((t, s) for s, t in _mounts("prometheus"))
+    secrets_dir = next(t for t in target if target[t] == "./.state/prometheus")
+    assert auth["credentials_file"].startswith(secrets_dir + "/")

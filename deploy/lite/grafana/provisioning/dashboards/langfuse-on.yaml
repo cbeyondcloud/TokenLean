@@ -1,0 +1,16 @@
+# Mounted as langfuse.yaml when the stack runs with Langfuse: adds Per Call, whose trace panels
+# read the langfuse-postgres datasource.
+apiVersion: 1
+
+providers:
+  - name: tokenlean-lite-langfuse
+    orgId: 1
+    folder: TokenLean LITE
+    type: file
+    disableDeletion: true
+    editable: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /etc/grafana/dashboards/langfuse
+      foldersFromFilesStructure: false

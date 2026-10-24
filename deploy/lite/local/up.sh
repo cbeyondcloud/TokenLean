@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Start the TokenLean LITE stack: proxy (LITE profile) + Postgres + Redis.
 #
-#   ./up.sh [--qdrant] [--langfuse] [--mock] [--no-build]
+#   ./up.sh [--qdrant] [--langfuse] [--mock] [--grafana] [--no-build]
 #
 #   --qdrant    also start Qdrant (for optimisations you later turn on that need it)
 #   --langfuse  also start Langfuse and send traces to it (UI on LITE_LANGFUSE_PORT)
 #   --mock      also start a local OpenAI-compatible stand-in and route every model to it:
 #               no provider key, no spend (what CI and smoke use)
+#   --grafana   also start Grafana with the LITE dashboards, and the Prometheus they read
+#               (UI on LITE_GRAFANA_PORT; Per Call too with --langfuse)
 #   --no-build  do not rebuild the proxy image
 #
 # First run: creates .env.lite from .env.lite.template and generates its secrets and proxy
@@ -19,12 +21,14 @@ umask 077   # .env.lite holds secrets: owner-only from its first byte (.state is
 QDRANT=0
 LANGFUSE=0
 MOCK=0
+GRAFANA=0
 BUILD=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --qdrant) QDRANT=1 ;;
     --langfuse) LANGFUSE=1 ;;
     --mock) MOCK=1 ;;
+    --grafana) GRAFANA=1 ;;
     --no-build) BUILD=0 ;;
     -h | --help)
       lite_usage "$0"
@@ -63,6 +67,7 @@ fill LANGFUSE_SECRET_KEY "sk-lf-$(rand_hex 24)"
 fill LANGFUSE_NEXTAUTH_SECRET "$(rand_hex 32)"
 fill LANGFUSE_SALT "$(rand_hex 32)"
 fill LANGFUSE_INIT_USER_PASSWORD "$(rand_hex 16)"
+fill GRAFANA_ADMIN_PASSWORD "$(rand_hex 16)"
 chmod 600 "$LITE_ENV_FILE" 2>/dev/null || true
 lite_load_env
 
@@ -79,6 +84,13 @@ printf '{\n  "%s": {"tenant_id": "%s", "tier": "free"},\n  "%s": {"tenant_id": "
   >"$LITE_STATE_DIR/local-keys.json"
 chmod 644 "$LITE_STATE_DIR/local-keys.json"   # read by the proxy's unprivileged user
 
+# Prometheus (--grafana) presents METRICS_SCRAPE_TOKEN to /metrics: owner-only file, read by
+# the Prometheus container as root. Written on every up, so an edited token is picked up.
+mkdir -p "$LITE_STATE_DIR/prometheus"
+chmod 700 "$LITE_STATE_DIR/prometheus"
+printf '%s' "$METRICS_SCRAPE_TOKEN" >"$LITE_STATE_DIR/prometheus/metrics-scrape-token"
+chmod 600 "$LITE_STATE_DIR/prometheus/metrics-scrape-token"
+
 # Overlays (paths inside the proxy container) and compose profiles for this run.
 OVERLAYS="/app/lite/config/agentic.yaml"
 PROFILES=()
@@ -86,6 +98,12 @@ if [ "$QDRANT" = 1 ]; then PROFILES+=(--profile qdrant); fi
 if [ "$LANGFUSE" = 1 ]; then
   PROFILES+=(--profile langfuse)
   OVERLAYS="$OVERLAYS,/app/lite/config/langfuse.yaml"
+fi
+export LITE_GRAFANA_LANGFUSE=off
+if [ "$GRAFANA" = 1 ]; then
+  PROFILES+=(--profile grafana)
+  # Per Call and its Langfuse datasource only when Langfuse runs.
+  if [ "$LANGFUSE" = 1 ]; then LITE_GRAFANA_LANGFUSE=on; fi
 fi
 MODE=live
 if [ "$MOCK" = 1 ]; then
@@ -131,5 +149,8 @@ echo "lite: proxy  $(lite_base_url)  (OpenAI /v1/chat/completions, Anthropic /v1
 echo "lite: key    TOKENLEAN_API_KEY in $LITE_ENV_FILE"
 if [ "$LANGFUSE" = 1 ]; then
   echo "lite: langfuse http://127.0.0.1:${LITE_LANGFUSE_PORT:-3110} (${LANGFUSE_INIT_USER_EMAIL:-admin@lite.local}, password in .env.lite)"
+fi
+if [ "$GRAFANA" = 1 ]; then
+  echo "lite: grafana http://127.0.0.1:${LITE_GRAFANA_PORT:-3120} (admin, GRAFANA_ADMIN_PASSWORD in .env.lite; folder TokenLean LITE)"
 fi
 echo "lite: next   ./smoke.sh"

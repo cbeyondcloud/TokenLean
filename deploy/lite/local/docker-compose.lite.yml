@@ -4,11 +4,12 @@
 # Start it with up.sh / up.ps1 (they generate .env.lite, the proxy key file and the overlay
 # list, then wait for /health). By hand, from this directory:
 #   docker compose --env-file .env.lite up -d --build
-# Optional services are compose profiles: `qdrant`, `langfuse`, and `mock` (a local
-# OpenAI-compatible stand-in, so smoke runs with no provider key). Podman works through
-# `podman compose` (set CONTAINER_ENGINE=podman for the scripts).
+# Optional services are compose profiles: `qdrant`, `langfuse`, `mock` (a local
+# OpenAI-compatible stand-in, so smoke runs with no provider key) and `grafana` (the LITE
+# dashboards and the Prometheus they read). Podman works through `podman compose` (set
+# CONTAINER_ENGINE=podman for the scripts).
 #
-# Only the proxy (and Langfuse's UI when its profile is on) publishes a port, bound to
+# Only the proxy (and Langfuse's and Grafana's UIs when their profiles are on) publishes a port, bound to
 # LITE_BIND (127.0.0.1 unless set). Postgres, Redis and Qdrant are reachable only on the
 # stack's own network. The project name keeps this stack apart from the full TokenLean
 # compose (token-opt-*): different containers, volumes and network.
@@ -17,7 +18,9 @@
 # TOKENLEAN_IMAGE names a pre-built one. The others are exact releases, published for both
 # amd64 and arm64 (Apple Silicon), under the licences TokenLean allows:
 #   pgvector/pgvector 0.8.7-pg15 (PostgreSQL), redis 7.2.16 (BSD-3; 7.4+ is not),
-#   qdrant v1.12.6 (Apache-2.0), langfuse 2.95.11 (MIT; v3 needs ClickHouse).
+#   qdrant v1.12.6 (Apache-2.0), langfuse 2.95.11 (MIT; v3 needs ClickHouse),
+#   prometheus v2.52.0 (Apache-2.0), grafana-oss 10.4.0 (AGPL-3.0, unmodified; the full
+#   stack's pins).
 # =============================================================================
 
 name: tokenlean-lite
@@ -180,7 +183,85 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # ── Dashboards (profile `grafana`, up --grafana) ────────────────────────────
+  # The LITE set of TokenLean's OSS dashboards (deploy/lite/grafana) with the Prometheus they
+  # read. Grafana is the one AGPL-3.0 component (THIRD_PARTY_LICENSES.md): it runs as the
+  # unmodified upstream image, as in the full stack.
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    profiles: ["grafana"]
+    # root inside the container: it reads .state/prometheus/metrics-scrape-token, which up
+    # writes owner-only (0600) in a 0700 directory. Never published.
+    user: "0:0"
+    command: ["--config.file=/etc/prometheus/prometheus.yml",
+              "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=15d"]
+    volumes:
+      - ../grafana/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./.state/prometheus:/etc/prometheus/secrets:ro
+      - prometheusdata:/prometheus
+    depends_on:
+      - proxy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:10.4.0
+    profiles: ["grafana"]
+    ports:
+      - "${LITE_BIND:-127.0.0.1}:${LITE_GRAFANA_PORT:-3120}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is empty - run up.sh or up.ps1, which generates it}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      # Read by the provisioned datasources (deploy/lite/grafana/provisioning/datasources).
+      LITE_DB_HOST: postgres:5432
+      LITE_DB_NAME: tokenlean
+      LITE_LANGFUSE_DB_NAME: langfuse
+      LITE_DB_USER: tokenlean
+      LITE_DB_PASSWORD: ${DB_PASSWORD}
+      LITE_DB_SSLMODE: disable
+      LITE_PROMETHEUS_URL: http://prometheus:9090
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ../grafana/provisioning/datasources/lite.yaml:/etc/grafana/provisioning/datasources/lite.yaml:ro
+      - ../grafana/provisioning/dashboards/lite.yaml:/etc/grafana/provisioning/dashboards/lite.yaml:ro
+      # Per Call and its Langfuse datasource only with --langfuse (up sets LITE_GRAFANA_LANGFUSE=on).
+      - ../grafana/provisioning/datasources/langfuse-${LITE_GRAFANA_LANGFUSE:-off}.yaml:/etc/grafana/provisioning/datasources/langfuse.yaml:ro
+      - ../grafana/provisioning/dashboards/langfuse-${LITE_GRAFANA_LANGFUSE:-off}.yaml:/etc/grafana/provisioning/dashboards/langfuse.yaml:ro
+      # The LITE set, as shipped in dashboard/dashboards (Tenant Overview is not in it).
+      - ../../../dashboard/dashboards/live.json:/etc/grafana/dashboards/lite/live.json:ro
+      - ../../../dashboard/dashboards/requests.json:/etc/grafana/dashboards/lite/requests.json:ro
+      - ../../../dashboard/dashboards/billing.json:/etc/grafana/dashboards/lite/billing.json:ro
+      - ../../../dashboard/dashboards/latency-breakup.json:/etc/grafana/dashboards/lite/latency-breakup.json:ro
+      - ../../../dashboard/dashboards/sla.json:/etc/grafana/dashboards/lite/sla.json:ro
+      - ../../../dashboard/dashboards/trust-safety.json:/etc/grafana/dashboards/lite/trust-safety.json:ro
+      - ../../../dashboard/dashboards/trends.json:/etc/grafana/dashboards/lite/trends.json:ro
+      - ../../../dashboard/dashboards/quarterly.json:/etc/grafana/dashboards/lite/quarterly.json:ro
+      - ../../../dashboard/dashboards/per-call.json:/etc/grafana/dashboards/langfuse/per-call.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redisdata:
   qdrantdata:
+  prometheusdata:
+  grafanadata:

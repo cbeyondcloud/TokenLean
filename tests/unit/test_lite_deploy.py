@@ -77,6 +77,8 @@ def test_optional_services_sit_in_their_profiles():
     assert services["qdrant"]["profiles"] == ["qdrant"]
     assert services["langfuse"]["profiles"] == ["langfuse"]
     assert services["mock-llm"]["profiles"] == ["mock"]
+    assert services["grafana"]["profiles"] == ["grafana"]
+    assert services["prometheus"]["profiles"] == ["grafana"]
     for core in ("proxy", "postgres", "redis"):
         assert "profiles" not in services[core], core
 
@@ -87,7 +89,8 @@ def test_published_ports_are_bound_to_the_configured_address():
         for port in svc.get("ports", []):
             assert str(port).startswith("${LITE_BIND:-127.0.0.1}:"), f"{name}: {port}"
             published[name] = port
-    assert set(published) == {"proxy", "langfuse"}   # the databases are never published
+    # the databases and Prometheus are never published
+    assert set(published) == {"proxy", "langfuse", "grafana"}
 
 
 def test_no_fixed_container_names():
@@ -146,7 +149,7 @@ def test_env_template_generated_values_are_empty():
     for key in ("TOKENLEAN_API_KEY", "TOKENLEAN_ADMIN_KEY", "DB_PASSWORD", "REDIS_PASSWORD",
                 "QDRANT_API_KEY", "METRICS_SCRAPE_TOKEN", "LANGFUSE_PUBLIC_KEY",
                 "LANGFUSE_SECRET_KEY", "LANGFUSE_NEXTAUTH_SECRET", "LANGFUSE_SALT",
-                "LANGFUSE_INIT_USER_PASSWORD"):
+                "LANGFUSE_INIT_USER_PASSWORD", "GRAFANA_ADMIN_PASSWORD"):
         assert values.get(key) == "", key
     assert not [k for k, v in values.items() if k.startswith("LLM_KEY_") and v]
 
@@ -289,5 +292,59 @@ def test_powershell_helpers_pin_the_project_and_ignore_a_foreign_compose_project
 
 def test_mock_and_optional_services_have_healthchecks():
     services = _compose()["services"]
-    for name in ("mock-llm", "qdrant", "langfuse"):
+    for name in ("mock-llm", "qdrant", "langfuse", "grafana", "prometheus"):
         assert services[name].get("healthcheck", {}).get("test"), name
+
+
+def test_grafana_needs_a_generated_admin_password():
+    """Grafana's admin is admin/admin when no password is set: compose must refuse instead."""
+    env = _compose()["services"]["grafana"]["environment"]
+    assert env["GF_SECURITY_ADMIN_PASSWORD"].startswith("${GRAFANA_ADMIN_PASSWORD:?")
+    assert env.get("GF_AUTH_ANONYMOUS_ENABLED") == "false"
+    for script in ("up.sh", "up.ps1"):
+        assert "GRAFANA_ADMIN_PASSWORD" in _read(os.path.join(_LOCAL, script))
+    for script in ("down.sh", "down.ps1"):     # down without .env.lite still interpolates
+        assert "GRAFANA_ADMIN_PASSWORD" in _read(os.path.join(_LOCAL, script))
+
+
+def test_up_writes_the_scrape_token_for_prometheus_owner_only():
+    sh = _read(os.path.join(_LOCAL, "up.sh"))
+    assert '"$LITE_STATE_DIR/prometheus"' in sh
+    assert "chmod 700" in sh and "metrics-scrape-token" in sh
+    assert "metrics-scrape-token" in _read(os.path.join(_LOCAL, "up.ps1"))
+    assert _compose()["services"]["prometheus"].get("user") == "0:0"   # reads the 0600 file
+
+
+def test_git_bash_does_not_rewrite_the_overlay_paths():
+    """Git Bash (MSYS2) turns /app/... in an exported variable into C:/Program Files/Git/app/...
+    when it starts docker.exe; the overlays are paths inside the container."""
+    assert "MSYS2_ENV_CONV_EXCL" in _read(os.path.join(_LOCAL, "_lib.sh"))
+
+
+def test_bash_helpers_take_another_project_name_from_the_environment():
+    """LITE_PROJECT runs a second LITE stack next to the first (CI, a review checkout); it is
+    read from the environment only and checked, and the default stays tokenlean-lite."""
+    out = _run_bash('. ./_lib.sh; echo "p=$LITE_PROJECT"', {"LITE_PROJECT": "lite-review-2"})
+    assert "p=lite-review-2" in out
+    env = {k: v for k, v in os.environ.items() if k != "LITE_PROJECT"}
+    bash = _bash()
+    if not bash:
+        pytest.skip("bash not available")
+    default = subprocess.run([bash, "-c", '. ./_lib.sh; echo "p=$LITE_PROJECT"'], cwd=_LOCAL,
+                             env=env, capture_output=True, text=True, timeout=60)
+    assert "p=tokenlean-lite" in default.stdout
+    bad = subprocess.run([bash, "-c", ". ./_lib.sh"], cwd=_LOCAL, capture_output=True,
+                         env=dict(env, LITE_PROJECT="Bad Name;rm"), text=True, timeout=60)
+    assert bad.returncode != 0 and "LITE_PROJECT" in bad.stderr
+
+
+def test_powershell_helpers_take_another_project_name_from_the_environment():
+    ps = _powershell()
+    if not ps:
+        pytest.skip("PowerShell not available")
+    script = f". '{os.path.join(_LOCAL, '_lib.ps1')}'; Write-Output ('p=' + $LiteProject)"
+    out = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", script],
+                         env=dict(os.environ, LITE_PROJECT="lite-review-2"),
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert "p=lite-review-2" in out.stdout

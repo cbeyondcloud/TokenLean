@@ -1,0 +1,4 @@
+# Mounted as langfuse.yaml when the stack runs without Langfuse: Per Call is not provisioned.
+apiVersion: 1
+
+providers: []
