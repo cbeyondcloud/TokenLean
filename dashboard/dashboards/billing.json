@@ -31,6 +31,27 @@
           "text": "All"
         },
         "refresh": 2
+      },
+      {
+        "name": "team",
+        "type": "query",
+        "label": "Team",
+        "description": "The authenticated team (usage_events.team; 'default' = no team, which also covers rows written before teams existed). Filters every panel that reads usage_events; Prometheus panels are not filtered by team.",
+        "datasource": {
+          "type": "postgres",
+          "uid": "app-postgres"
+        },
+        "definition": "SELECT DISTINCT COALESCE(NULLIF(team, ''), 'default') AS team FROM usage_events WHERE $__timeFilter(timestamp) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') ORDER BY 1",
+        "query": "SELECT DISTINCT COALESCE(NULLIF(team, ''), 'default') AS team FROM usage_events WHERE $__timeFilter(timestamp) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') ORDER BY 1",
+        "includeAll": true,
+        "multi": false,
+        "allValue": ".*",
+        "current": {
+          "value": "$__all",
+          "text": "All"
+        },
+        "refresh": 2,
+        "sort": 1
       }
     ]
   },
@@ -362,7 +383,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT SUM(baseline_tokens) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}')",
+          "rawSql": "SELECT SUM(baseline_tokens) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}')",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -418,7 +439,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT SUM(proxy_optimised_tokens) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}')",
+          "rawSql": "SELECT SUM(proxy_optimised_tokens) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}')",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -474,7 +495,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT SUM(tokens_saved) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}')",
+          "rawSql": "SELECT SUM(tokens_saved) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}')",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -525,7 +546,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT ROUND(100.0 * SUM(tokens_saved) / NULLIF(SUM(baseline_tokens), 0), 1) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}')",
+          "rawSql": "SELECT ROUND(100.0 * SUM(tokens_saved) / NULLIF(SUM(baseline_tokens), 0), 1) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}')",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -580,7 +601,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('day', timestamp) AS time, SUM(baseline_tokens) AS \"input (x)\", SUM(proxy_optimised_tokens) AS \"passed to LLM (y)\", SUM(tokens_saved) AS \"saved\" FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') GROUP BY 1 ORDER BY 1",
+          "rawSql": "SELECT date_trunc('day', timestamp) AS time, SUM(baseline_tokens) AS \"input (x)\", SUM(proxy_optimised_tokens) AS \"passed to LLM (y)\", SUM(tokens_saved) AS \"saved\" FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') GROUP BY 1 ORDER BY 1",
           "format": "time_series",
           "datasource": {
             "type": "postgres",
@@ -628,7 +649,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT SUM(COALESCE(provider_prompt_tokens, 0)) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}')",
+          "rawSql": "SELECT SUM(COALESCE(provider_prompt_tokens, 0)) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}')",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -684,7 +705,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT SUM(response_tokens) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}')",
+          "rawSql": "SELECT SUM(response_tokens) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}')",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -739,7 +760,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT SUM(COALESCE(provider_prompt_tokens, 0) + response_tokens) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}')",
+          "rawSql": "SELECT SUM(COALESCE(provider_prompt_tokens, 0) + response_tokens) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}')",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -789,7 +810,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('day', timestamp) AS time, SUM(COALESCE(provider_prompt_tokens, 0)) AS \"real input\", SUM(response_tokens) AS \"real output\" FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') GROUP BY 1 ORDER BY 1",
+          "rawSql": "SELECT date_trunc('day', timestamp) AS time, SUM(COALESCE(provider_prompt_tokens, 0)) AS \"real input\", SUM(response_tokens) AS \"real output\" FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') GROUP BY 1 ORDER BY 1",
           "format": "time_series",
           "datasource": {
             "type": "postgres",
@@ -880,7 +901,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT SUM(cache_read_tokens) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}')",
+          "rawSql": "SELECT SUM(cache_read_tokens) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}')",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -936,7 +957,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT SUM(cache_write_tokens) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}')",
+          "rawSql": "SELECT SUM(cache_write_tokens) AS value FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}')",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -992,7 +1013,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('day', timestamp) AS time, SUM(cache_read_tokens) AS \"cache read\", SUM(cache_write_tokens) AS \"cache write\" FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') GROUP BY 1 ORDER BY 1",
+          "rawSql": "SELECT date_trunc('day', timestamp) AS time, SUM(cache_read_tokens) AS \"cache read\", SUM(cache_write_tokens) AS \"cache write\" FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND ('${team}' = '.*' OR COALESCE(NULLIF(team, ''), 'default') = '${team}') GROUP BY 1 ORDER BY 1",
           "format": "time_series",
           "datasource": {
             "type": "postgres",
