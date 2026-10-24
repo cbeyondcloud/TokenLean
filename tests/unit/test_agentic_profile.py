@@ -62,7 +62,8 @@ def _lite_config(monkeypatch):
 def test_profile_is_a_mapping_overlay():
     with open(_PROFILE, encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
-    assert isinstance(data, dict) and set(data) <= {"groups", "observability"}
+    assert isinstance(data, dict)
+    assert set(data) <= {"groups", "observability", "rate_limit", "billing", "key_store"}
 
 
 def test_profile_effective_config(monkeypatch):
@@ -90,6 +91,25 @@ def test_profile_effective_config(monkeypatch):
         assert groups[key]["mode"] == "flag", key   # records, never edits or blocks
     assert cfg["rate_limit"]["enabled"] is True     # spend caps and limits stay
     assert cfg["observability"]["stream_cost_event"] is True
+
+
+def test_profile_turns_the_team_level_on(monkeypatch):
+    """LITE runs teams under one tenant (ST-1, ST-2, ST-9): spend caps are enforced (teams'
+    own caps included; the tenant has none unless one is set), the X-Agentic-* usage tags are
+    recorded, and proxy keys live in Postgres so /admin/keys works on every replica."""
+    from auth.key_store_config import key_store_settings
+    from billing.tags import DEFAULT_TAG_HEADERS, extract_tags
+    cfg = _lite_config(monkeypatch)
+    spend = cfg["rate_limit"]["spend_cap"]
+    assert spend["enabled"] is True
+    assert "monthly_spend_cap_usd" not in (cfg.get("limits") or {})   # no tenant cap assumed
+    assert not (cfg.get("billing") or {}).get("rate_card")            # nor a tier default
+    assert cfg["billing"]["metering"]["tags"]["enabled"] is True
+    sent = {name: f"v-{key}" for name, key in DEFAULT_TAG_HEADERS.items()}
+    assert extract_tags({**sent, "X-Not-Listed": "x"}, cfg) == {
+        key: f"v-{key}" for key in DEFAULT_TAG_HEADERS.values()}
+    assert key_store_settings(cfg)["backend"] == "postgres"
+    assert "teams" not in cfg              # teams are the deployment's, via /admin/routing
 
 
 def test_only_approved_groups_enabled(monkeypatch):
@@ -444,3 +464,85 @@ async def test_lite_refuses_an_unconfigured_model(monkeypatch):
     assert "my-custom-model-x" in error["message"]
     assert acompletion.await_count == 0
     assert "x-tokenlean-model-substituted" not in resp.headers
+
+
+# ── Teams under LITE: a team-bound key, its spend cap, its usage tags ────────────────────
+
+_TEAM = "payments"
+_TEAM_KEY = "lite-team-key-payments"
+_TEAM_TENANT = "LITE-LOC-01"
+
+
+def _team_counter():
+    import time
+    return f"t:{_TEAM_TENANT}:team:{_TEAM}:spend:{time.strftime('%Y%m', time.gmtime())}"
+
+
+def _with_team(lite, cap=5.0):
+    cfg = copy.deepcopy(lite)
+    cfg["teams"] = {_TEAM: {"monthly_spend_cap_usd": cap}}
+    return cfg
+
+
+async def _send_team(lite_cfg, body, acompletion, team_spent=None, headers=None):
+    """_send with a team-bound key of the LITE tenant, the team's spend counter at
+    ``team_spent`` and the request's usage tags captured."""
+    import contextlib
+    import hashlib
+    import importlib
+
+    from httpx import ASGITransport, AsyncClient
+
+    from tests import conftest as c
+    lite_cfg = copy.deepcopy(lite_cfg)
+    lite_cfg["rate_limit"]["enabled"] = False     # the token bucket (see _send); caps stay on
+    keys = c._setup_auth_keys()
+    keys[hashlib.sha256(_TEAM_KEY.encode()).hexdigest()] = {
+        "tenant_id": _TEAM_TENANT, "tier": "free", "team": _TEAM}
+    redis = c._make_mock_redis()
+    redis.get = AsyncMock(side_effect=lambda key: team_spent if key == _team_counter() else None)
+    seen = {}
+    with contextlib.ExitStack() as stack:
+        for p in _patches(lite_cfg, acompletion):
+            stack.enter_context(p)
+        stack.enter_context(patch("auth.api_key_manager._KEY_CACHE", keys))
+        stack.enter_context(patch("middleware.g00_rate_limit._get_redis", return_value=redis))
+        import main
+        importlib.reload(main)
+        record = main._record_outcome
+
+        def capture(ctx, *args, **kwargs):
+            seen.update(team=ctx.team, tags=getattr(ctx, "usage_tags", None))
+            return record(ctx, *args, **kwargs)
+        stack.enter_context(patch.object(main, "_record_outcome", capture))
+        async with AsyncClient(transport=ASGITransport(app=main.app),
+                               base_url="http://test") as client:
+            resp = await client.post("/v1/chat/completions", json=body, headers={
+                "Authorization": f"Bearer {_TEAM_KEY}", **(headers or {})})
+        return resp, seen
+
+
+@pytest.mark.asyncio
+async def test_lite_serves_a_team_key_unchanged_and_records_its_team_and_tags(monkeypatch):
+    lite = _with_team(_lite_config(monkeypatch))
+    acompletion = AsyncMock(return_value=_response_mock("gpt-4o-mini"))
+    body = {"model": "gpt-4o-mini", "messages": copy.deepcopy(_MESSAGES),
+            **copy.deepcopy(_CLIENT_PARAMS)}
+    resp, seen = await _send_team(lite, body, acompletion, team_spent="1.0", headers={
+        "X-Agentic-Run-Id": "run-42", "X-Agentic-Step": "plan", "X-Not-Listed": "x",
+        "X-Team": "another-team"})                      # the key's binding wins
+    assert resp.status_code == 200, resp.text
+    _assert_forwarded_unchanged(acompletion.call_args.kwargs, "gpt-4o-mini")
+    assert seen["team"] == _TEAM
+    assert seen["tags"] == {"run_id": "run-42", "step": "plan"}
+
+
+@pytest.mark.asyncio
+async def test_lite_honours_a_team_spend_cap(monkeypatch):
+    lite = _with_team(_lite_config(monkeypatch), cap=5.0)
+    acompletion = AsyncMock(return_value=_response_mock("gpt-4o-mini"))
+    body = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]}
+    resp, _ = await _send_team(lite, body, acompletion, team_spent="5.0")
+    assert resp.status_code == 429, resp.text
+    assert resp.json()["error"]["code"] == "team_spend_cap_exceeded"
+    assert acompletion.await_count == 0                 # refused before any provider call
