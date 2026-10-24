@@ -147,6 +147,66 @@ class TestValues:
         assert usage_tags.TAGS_DROPPED.labels(reason="secret")._value.get() == before + 1
 
 
+class TestMoreCredentialFamilies:
+    """Token families a mistaken header value can carry (agentic-sdlc DF-452). Assembled at
+    run time, like the fakes above, so the repository's leak scan has nothing to flag."""
+
+    @pytest.mark.parametrize("value", [
+        "h" + "f_" + "AbCdEfGhIjKlMnOpQrStUvWxYz01234567",              # Hugging Face
+        "np" + "m_" + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",           # npm
+        "py" + "pi-AgEIcHlwaS5vcmc" + "Ab1Cd2Ef3Gh4" * 6,                # PyPI upload token
+        "sk" + "_test_" + "4eC39HqLyjWDarjtT1zdp7dc",                    # Stripe test key
+        "rk" + "_test_" + "4eC39HqLyjWDarjtT1zdp7dc",
+        "https://hooks." + "slack.com/services/" + "T0000000/B0000000/" + "X" * 24,
+        "https://acct.blob.core.windows.net/c/f?sv=2022-11-02&se=2026-12-01&sp=r&sig="
+        + "AbCdEf0123456789%2BxyzAbCdEf0123%3D",                          # Azure SAS URL
+        "Basic " + "Og==",                                                # ":" (empty user)
+    ])
+    def test_these_are_never_stored(self, value):
+        assert looks_like_secret(value)
+        assert extract_tags({"x-agentic-repo": value}, {}) is None
+
+    @pytest.mark.parametrize("value", [
+        "hf_model_v2", "npm_package-lock", "pypi-release-2026", "sk_test_suite",
+        "https://hooks.example.com/services/build", "design=sig", "sig=ok",
+        # Bare hex and base64-looking ids are attribution values (commit SHAs, run ids):
+        "9fceb02d0ae598e95dc970b74767f19372d61af8", "c3VtbWFyeS1zdGVw",
+    ])
+    def test_near_misses_are_kept(self, value):
+        assert not looks_like_secret(value)
+
+
+class TestRepeatedHeaders:
+    """A header sent twice, or two allow-listed headers mapped to one tag key: the first
+    value in the request decides (stored, or dropped as a credential); later ones are
+    ignored and counted as `duplicate`, never stored instead."""
+
+    def _headers(self, pairs):
+        from starlette.datastructures import Headers
+        return Headers(raw=[(k.lower().encode(), v.encode()) for k, v in pairs])
+
+    def test_the_first_of_a_repeated_header_wins(self):
+        before = usage_tags.TAGS_DROPPED.labels(reason="duplicate")._value.get()
+        got = extract_tags(self._headers([("X-Agentic-Step", "plan"),
+                                          ("X-Agentic-Step", "implement")]), {})
+        assert got == {"step": "plan"}
+        assert usage_tags.TAGS_DROPPED.labels(reason="duplicate")._value.get() == before + 1
+
+    def test_the_first_of_two_headers_for_one_key_wins(self):
+        cfg = _cfg(headers={"X-Agentic-Step": "step", "X-Step-Name": "step"})
+        assert extract_tags(self._headers([("X-Step-Name", "a"), ("X-Agentic-Step", "b")]),
+                            cfg) == {"step": "a"}
+        assert extract_tags(self._headers([("X-Agentic-Step", "b"), ("X-Step-Name", "a")]),
+                            cfg) == {"step": "b"}
+
+    def test_a_dropped_first_value_is_not_replaced_by_a_later_one(self):
+        secret = "pass" + "word=hunter2"
+        got = extract_tags(self._headers([("X-Agentic-Step", secret),
+                                          ("X-Agentic-Step", "implement"),
+                                          ("X-Agentic-Agent", "builder")]), {})
+        assert got == {"agent": "builder"}
+
+
 class TestConfiguration:
     def test_switched_off(self):
         assert extract_tags(FRAMEWORK, _cfg(enabled=False)) is None
