@@ -7,10 +7,13 @@
               the first provider key set in .env.lite
 
   Checks: /health; an OpenAI chat completion (x-tokenlean-request-id + x-tokenlean-cost-usd,
-  and no x-tokenlean-model-substituted); the same streamed (the final ': x-tokenlean-cost' frame and [DONE]); an Anthropic
-  /v1/messages call (x-api-key auth, x-tokenlean-* headers); then a usage row for each of the
-  three calls, through /admin/usage-export. TokenLean has no /v1/responses endpoint.
-  Live mode makes three small real calls (a fraction of a cent). HTTP only, any engine.
+  and no x-tokenlean-model-substituted); the same streamed (the request-id header, and the
+  final ': x-tokenlean-cost' frame, cost to 6 decimals, before [DONE]); an Anthropic
+  /v1/messages call (x-api-key auth, x-tokenlean-* headers); a usage row for each of the three
+  calls, through /admin/usage-export; then a team-bound key issued through /admin/keys: served,
+  its usage row carries its team, its team's spend cap (set through /admin/routing, then rolled
+  back; skipped when an overlay is already set) answers 429, and once revoked it gets 401.
+  Live mode makes about six small real calls (a fraction of a cent). HTTP only, any engine.
 #>
 . (Join-Path $PSScriptRoot '_lib.ps1')
 
@@ -51,17 +54,28 @@ function Get-Header($Response, [string]$Name) {
     if ($null -eq $value) { return '' }
     return (@($value) -join ',').Trim()
 }
-# POST JSON; returns @{ Status; Text; Response } and never throws on an HTTP error.
-function Send-Json([string]$Path, [string]$Json, [hashtable]$Headers) {
+# Send a request; returns @{ Status; Text; Response } and never throws on an HTTP error (Text
+# is then the error body when the server sent one).
+function Send-Request([string]$Method, [string]$Path, [string]$Json, [hashtable]$Headers) {
     try {
-        $r = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$base$Path" -Headers $Headers `
-            -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($Json)) -TimeoutSec 120
+        $params = @{ UseBasicParsing = $true; Method = $Method; Uri = "$base$Path"
+                     Headers = $Headers; TimeoutSec = 120 }
+        if ($Json) {
+            $params.ContentType = 'application/json'
+            $params.Body = [Text.Encoding]::UTF8.GetBytes($Json)
+        }
+        $r = Invoke-WebRequest @params
         return @{ Status = [int]$r.StatusCode; Text = (Get-Text $r); Response = $r }
     } catch {
         $status = 0
         if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
-        return @{ Status = $status; Text = $_.Exception.Message; Response = $null }
+        $text = $_.Exception.Message
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $text = $_.ErrorDetails.Message }
+        return @{ Status = $status; Text = $text; Response = $null }
     }
+}
+function Send-Json([string]$Path, [string]$Json, [hashtable]$Headers) {
+    return Send-Request 'Post' $Path $Json $Headers
 }
 function Get-Snippet([string]$Text) {
     if ($Text.Length -gt 300) { return $Text.Substring(0, 300) }
@@ -95,17 +109,21 @@ if ($r.Status -eq 200 -and $id1 -and $cost1 -and -not $sub1 -and $r.Text -match 
 # 3. OpenAI chat completion, streamed
 $body = "{`"model`":`"$model`",`"max_tokens`":16,`"stream`":true,`"messages`":[{`"role`":`"user`",`"content`":`"Reply with the word pong. ($nonce b)`"}]}"
 $r = Send-Json '/v1/chat/completions' $body $bearer
-$id2 = ''; $cost2 = ''
+$id2 = ''; $cost2 = ''; $hid2 = ''
 $m = [regex]::Match($r.Text, '(?m)^: x-tokenlean-cost (\{.*\})')
 if ($m.Success) {
     $frame = $m.Groups[1].Value
     $id2 = [regex]::Match($frame, '"request_id":"([^"]*)"').Groups[1].Value
     $cost2 = [regex]::Match($frame, '"cost_usd":"([^"]*)"').Groups[1].Value
 }
-if ($r.Status -eq 200 -and $id2 -and $r.Text -match '(?m)^data: \[DONE\]') {
-    Write-Pass "chat completion stream (final cost frame `$$cost2)"; $ids.Add($id2)
+if ($r.Response) { $hid2 = Get-Header $r.Response 'x-tokenlean-request-id' }   # before any chunk
+# The cost frame comes right before [DONE], with the cost to 6 decimal places.
+$done = [regex]::Match($r.Text, '(?m)^data: \[DONE\]')
+$ordered = $m.Success -and $done.Success -and ($m.Index -lt $done.Index)
+if ($r.Status -eq 200 -and $id2 -and $hid2 -eq $id2 -and $ordered -and $cost2 -match '^\d+\.\d{6}$') {
+    Write-Pass "chat completion stream (request-id header, final cost frame `$$cost2 before [DONE])"; $ids.Add($id2)
 } else {
-    Write-Fail "chat completion stream (status $($r.Status), no cost frame or [DONE]): $(Get-Snippet $r.Text)"
+    Write-Fail "chat completion stream (status $($r.Status), header id '$hid2', frame id '$id2', cost '$cost2', frame before [DONE] $ordered): $(Get-Snippet $r.Text)"
 }
 
 # 4. Anthropic messages
@@ -136,6 +154,78 @@ if ($ids.Count -gt 0) {
     else { Write-Fail "usage rows missing for: $($missing -join ' ')" }
 } else {
     Write-Fail 'usage rows (no call succeeded)'
+}
+
+# 6. a team-bound key, issued through /admin/keys (keys live in Postgres): it is served, its
+# usage row carries its team, its team's spend cap is enforced, and once revoked it is refused.
+function Get-JsonField([string]$Text, [string]$Name) {
+    return [regex]::Match($Text, "`"$Name`":`"([^`"]*)`"").Groups[1].Value
+}
+$tenant = if ($env:LITE_TENANT_ID) { $env:LITE_TENANT_ID } else { 'LITE-LOC-01' }
+$team = "lite-smoke-$nonce"
+$admin = @{ Authorization = "Bearer $($env:TOKENLEAN_ADMIN_KEY)" }
+$r = Send-Json '/admin/keys' "{`"tenant_id`":`"$tenant`",`"team`":`"$team`",`"label`":`"lite smoke`"}" $admin
+$teamKey = Get-JsonField $r.Text 'key'
+$teamKeyId = Get-JsonField $r.Text 'key_id'
+if ($r.Status -eq 201 -and $teamKey -and $teamKeyId) {
+    Write-Pass "team key issued (team $team, key_id $teamKeyId)"
+    $teamAuth = @{ Authorization = "Bearer $teamKey" }
+    function Send-TeamCall([string]$Suffix) {
+        $b = "{`"model`":`"$model`",`"max_tokens`":16,`"messages`":[{`"role`":`"user`",`"content`":`"Reply with the word pong. ($nonce team $Suffix)`"}]}"
+        return Send-Json '/v1/chat/completions' $b $teamAuth
+    }
+    $t = Send-TeamCall 'a'
+    $tid = ''
+    if ($t.Response) { $tid = Get-Header $t.Response 'x-tokenlean-request-id' }
+    if ($t.Status -eq 200 -and $tid) {
+        $row = ''
+        for ($try = 0; $try -lt 10; $try++) {
+            $u = Send-Json '/admin/usage-export' '{}' $teamAuth
+            $row = @($u.Text -split "`n" | Where-Object { $_ -match [regex]::Escape("`"request_id`":`"$tid`"") }) | Select-Object -First 1
+            if ($row) { break }
+            Start-Sleep -Seconds 2
+        }
+        if ($row -and $row -match [regex]::Escape("`"team`":`"$team`"")) {
+            Write-Pass "team key served; its usage row carries team $team"
+        } else { Write-Fail "team key usage row (request $tid): $row" }
+    } else {
+        Write-Fail "team key call (status $($t.Status)): $(Get-Snippet $t.Text)"
+    }
+
+    # The team's cap, set through /admin/routing only while the routing overlay is empty (a PUT
+    # replaces the whole overlay); rolled back to that empty version afterwards.
+    $current = Send-Request 'Get' '/admin/routing' '' $admin
+    $rver = [regex]::Match($current.Text, '^\{"version":(\d+),').Groups[1].Value
+    if ($rver -and $current.Text -match '"fragment":\{\}') {
+        $fragment = "{`"tenants`":{`"$tenant`":{`"teams`":{`"$team`":{`"monthly_spend_cap_usd`":0.000001}}}}}"
+        $put = Send-Request 'Put' '/admin/routing' "{`"expected_version`":$rver,`"comment`":`"lite smoke`",`"fragment`":$fragment}" $admin
+        if ($put.Status -eq 200) {
+            $capped = $false; $last = 0
+            for ($i = 1; $i -le 5; $i++) {   # the first call's cost reaches the counter just after it
+                $c = Send-TeamCall "b$i"
+                $last = $c.Status
+                if ($c.Status -eq 429 -and $c.Text -match 'team_spend_cap_exceeded') { $capped = $true; break }
+                Start-Sleep -Seconds 1
+            }
+            if ($capped) { Write-Pass 'team spend cap enforced (429 team_spend_cap_exceeded)' }
+            else { Write-Fail "team spend cap not enforced (last status $last)" }
+            $undo = Send-Json '/admin/routing/rollback' "{`"version`":$rver,`"comment`":`"lite smoke: undo`"}" $admin
+            if ($undo.Status -ne 200) {
+                Write-Fail "routing overlay not rolled back to version $rver (status $($undo.Status)): $(Get-Snippet $undo.Text)"
+            }
+        } else {
+            Write-Fail "team spend cap (PUT /admin/routing status $($put.Status)): $(Get-Snippet $put.Text)"
+        }
+    } else {
+        Write-Host 'SKIP  team spend cap (a routing overlay is set; smoke does not replace it)'
+    }
+
+    $del = Send-Request 'Delete' "/admin/keys/$teamKeyId" '' $admin
+    $after = Send-TeamCall 'c'
+    if ($del.Status -eq 200 -and $after.Status -eq 401) { Write-Pass 'team key revoked and refused' }
+    else { Write-Fail "team key revoke (DELETE status $($del.Status), then call status $($after.Status))" }
+} else {
+    Write-Fail "team key issue (POST /admin/keys status $($r.Status)): $(Get-Snippet $r.Text)"
 }
 
 if ($script:fails -gt 0) {

@@ -259,11 +259,28 @@ def test_up_sh_writes_secrets_owner_only():
 
 def test_smoke_sh_keeps_the_key_off_the_command_line():
     """Arguments are visible to every user of the machine (ps); headers go in a 0600 file."""
-    text = _read(os.path.join(_LOCAL, "smoke.sh"))
-    assert "$TOKENLEAN_API_KEY" not in "".join(
-        line for line in text.splitlines() if line.lstrip().startswith("curl")
-        or line.lstrip().startswith("-H"))
-    assert "-H @" in text
+    for script in ("smoke.sh", "up.sh"):
+        text = _read(os.path.join(_LOCAL, script))
+        curl_lines = "".join(line for line in text.splitlines()
+                             if line.lstrip().startswith(("curl", "-H", "-d", '"$(lite')))
+        for secret in ("$TOKENLEAN_API_KEY", "$TOKENLEAN_ADMIN_KEY", "$TEAM_KEY"):
+            assert secret not in curl_lines, (script, secret)
+        assert "-H @" in text
+
+
+@pytest.mark.parametrize("script", ["smoke.sh", "smoke.ps1"])
+def test_smoke_covers_a_team_bound_key(script):
+    """The LITE profile's team level, end to end on the stack: a key bound to a team through
+    /admin/keys is served and metered under its team, its team's cap answers 429, and a
+    revoked key is refused. The routing overlay the cap check sets is rolled back."""
+    text = _read(os.path.join(_LOCAL, script))
+    for needle in ("/admin/keys", '\\"team\\"' if script.endswith(".sh") else '`"team`"',
+                   "team_spend_cap_exceeded", "/admin/routing/rollback", "401"):
+        assert needle in text, (script, needle)
+    assert ("-X DELETE" in text) or ("'Delete'" in text)
+    # only an empty routing overlay is replaced, and it is restored afterwards
+    assert ('"fragment":{}' in text) or (r'"fragment":\{\}' in text)
+    assert "expected_version" in text
 
 
 def test_powershell_helpers_pin_the_project_and_ignore_a_foreign_compose_project(tmp_path):

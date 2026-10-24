@@ -145,7 +145,23 @@ while :; do
   sleep 3
 done
 echo " ok"
+
+# Proxy keys live in Postgres (the LITE profile's key_store). The keys of .env.lite are copied
+# in only while its table is empty (the first up on fresh volumes), so check that the admin
+# key still opens /admin/keys. The header file keeps the key off the command line.
+HDR=$(mktemp)
+printf 'Authorization: Bearer %s\n' "$TOKENLEAN_ADMIN_KEY" >"$HDR"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H @"$HDR" \
+  "$(lite_base_url)/admin/keys?tenant_id=$TENANT" 2>/dev/null || true)
+rm -f "$HDR"
+if [ "$CODE" != 200 ]; then
+  echo "lite: warning: TOKENLEAN_ADMIN_KEY was refused by /admin/keys (HTTP ${CODE:-none})." >&2
+  echo "lite:   The key store copies the keys of .env.lite only into an empty table; a key changed" >&2
+  echo "lite:   in .env.lite since is not there. Issue keys through /admin/keys, or start over" >&2
+  echo "lite:   with ./down.sh --purge (deletes the data) and ./up.sh." >&2
+fi
 echo "lite: proxy  $(lite_base_url)  (OpenAI /v1/chat/completions, Anthropic /v1/messages, Gemini /v1beta)"
+echo "lite: admin  /admin/keys (proxy keys, team + user binding), /admin/routing (team caps, routing), /admin/usage-export"
 echo "lite: key    TOKENLEAN_API_KEY in $LITE_ENV_FILE"
 if [ "$LANGFUSE" = 1 ]; then
   echo "lite: langfuse http://127.0.0.1:${LITE_LANGFUSE_PORT:-3110} (${LANGFUSE_INIT_USER_EMAIL:-admin@lite.local}, password in .env.lite)"

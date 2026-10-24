@@ -156,7 +156,26 @@ while ($true) {
     Start-Sleep -Seconds 3
 }
 Write-Host ' ok'
+
+# Proxy keys live in Postgres (the LITE profile's key_store). The keys of .env.lite are copied
+# in only while its table is empty (the first up on fresh volumes), so check that the admin
+# key still opens /admin/keys.
+$code = 0
+try {
+    $r = Invoke-WebRequest -UseBasicParsing -Uri ((Get-LiteBaseUrl) + "/admin/keys?tenant_id=$tenant") `
+        -Headers @{ Authorization = "Bearer $($env:TOKENLEAN_ADMIN_KEY)" } -TimeoutSec 10
+    $code = [int]$r.StatusCode
+} catch {
+    if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+}
+if ($code -ne 200) {
+    Write-Host "lite: warning: TOKENLEAN_ADMIN_KEY was refused by /admin/keys (HTTP $code)." -ForegroundColor Yellow
+    Write-Host 'lite:   The key store copies the keys of .env.lite only into an empty table; a key changed' -ForegroundColor Yellow
+    Write-Host 'lite:   in .env.lite since is not there. Issue keys through /admin/keys, or start over' -ForegroundColor Yellow
+    Write-Host 'lite:   with down.ps1 -Purge (deletes the data) and up.ps1.' -ForegroundColor Yellow
+}
 Write-Host "lite: proxy  $(Get-LiteBaseUrl)  (OpenAI /v1/chat/completions, Anthropic /v1/messages, Gemini /v1beta)"
+Write-Host 'lite: admin  /admin/keys (proxy keys, team + user binding), /admin/routing (team caps, routing), /admin/usage-export'
 Write-Host "lite: key    TOKENLEAN_API_KEY in $LiteEnvFile"
 if ($Langfuse) {
     $lfPort = if ($env:LITE_LANGFUSE_PORT) { $env:LITE_LANGFUSE_PORT } else { '3110' }
