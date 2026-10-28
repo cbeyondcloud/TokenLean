@@ -29,6 +29,11 @@ still closed as `completed` (`output_item.done`), so a client that runs calls fr
 (Codex) could execute it. Such calls are now withheld, streamed and not, and the response is
 `incomplete`.
 
+### Dependency bumps: filelock, setuptools, opentelemetry-api — Bug fix
+Pinned `filelock` 4.2.4 (proxy was on 3.32.2), `setuptools` 84.2.1 and `opentelemetry-api`
+1.45.1 through `compile-requirements.sh --upgrade-package`, which leaves torch and the CUDA
+runtime out of the lockfiles (Dependabot's regenerator re-pins them).
+
 ### Cost header says when it is an estimate — Bug fix
 A model with no `pricing:` row was priced at the default rates and `x-tokenlean-cost-usd`
 looked exact. `x-tokenlean-cost-estimated: default-rate` is now sent whenever that happened;
