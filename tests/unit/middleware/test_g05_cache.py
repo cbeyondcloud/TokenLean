@@ -1454,7 +1454,17 @@ class TestEveryParameterIsClassified:
                                  "stopSequences": ["x"]},
             "tools": [{"functionDeclarations": [{"name": "t", "parameters": {}}]}]},
             path_model="m")
-        produced = set(anthropic) | set(gemini)
+        from protocols import RESPONSES
+        _, _, responses = RESPONSES.for_request("r").parse_request({
+            "model": "m", "input": "hi", "tools": [{"type": "function", "name": "t"}],
+            "tool_choice": "auto", "parallel_tool_calls": True,
+            "text": {"format": {"type": "json_object"}, "verbosity": "low"},
+            "reasoning": {"effort": "low"}, "max_output_tokens": 5, "stream": True,
+            "temperature": 0, "top_p": 1, "prompt_cache_key": "k",
+            "prompt_cache_retention": "24h", "safety_identifier": "s", "user": "u",
+            "service_tier": "auto"})
+        assert {"verbosity", "reasoning_effort", "prompt_cache_key"} <= set(responses)
+        produced = set(anthropic) | set(gemini) | set(responses)
         assert {"tools", "max_tokens", "stop", "metadata"} <= produced   # the probe reached them
         assert not produced - _ANSWER_PARAMS - _ANSWER_NEUTRAL_PARAMS
 
@@ -1465,8 +1475,12 @@ class TestEveryParameterIsClassified:
         src = Path(__file__).resolve().parents[3] / "src" / "proxy"
         names = set()
         for path in src.rglob("*.py"):
-            names |= set(re.findall(r"[\"'](x_[a-z0-9_]+)[\"']",
-                                    path.read_text(encoding="utf-8", errors="replace")))
+            # An adapter's OpenTelemetry provider name (SEMCONV_PROVIDER_NAME, e.g. "x_ai")
+            # is a span attribute value, not a request field.
+            text = "\n".join(line for line in path.read_text(
+                encoding="utf-8", errors="replace").splitlines()
+                if "SEMCONV_PROVIDER_NAME" not in line)
+            names |= set(re.findall(r"[\"'](x_[a-z0-9_]+)[\"']", text))
         assert "x_rag_collection" in names                          # the scan found the readers
         assert not names - _ANSWER_PARAMS - _ANSWER_NEUTRAL_PARAMS
 

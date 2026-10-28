@@ -83,6 +83,11 @@ class RequestContext:
     usage_tags: Optional[Dict[str, str]] = None
     # OpenTelemetry span for the active pipeline trace (set by tracing layer).
     otel_span: Optional[Any] = None
+    # The request span (tracing.otel.start_request_span): the whole request, the pipeline
+    # span's parent and, with a W3C traceparent, a child of the caller's span. Ended once,
+    # with the outcome (finish_request_span sets otel_request_span_ended).
+    otel_request_span: Optional[Any] = None
+    otel_request_span_ended: bool = False
     # Provider adapter — set by OptimisationPipeline early in process_request.
     # Type is Any to avoid importing providers here; callers cast as needed.
     provider_adapter: Optional[Any] = None

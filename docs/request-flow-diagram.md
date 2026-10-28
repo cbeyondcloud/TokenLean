@@ -468,6 +468,7 @@ Request → Auth → Context → G00 … G13 (batchable) → Return 202 Accepted
 |----------|--------|---------|
 | `/v1/chat/completions` | POST | Main proxy endpoint (OpenAI-compatible) |
 | `/v1/messages` | POST | **Native Anthropic Messages ingress** (#4) — Claude SDK / Claude Code point here one-line (`x-api-key` or Bearer). Normalised into the same pipeline; response re-serialised to Anthropic shape (streaming + non-streaming). `tool_use`/`tool_result` round-trip structurally (ids preserved) — not degraded to text; the caller's `cache_control` markers are kept where it placed them |
+| `/v1/responses` | POST | **OpenAI Responses API ingress** (ST-4) — the Codex CLI and the OpenAI SDK's `client.responses` (Bearer). Stateless: no response is stored, `previous_response_id` gets a 400, other `/v1/responses/*` paths a 404. Normalised into the same pipeline; answered as a Response object or Responses SSE events (every item ends with `response.output_item.done`, every stream with `response.completed` / `incomplete` / `failed`). A `custom` tool (Codex's `apply_patch`) returns as a `custom_tool_call` item. Codex's identifying headers never reach the pipeline |
 | `/v1beta/models/{model}:generateContent` | POST | **Native Gemini ingress** (#4) — Gemini SDK (`x-goog-api-key` / `?key=`). Response re-serialised to Gemini `candidates` shape. `functionCall`/`functionResponse` round-trip structurally (id synthesised — Gemini carries none — and correlated by function name, FIFO; same-name parallel calls answered out of order can mis-bind — inherent to the id-less protocol) |
 | `/v1beta/models/{model}:streamGenerateContent` | POST | Native Gemini streaming ingress — SSE with `?alt=sse` (the Gemini wire contract); without it, a JSON array of `GenerateContentResponse`. `functionCall` deltas accumulate and emit structurally in the terminal frame |
 | `/v1/models` | GET | List available models from configured providers |
@@ -646,7 +647,7 @@ class RequestContext:
     no_cache: bool = False             # G29 masked PII → must not read/write shared cache
 
     # ── Multi-protocol ingress (#4) ─────────────────────────────────────────
-    ingress_protocol: str = "openai"   # "openai" | "anthropic" | "gemini" → usage_events.protocol
+    ingress_protocol: str = "openai"   # "openai" | "anthropic" | "gemini" | "responses" → usage_events.protocol
 
     @property
     def current_token_count(self) -> int:

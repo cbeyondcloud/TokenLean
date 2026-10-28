@@ -9,5 +9,7 @@ from providers.generic_adapter import GenericLiteLLMAdapter
 
 @register_adapter("deepseek")
 class DeepSeekAdapter(GenericLiteLLMAdapter):
+    #: OpenTelemetry GenAI well-known provider name (gen_ai.provider.name).
+    SEMCONV_PROVIDER_NAME = "deepseek"
     PROVIDER_NAME = "deepseek"
     LITELLM_PREFIX = "deepseek"

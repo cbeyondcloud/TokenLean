@@ -12,6 +12,8 @@ from providers.generic_adapter import GenericLiteLLMAdapter
 
 @register_adapter("bedrock")
 class BedrockAdapter(GenericLiteLLMAdapter):
+    #: OpenTelemetry GenAI well-known provider name (gen_ai.provider.name).
+    SEMCONV_PROVIDER_NAME = "aws.bedrock"
     PROVIDER_NAME = "bedrock"
 
     def requires_api_key(self) -> bool:

@@ -132,19 +132,20 @@ def header_params(headers: Any) -> Dict[str, Any]:
             if key in REQUEST_HEADER_PARAMS}
 
 
-def _log_dropped(dropped: List[str]) -> None:
+def _log_dropped(dropped: List[str], route: str = "OpenAI") -> None:
     """Log dropped field NAMES — never values, which may carry a credential or URL."""
     if not dropped:
         return
     names = [name[:_MAX_LOGGED_NAME] for name in dropped]
-    logger.debug("OpenAI ingress dropped body fields %r", names)
+    logger.debug("%s ingress dropped body fields %r", route, names)
     for name in names:
-        if name in _WARNED_DROPPED or len(_WARNED_DROPPED) >= _MAX_WARNED_DROPPED:
+        key = (route, name)
+        if key in _WARNED_DROPPED or len(_WARNED_DROPPED) >= _MAX_WARNED_DROPPED:
             continue
-        _WARNED_DROPPED.add(name)
+        _WARNED_DROPPED.add(key)
         logger.warning(
-            "OpenAI ingress dropped unsupported body field %r (value not logged). If a "
-            "client relies on it, add the name to ingress.extra_allowed_params.", name)
+            "%s ingress dropped unsupported body field %r (value not logged). If a "
+            "client relies on it, add the name to ingress.extra_allowed_params.", route, name)
 
 
 def cache_marker(item: Any) -> Optional[Dict[str, Any]]:
@@ -263,6 +264,34 @@ class IngressProtocol:
     # in URL/access logs, so it is opt-in per protocol, never a global auth channel.
     credential_headers: Tuple[str, ...] = ()
     credential_query_param: str = ""
+    # Whether the route passes ``ingress.extra_allowed_params`` to ``parse_request`` (as
+    # ``extra_allowed``): only an adapter that drops unknown fields by an allow-list.
+    admits_extra_params: bool = False
+
+    def for_request(self, request_id: str) -> "IngressProtocol":
+        """The adapter instance that serves ONE request. An adapter whose response depends on
+        the request (the Responses adapter turns a tool the request declared ``custom`` back
+        into a custom call) returns a fresh instance that ``parse_request`` fills; a
+        stateless adapter returns itself."""
+        return self
+
+    def pipeline_headers(self, headers: Any, extra: Iterable[Any] = ()) -> Optional[Dict[str, str]]:
+        """The request headers the pipeline may see, or None for all of them. An adapter
+        whose clients send identifying headers (session, thread, installation ids) keeps
+        them from the pipeline here, so nothing downstream can log, match or forward them;
+        ``extra`` is the operator's additions (``ingress.private_headers``)."""
+        return None
+
+    def keepalive_seconds(self, config: Any) -> float:
+        """Seconds of silence after which the route's stream sends a keepalive comment; 0
+        sends none (every adapter but Responses: their streams are unchanged)."""
+        return 0.0
+
+    def scope_params(self, params: Dict[str, Any], tenant_id: str, config: Any) -> None:
+        """Adjust the parsed params once the caller's tenant is known (after auth). The
+        Responses adapter replaces a client's ``prompt_cache_key`` with a tenant-scoped
+        digest here; every other adapter leaves the params as they are."""
+        return None
 
     def parse_request(
         self, body: Dict[str, Any], headers: Optional[Dict[str, str]] = None,

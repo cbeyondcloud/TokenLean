@@ -12,6 +12,9 @@ from providers.openai_adapter import OpenAIAdapter
 
 @register_adapter("azure")
 class AzureOpenAIAdapter(OpenAIAdapter):
+    #: OpenTelemetry GenAI well-known provider name (gen_ai.provider.name).
+    SEMCONV_PROVIDER_NAME = "azure.ai.openai"
+
     @property
     def name(self) -> str:
         return "azure"

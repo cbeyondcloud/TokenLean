@@ -42,7 +42,7 @@ class UsageEvent:
     cost_actual_usd: float = 0.0
     cost_baseline_usd: float = 0.0
     provider: str = ""
-    # Ingress protocol the client used (#4): openai | anthropic | gemini. Observability
+    # Ingress protocol the client used (#4): openai | anthropic | gemini | responses. Observability
     # only — billing is one row per served request regardless of protocol.
     protocol: str = DEFAULT_PROTOCOL_NAME
     # #34 — provider prompt-cache accounting. Nullable on purpose: None means the provider

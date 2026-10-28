@@ -40,7 +40,7 @@ from auth.api_key_manager import (
 )
 from net.client_ip import ClientIPMiddleware, request_client_ip
 from net.ip_allowlist import ip_allowed
-from tracing.otel import TraceIdHeaderMiddleware
+from tracing.otel import TraceIdHeaderMiddleware, finish_request_span, start_request_span
 from config_loader import get_config, get_fallback_request_model, load_config, start_hot_reload
 from tenancy.resolver import resolve_tenant
 from providers import get_adapter, get_provider_entry
@@ -66,7 +66,7 @@ from middleware.g18_observability import (
     MODEL_LOCKOUT_STATE,
     price_billed_call,
 )
-from protocols import OPENAI, ANTHROPIC, GEMINI
+from protocols import OPENAI, ANTHROPIC, GEMINI, RESPONSES
 from protocols.base import UnsupportedRequestField, header_params
 import events
 from middleware import RequestContext, record_provider_call
@@ -1382,6 +1382,8 @@ def _record_outcome(ctx, start_ts: float, status: str, response=None) -> None:
     are never billed; batch-deferred (202) is billed separately at defer (C1b)."""
     tenant_id = getattr(ctx, "tenant_id", "default") if ctx is not None else "default"
     elapsed_ms = (time.time() - start_ts) * 1000
+    # The request span ends with the outcome, carrying the served model and the tokens.
+    finish_request_span(ctx, status, response)
     llm_ms = getattr(ctx, "llm_elapsed_ms", 0.0) if ctx is not None else 0.0
     try:
         REQUEST_DURATION_MS.labels(tenant_id=tenant_id, status=status).observe(elapsed_ms)
@@ -2187,6 +2189,16 @@ def _ingress_extra_allowed_params(cfg: Any) -> Tuple[str, ...]:
     return tuple(name for name in raw if isinstance(name, str) and name)
 
 
+def _ingress_private_headers(cfg: Any) -> Tuple[str, ...]:
+    """Operator additions to an adapter's private-header list: ``ingress.private_headers``
+    (names, or prefixes ending in ``*``). Global config only, like extra_allowed_params."""
+    section = cfg.get("ingress") if isinstance(cfg, dict) else None
+    raw = section.get("private_headers") if isinstance(section, dict) else None
+    if not isinstance(raw, list):
+        return ()
+    return tuple(name for name in raw if isinstance(name, str) and name)
+
+
 def _validate_openai_request(messages: Any) -> None:
     """Light shape check for the OpenAI ingress body. Malformed input gets a clean
     400 here — matching the Anthropic/Gemini routes, which already return a 400 —
@@ -2240,15 +2252,45 @@ async def chat_completions(request: Request):
 async def _serve_core(
     request: Request, request_id: str, _request_start: float,
     messages: list, model: str, params: dict, user_id: str, api_key: str,
-    tenant_metadata, ingress_protocol: str,
+    tenant_metadata, ingress_protocol: str, headers: Optional[Dict[str, str]] = None,
+):
+    """The request core (``_serve_request_core``), with its request span ended on any
+    exception that escapes it. Every handled exit ends the span through ``_record_outcome``;
+    an unexpected error (a stage, a key lookup, a helper raising) would otherwise lose the
+    trace. Ending is idempotent, so an exit that already recorded its outcome is unchanged."""
+    try:
+        return await _serve_request_core(
+            request, request_id, _request_start, messages, model, params, user_id, api_key,
+            tenant_metadata, ingress_protocol, headers)
+    except HTTPException as exc:
+        finish_request_span(_request_ctx(request), exc.status_code)
+        raise
+    except Exception:
+        finish_request_span(_request_ctx(request), "500")
+        raise
+
+
+def _request_ctx(request: Request):
+    """The RequestContext the core left on the request (None before it built one)."""
+    return getattr(getattr(request, "state", None), "pipeline_ctx", None)
+
+
+async def _serve_request_core(
+    request: Request, request_id: str, _request_start: float,
+    messages: list, model: str, params: dict, user_id: str, api_key: str,
+    tenant_metadata, ingress_protocol: str, headers: Optional[Dict[str, str]] = None,
 ):
     """Shared request core — OpenAI-shaped in, OpenAI-shaped Response out.
 
-    The protocol routes (OpenAI / Anthropic / Gemini) parse their wire format into
-    (messages, model, params) and call this; the non-OpenAI routes then translate the
+    The protocol routes (OpenAI / Anthropic / Gemini / Responses) parse their wire format
+    into (messages, model, params) and call this; the non-OpenAI routes then translate the
     returned Response back to their protocol (#4). All optimisation, resilience, and
     billing live here, protocol-agnostic; ``ctx.ingress_protocol`` flows to the usage row.
+    ``headers`` is the request-header view the pipeline gets (the adapter's
+    ``pipeline_headers``); None means every request header, as before.
     """
+    if headers is None:
+        headers = dict(request.headers)
     # Client omitted `model` → flag it so the pipeline resolves the tenant default, then
     # apply the global placeholder so RequestContext.create has a concrete model.
     params["_model_defaulted"] = not bool(model)
@@ -2259,7 +2301,7 @@ async def _serve_core(
     # ctx.params is persisted by G13, so infrastructure headers and a caller's own routing
     # hints stay out (the pipeline gives the routing rules every X-* header separately), and
     # the native-SDK proxy credential (x-api-key / x-goog-api-key) never enters it.
-    params.update(header_params(request.headers))
+    params.update(header_params(headers))
 
     # G7 RAG: derive rag_query from the last user message when x_rag_collection is set
     if "x_rag_collection" in params and "rag_query" not in params:
@@ -2295,6 +2337,11 @@ async def _serve_core(
         model=model, params=params, config=cfg,
     )
     ctx.ingress_protocol = ingress_protocol
+    # The request span (ST-5): the whole request, a child of the caller's span when the
+    # request carries a W3C traceparent; ended with the outcome (_record_outcome).
+    # The raw request headers: a repeated traceparent is malformed (W3C) on every route,
+    # which a dict view (one value per name) cannot show.
+    ctx.otel_request_span = start_request_span(ctx, request.headers)
     # Read when the response starts (TraceIdHeaderMiddleware): its X-Trace-ID, on every path.
     state = getattr(request, "state", None)
     if state is not None:
@@ -2302,7 +2349,7 @@ async def _serve_core(
 
     # Run the request-side pipeline (authoritative stage order: middleware/pipeline.py)
     try:
-        ctx = await _pipeline.process_request(ctx, request_headers=dict(request.headers))
+        ctx = await _pipeline.process_request(ctx, request_headers=headers)
     except UnconfiguredModelError as exc:
         # G6_routing.on_unconfigured_model: reject. Refused before any provider call and
         # never billed, instead of being answered by proxy.default_model.
@@ -2706,17 +2753,68 @@ def _detail_str(exc: HTTPException) -> str:
     return d if isinstance(d, str) else str(d)
 
 
-async def _translate_stream(translator, source_iter):
+# What a stream sends when it has been silent for the protocol's keepalive interval: an SSE
+# comment, which every SSE parser (Codex's, the OpenAI SDK's) skips, so no event changes.
+_KEEPALIVE_COMMENT = ": keepalive\n\n"
+
+
+async def _next_or_end(iterator):
+    """(True, item) for the iterator's next item, (False, None) at its end: run as a task,
+    so waiting on it can time out without cancelling the iterator."""
+    try:
+        return True, await iterator.__anext__()
+    except StopAsyncIteration:
+        return False, None
+
+
+async def _paced(source_iter, keepalive_s: float, sent_at):
+    """Items of ``source_iter``, with None put in whenever ``keepalive_s`` seconds pass with
+    nothing sent to the client (``sent_at()``: when the caller last sent a frame). The wait
+    never cancels the pending item; it is cancelled only if the client goes away."""
+    loop = asyncio.get_running_loop()
+    iterator = source_iter.__aiter__()
+    pending = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(_next_or_end(iterator))
+            timeout = max(0.0, sent_at() + keepalive_s - loop.time())
+            done, _ = await asyncio.wait({pending}, timeout=timeout)
+            if not done:
+                yield None
+                continue
+            task, pending = pending, None
+            has_item, item = task.result()
+            if not has_item:
+                return
+            yield item
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+
+
+async def _translate_stream(translator, source_iter, keepalive_s: float = 0.0):
     """Wrap the OpenAI SSE body-iterator, re-emitting each chunk in the caller's protocol.
 
     Consuming ``source_iter`` also drives the underlying _stream_response generator to
     completion — so its billing/usage `finally` (with ctx.ingress_protocol stamped) still
-    fires exactly once."""
+    fires exactly once. ``keepalive_s`` > 0 (a protocol that asks for it) sends a keepalive
+    comment whenever the client has received nothing for that long — the provider is slow,
+    or it is streaming a tool call the protocol sends whole — so an idle timeout (the
+    client's or a load balancer's) does not cut a stream that is still working."""
     errored = False
     trailers = []   # the cost frame (observability.stream_cost_event), re-sent LAST
+    loop = asyncio.get_running_loop()
+    last_sent = [loop.time()]
     for line in translator.start():
         yield line
-    async for raw in source_iter:
+    source = (_paced(source_iter, keepalive_s, lambda: last_sent[0]) if keepalive_s > 0
+              else source_iter)
+    async for raw in source:
+        if raw is None:
+            last_sent[0] = loop.time()
+            yield _KEEPALIVE_COMMENT
+            continue
         text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
         for frame in text.split("\n\n"):
             frame = frame.strip()
@@ -2736,10 +2834,12 @@ async def _translate_stream(translator, source_iter):
             if isinstance(obj, dict) and "error" in obj and "choices" not in obj:
                 msg = obj.get("error")
                 for out in translator.error(msg if isinstance(msg, str) else "upstream error"):
+                    last_sent[0] = loop.time()
                     yield out
                 errored = True
                 continue
             for out in translator.chunk(obj):
+                last_sent[0] = loop.time()
                 yield out
     # A stream that failed emits its protocol error frame and STOPS — never a synthetic
     # success termination (finish() would fabricate a finishReason:STOP / message_stop that
@@ -2853,7 +2953,8 @@ async def _translate_response(protocol, resp, *, want_stream: bool = False,
     streamGenerateContent returns a JSON array of GenerateContentResponse."""
     if isinstance(resp, StreamingResponse):
         return StreamingResponse(
-            _translate_stream(protocol.stream_translator(), resp.body_iterator),
+            _translate_stream(protocol.stream_translator(), resp.body_iterator,
+                              protocol.keepalive_seconds(get_config())),
             media_type=protocol.stream_media_type,
             status_code=resp.status_code,
         )
@@ -2900,10 +3001,16 @@ async def _serve_protocol(request: Request, proto, *, path_model: str = "",
     Auth/parse/pipeline errors are serialised into the caller's protocol."""
     _request_start = time.time()
     request_id = str(uuid.uuid4())
+    # The instance that serves this request (itself for a stateless adapter).
+    proto = proto.for_request(request_id)
     try:
         user_id, api_key, tenant_metadata = await _authenticate(request, proto)
         body = await request.json()
-        messages, model, params = proto.parse_request(body, dict(request.headers), path_model)
+        extra = ({"extra_allowed": _ingress_extra_allowed_params(get_config())}
+                 if proto.admits_extra_params else {})
+        messages, model, params = proto.parse_request(body, dict(request.headers), path_model,
+                                                      **extra)
+        proto.scope_params(params, _caller_tenant_id(tenant_metadata), get_config())
         if force_stream:
             params["stream"] = True
     except HTTPException as exc:
@@ -2921,7 +3028,10 @@ async def _serve_protocol(request: Request, proto, *, path_model: str = "",
     want_stream = bool(params.get("stream")) and not array_wrap
     try:
         resp = await _serve_core(request, request_id, _request_start, messages, model, params,
-                                 user_id, api_key, tenant_metadata, proto.name)
+                                 user_id, api_key, tenant_metadata, proto.name,
+                                 headers=proto.pipeline_headers(
+                                     request.headers,
+                                     extra=_ingress_private_headers(get_config())))
     except HTTPException as exc:
         eb, st = proto.serialise_error(exc.status_code, _detail_str(exc))
         return JSONResponse(status_code=st, content=eb)
@@ -2932,6 +3042,26 @@ async def _serve_protocol(request: Request, proto, *, path_model: str = "",
 async def anthropic_messages(request: Request):
     """Anthropic Messages API ingress (Claude SDK / Claude Code point here one-line)."""
     return await _serve_protocol(request, ANTHROPIC)
+
+
+@app.post("/v1/responses")
+async def responses_create(request: Request):
+    """OpenAI Responses API ingress (ST-4): Codex and the OpenAI SDK's ``client.responses``
+    reach every configured provider through the same pipeline. Stateless (no response is
+    stored); streaming and non-streaming."""
+    return await _serve_protocol(request, RESPONSES)
+
+
+# Everything else under /v1/responses needs stored responses (retrieve, delete, cancel,
+# input_items) or a feature this route does not offer (compact, input_tokens).
+_RESPONSES_STATELESS = ("This proxy is stateless: it stores no responses and serves only "
+                        "POST /v1/responses. Send the whole conversation in each request.")
+
+
+@app.api_route("/v1/responses/{rest:path}", methods=["GET", "POST", "DELETE"])
+async def responses_not_served(rest: str):
+    body, st = RESPONSES.serialise_error(404, _RESPONSES_STATELESS, "not_found")
+    return JSONResponse(status_code=st, content=body)
 
 
 @app.post("/v1beta/models/{model}:generateContent")

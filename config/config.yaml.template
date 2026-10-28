@@ -170,6 +170,15 @@ network:
 # a tenant override cannot extend it.
 ingress:
   extra_allowed_params: []      # e.g. ["metadata"]
+  # /v1/responses only. false: a client's prompt_cache_key (Codex: its thread id) reaches the
+  # provider as a tenant-scoped digest, which keeps caching working. Only a literal true sends
+  # the client's value as it is.
+  forward_prompt_cache_key: false
+  # /v1/responses only: more request headers kept from the pipeline, added to the built-in
+  # list (names, or prefixes ending in *), e.g. ["x-device-id", "x-corp-*"].
+  private_headers: []
+  responses:
+    keepalive_seconds: 15       # a ": keepalive" comment after this much silence; 0 = none
 providers:
 - name: openai
   api_base: https://api.openai.com/v1

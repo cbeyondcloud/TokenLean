@@ -7,6 +7,9 @@ _THINKING_DEFAULTS = {"low": 1024, "medium": 4096, "high": 16000}
 
 @register_adapter("gemini")
 class GeminiAdapter(ProviderAdapter):
+    #: OpenTelemetry GenAI well-known provider name (gen_ai.provider.name).
+    SEMCONV_PROVIDER_NAME = "gcp.gemini"
+
     @property
     def name(self) -> str:
         return "gemini"

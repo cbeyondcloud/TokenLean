@@ -3,7 +3,7 @@
 The optimisation pipeline is OpenAI-shaped internally. These adapters translate an
 inbound request from another provider's wire protocol into that OpenAI shape on the way
 IN, and re-serialise the OpenAI response back to the caller's protocol on the way OUT —
-so a Claude-SDK, Anthropic-SDK, or Gemini-SDK client gets the same one-line base-URL
+so a Claude-SDK, Anthropic-SDK, Gemini-SDK or OpenAI Responses client gets the same one-line base-URL
 swap the OpenAI clients already enjoy, with every G-group optimisation applied.
 
 Each adapter is a pure translator (no I/O), so the request-parse / response-serialise /
@@ -16,16 +16,20 @@ from protocols.base import (
 )
 from protocols.anthropic_ingress import AnthropicProtocol
 from protocols.gemini_ingress import GeminiProtocol
+from protocols.responses_ingress import ResponsesProtocol
 
 # Singleton adapters. The default is the OpenAI identity adapter; the routes import these
 # instances directly, so no module re-types a protocol-name string literal.
 OPENAI = OpenAIProtocol()
 ANTHROPIC = AnthropicProtocol()
 GEMINI = GeminiProtocol()
+# The registry instance names the protocol and its auth channels; a request is served by its
+# own instance (RESPONSES.for_request), which parse_request fills.
+RESPONSES = ResponsesProtocol()
 DEFAULT_PROTOCOL = OPENAI
 
 # Registry keyed by each adapter's OWN name — the name lives once, on the adapter class.
-_BY_NAME = {p.name: p for p in (OPENAI, ANTHROPIC, GEMINI)}
+_BY_NAME = {p.name: p for p in (OPENAI, ANTHROPIC, GEMINI, RESPONSES)}
 
 
 def get_protocol(name: str) -> IngressProtocol:
@@ -38,12 +42,14 @@ __all__ = [
     "OpenAIProtocol",
     "AnthropicProtocol",
     "GeminiProtocol",
+    "ResponsesProtocol",
     "StreamTranslator",
     "sse_line",
     "get_protocol",
     "OPENAI",
     "ANTHROPIC",
     "GEMINI",
+    "RESPONSES",
     "DEFAULT_PROTOCOL",
     "DEFAULT_PROTOCOL_NAME",
 ]
