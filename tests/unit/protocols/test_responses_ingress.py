@@ -770,3 +770,26 @@ def test_errors_use_the_openai_envelope():
     assert body["error"]["type"] == "invalid_request_error"
     body, _ = RESPONSES.serialise_error(502, "upstream")
     assert body["error"]["type"] == "server_error"
+
+
+def test_a_tool_call_cut_off_by_the_output_limit_is_never_closed_or_returned():
+    """finish_reason=length leaves truncated arguments: a client that runs calls from
+    output_item.done (Codex) must not be handed one, streamed or not."""
+    proto, *_ = _parse({"model": "m", "input": "x", "tools": [_EXEC_TOOL]})
+    events = _run_stream(proto, [
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_1", "function": {"name": "exec_command",
+                                                      "arguments": '{"cmd":"l'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "length"}]},
+    ])
+    names = [e for e, _ in events]
+    assert "response.output_item.done" not in names
+    assert "response.function_call_arguments.done" not in names
+    assert events[-1][0] == "response.incomplete"
+    assert events[-1][1]["response"]["output"] == []
+
+    whole = _bound().serialise_response({"choices": [{"finish_reason": "length", "message": {
+        "role": "assistant", "content": None, "tool_calls": [
+            {"id": "call_1", "type": "function",
+             "function": {"name": "exec_command", "arguments": '{"cmd":"l'}}]}}]})
+    assert whole["status"] == "incomplete" and whole["output"] == []

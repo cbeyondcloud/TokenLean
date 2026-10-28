@@ -21,6 +21,19 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-28
+
+### `/v1/responses` no longer hands a client a tool call cut off by the output limit — Bug fix
+When the model stopped at `length`, the call's arguments were truncated yet the call was
+still closed as `completed` (`output_item.done`), so a client that runs calls from that event
+(Codex) could execute it. Such calls are now withheld, streamed and not, and the response is
+`incomplete`.
+
+### Cost header says when it is an estimate — Bug fix
+A model with no `pricing:` row was priced at the default rates and `x-tokenlean-cost-usd`
+looked exact. `x-tokenlean-cost-estimated: default-rate` is now sent whenever that happened;
+it is absent for priced models and for requests that paid nothing.
+
 ## 2026-10-24
 
 ### OpenAI Responses API endpoint: the Codex CLI and `client.responses` through any provider — Enhancement (OSS)

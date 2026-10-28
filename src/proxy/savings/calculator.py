@@ -236,6 +236,18 @@ def messages_to_text(messages: List[Dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def has_pricing_row(model: str) -> bool:
+    """True when a ``pricing:`` row matches ``model``; False means ``get_cost_per_1k`` is
+    pricing it at the ``default`` rates (an estimate). Same longest-substring rule."""
+    try:
+        from config_loader import get_pricing_table
+        pricing = get_pricing_table()
+    except Exception:
+        return False
+    model_lower = (model or "").lower()
+    return any(k != "default" and k.lower() in model_lower for k in pricing)
+
+
 def get_cost_per_1k(model: str) -> tuple:
     """Return (input_cost, output_cost) per 1k tokens for a model, sourced from config pricing table."""
     try:

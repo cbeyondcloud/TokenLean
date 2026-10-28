@@ -46,3 +46,19 @@ async def test_chat_completion_response_has_cost_header(client):
     assert float(header) >= 0
     body_cost = response.json()["_token_opt"]["cost_actual_usd"]
     assert header == f"{body_cost:.6f}"
+
+
+def test_cost_estimated_header_only_for_unpriced_model(monkeypatch):
+    """A model with no pricing row is priced at the default rates: the header says so."""
+    import config_loader
+    monkeypatch.setattr(config_loader, "get_pricing_table",
+                        lambda: {"gpt-4o-mini": {"input": 0.1, "output": 0.2},
+                                 "default": {"input": 0.5, "output": 1.5}})
+    priced = _Ctx(0.01)
+    assert "x-tokenlean-cost-estimated" not in main._savings_headers(priced, 0.0)
+    unpriced = _Ctx(0.01)
+    unpriced.savings.routed_model = "acme-unlisted-1"
+    assert main._savings_headers(unpriced, 0.0)["x-tokenlean-cost-estimated"] == "default-rate"
+    free = _Ctx(0.0)
+    free.savings.routed_model = "acme-unlisted-1"
+    assert "x-tokenlean-cost-estimated" not in main._savings_headers(free, 0.0)

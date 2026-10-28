@@ -621,7 +621,8 @@ class ResponsesProtocol(IngressProtocol):
         if isinstance(text, str) and text:
             output.append(_message_item(self.item_id("msg", len(output)), text,
                                         "incomplete" if status == "incomplete" else "completed"))
-        for n, tc in enumerate(msg.get("tool_calls") or []):
+        # Calls cut off by the output limit carry truncated arguments: not returned.
+        for n, tc in enumerate([] if status == "incomplete" else msg.get("tool_calls") or []):
             if not isinstance(tc, dict):
                 continue
             fn = tc.get("function") or {}
@@ -829,7 +830,10 @@ class _ResponsesStream(StreamTranslator):
     def finish(self) -> Iterable[str]:
         status, incomplete = _status(self._finish)
         yield from self._close_open("incomplete" if status == "incomplete" else "completed")
-        yield from self._close_calls()
+        # A call cut off by the output limit has truncated arguments: like error(), never
+        # close it, so a client that runs calls from output_item.done cannot run it.
+        if status != "incomplete":
+            yield from self._close_calls()
         resp = self._p.response(status, self._output(), responses_usage(self._usage),
                                 self._model, incomplete=incomplete)
         yield self._event("response.completed" if status == "completed"
