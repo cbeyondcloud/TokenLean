@@ -1897,6 +1897,15 @@ def _apply_stream_g23(ctx, content: str) -> None:
         logger.debug("[%s] stream G23 failed: %s", ctx.request_id, exc)
 
 
+def _cost_estimate_note(meta: Dict, ctx) -> Optional[str]:
+    """``"default-rate"`` when a call was paid for and its model has no pricing row."""
+    if not float(ctx.savings.cost_actual_usd or 0.0):
+        return None
+    from savings.calculator import has_pricing_row
+    model = meta.get("routed_model") or meta.get("model_requested")
+    return None if not model or has_pricing_row(model) else "default-rate"
+
+
 def _savings_headers(ctx, request_start: float) -> Dict[str, str]:
     """Build the per-call ``x-tokenlean-*`` savings/routing headers from ctx.savings so a
     customer's FinOps/observability pipeline can attribute cost per request without parsing
@@ -1934,6 +1943,9 @@ def _savings_headers(ctx, request_start: float) -> Dict[str, str]:
         # 0 on a cache hit / bypass / block: nothing was paid. The body carries it too, but
         # only in the OpenAI shape, and a caller should not have to parse a body for it.
         "x-tokenlean-cost-usd": f"{float(ctx.savings.cost_actual_usd or 0.0):.6f}",
+        # Present only when the routed model has no pricing row, so the cost above was
+        # priced at the default rates: an estimate, not a figure to settle a budget from.
+        "x-tokenlean-cost-estimated": _cost_estimate_note(meta, ctx),
         "x-tokenlean-latency-ms": f"{(time.time() - request_start) * 1000:.1f}",
         # Provider prompt-cache accounting (#34). Left out entirely when the provider
         # reported nothing — an absent header reads as "unknown", a "0" would have
