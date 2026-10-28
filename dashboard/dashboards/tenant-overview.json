@@ -77,7 +77,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT SUM(tokens_saved) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}')",
+          "rawSql": "SELECT SUM(tokens_saved) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}')",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -131,7 +131,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT ROUND(SUM(cost_saved_usd)::numeric, 2) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}')",
+          "rawSql": "SELECT ROUND(SUM(cost_saved_usd)::numeric, 2) FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}')",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -185,7 +185,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT pricing_tier, COUNT(DISTINCT tenant_id) AS tenant_count FROM usage_events WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') GROUP BY pricing_tier ORDER BY tenant_count DESC",
+          "rawSql": "SELECT pricing_tier, COUNT(DISTINCT tenant_id) AS tenant_count FROM usage_events WHERE ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') GROUP BY pricing_tier ORDER BY tenant_count DESC",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -236,7 +236,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT tenant_id, pricing_tier, COUNT(*) AS requests, SUM(tokens_saved) AS total_tokens_saved, ROUND(SUM(cost_saved_usd)::numeric, 2) AS total_cost_saved_usd, ROUND(AVG(CASE WHEN baseline_tokens > 0 THEN 100.0 * tokens_saved / baseline_tokens ELSE 0 END)::numeric, 1) AS avg_saving_pct FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') GROUP BY tenant_id, pricing_tier ORDER BY total_tokens_saved DESC LIMIT 20",
+          "rawSql": "SELECT tenant_id, pricing_tier, COUNT(*) AS requests, SUM(tokens_saved) AS total_tokens_saved, ROUND(SUM(cost_saved_usd)::numeric, 2) AS total_cost_saved_usd, ROUND(AVG(CASE WHEN baseline_tokens > 0 THEN 100.0 * tokens_saved / baseline_tokens ELSE 0 END)::numeric, 1) AS avg_saving_pct FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') GROUP BY tenant_id, pricing_tier ORDER BY total_tokens_saved DESC LIMIT 20",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -292,7 +292,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT pricing_tier, COUNT(*) AS requests FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') GROUP BY pricing_tier ORDER BY requests DESC",
+          "rawSql": "SELECT pricing_tier, COUNT(*) AS requests FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') GROUP BY pricing_tier ORDER BY requests DESC",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -334,7 +334,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('day', MIN(timestamp)) AS time, COUNT(*) AS new_tenants FROM usage_events WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') GROUP BY tenant_id HAVING date_trunc('day', MIN(timestamp)) >= $__timeFrom() ORDER BY 1",
+          "rawSql": "SELECT date_trunc('day', MIN(timestamp)) AS time, COUNT(*) AS new_tenants FROM usage_events WHERE ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') GROUP BY tenant_id HAVING date_trunc('day', MIN(timestamp)) >= $__timeFrom() ORDER BY 1",
           "format": "time_series",
           "datasource": {
             "type": "postgres",

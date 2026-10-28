@@ -7,15 +7,29 @@ LITE_ENV_FILE="$LITE_DIR/.env.lite"
 LITE_STATE_DIR="$LITE_DIR/.state"
 LITE_COMPOSE_FILE="$LITE_DIR/docker-compose.lite.yml"
 # Every compose call names this project explicitly (-p), so nothing else can redirect it.
-LITE_PROJECT=tokenlean-lite
+# LITE_PROJECT (environment only, never .env.lite) runs a second LITE stack next to the
+# first, e.g. a review checkout or a CI job; give it its own LITE_*_PORT values too.
+LITE_PROJECT="${LITE_PROJECT:-tokenlean-lite}"
+case "$LITE_PROJECT" in
+  '' | *[!a-z0-9_-]* | [!a-z0-9]*)
+    echo "lite: LITE_PROJECT may hold only a-z 0-9 _ - (starting with a letter or digit)" >&2
+    exit 1
+    ;;
+esac
 # docker (default) or podman. Both are driven as `<engine> compose ...`.
 LITE_ENGINE="${CONTAINER_ENGINE:-docker}"
-LITE_ALL_PROFILES=(--profile qdrant --profile langfuse --profile mock)
+LITE_ALL_PROFILES=(--profile qdrant --profile langfuse --profile mock --profile grafana)
 
 # Compose settings exported for another stack must never steer these scripts: the full
 # TokenLean .env sets COMPOSE_PROJECT_NAME=token-opt, and with it `down --purge` would
 # remove that stack's containers and volumes.
 unset COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES
+
+# Git Bash (MSYS2) rewrites an exported variable that looks like a path when it starts a
+# Windows program: /app/lite/config/agentic.yaml would reach docker.exe as
+# C:/Program Files/Git/app/lite/config/agentic.yaml. The overlays are paths inside the
+# container, so that variable is excluded. Ignored everywhere else.
+export MSYS2_ENV_CONV_EXCL="LITE_CONFIG_OVERLAYS${MSYS2_ENV_CONV_EXCL:+;$MSYS2_ENV_CONV_EXCL}"
 
 lite_die() {
   echo "lite: $*" >&2

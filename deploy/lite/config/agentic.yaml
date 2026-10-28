@@ -19,6 +19,11 @@
 # back on at a time, in a later overlay, after an A/B run on your own harness shows it
 # keeps answer quality.
 #
+# Teams (one tenant, teams under it): keys bound to a team and a user (/admin/keys), each
+# team's monthly spend cap enforced, and the X-Agentic-* usage tags recorded. The teams
+# themselves (caps, limits, routing) are the deployment's: set them through /admin/routing
+# or a later overlay. LITE needs Postgres (DATABASE_URL): the proxy keys live there.
+#
 # A test (tests/unit/test_agentic_profile.py) pins the set of groups this profile may leave
 # on, so a group the template later ships enabled fails it until someone decides about it.
 # Keep deploy/lite/config/agentic.yaml byte-identical to this file (also test-pinned).
@@ -110,3 +115,24 @@ observability:
   # Streams end with their actual cost (`: x-tokenlean-cost {...}`), so a caller can settle
   # a budget for streamed calls as it does from x-tokenlean-cost-usd on the others.
   stream_cost_event: true
+
+# ── Team level ──────────────────────────────────────────────────────────────────────
+rate_limit:
+  spend_cap:
+    # Enforce monthly spend caps: each team's teams.<team>.monthly_spend_cap_usd (429
+    # team_spend_cap_exceeded before any provider call). The tenant itself has no cap unless
+    # the deployment sets limits.monthly_spend_cap_usd; OSS ships no tier default.
+    enabled: true
+
+billing:
+  metering:
+    tags:
+      # Record the allow-listed X-Agentic-* headers (run, step, agent, ...) on usage_events.tags
+      # (the shipped default, stated so a later template change cannot drop it unnoticed).
+      enabled: true
+
+key_store:
+  # Proxy keys in the proxy_keys table, so /admin/keys can issue, revoke and rotate them and
+  # every replica sees the change within refresh_seconds. Needs DATABASE_URL; the keys of the
+  # local key file are copied in once, into an empty table.
+  backend: postgres

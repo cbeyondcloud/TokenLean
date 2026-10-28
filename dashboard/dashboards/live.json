@@ -375,7 +375,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('minute', timestamp) AS time, ROUND(AVG(CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 1) AS avg_saving_pct FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') GROUP BY 1 ORDER BY 1",
+          "rawSql": "SELECT date_trunc('minute', timestamp) AS time, ROUND(AVG(CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 1) AS avg_saving_pct FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) GROUP BY 1 ORDER BY 1",
           "format": "time_series",
           "datasource": {
             "type": "postgres",
@@ -437,7 +437,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT user_id, COUNT(*) AS calls FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') GROUP BY 1 ORDER BY calls DESC LIMIT 20",
+          "rawSql": "SELECT user_id, COUNT(*) AS calls FROM usage_events WHERE $__timeFilter(timestamp) AND COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) GROUP BY 1 ORDER BY calls DESC LIMIT 20",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -480,7 +480,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT timestamp AS \"Time\", request_id AS \"Request ID\", user_id AS \"User\", routed_model AS \"Model\", baseline_tokens AS \"Baseline Tokens\", optimised_tokens AS \"Tokens Sent\", ROUND((CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 1) AS \"Saving %\", ROUND(cost_saved_usd, 6) AS \"Cost Saved ($)\", CASE WHEN cache_hit THEN cache_level ELSE 'miss' END AS \"Cache\", CASE WHEN bypassed THEN 'yes' ELSE 'no' END AS \"Bypassed\" FROM usage_events WHERE COALESCE(billable, true) AND ('${tenant}' = '.*' OR tenant_id = '${tenant}') ORDER BY timestamp DESC LIMIT 50",
+          "rawSql": "SELECT timestamp AS \"Time\", request_id AS \"Request ID\", user_id AS \"User\", routed_model AS \"Model\", baseline_tokens AS \"Baseline Tokens\", optimised_tokens AS \"Tokens Sent\", ROUND((CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 1) AS \"Saving %\", ROUND(cost_saved_usd, 6) AS \"Cost Saved ($)\", CASE WHEN cache_hit THEN cache_level ELSE 'miss' END AS \"Cache\", CASE WHEN bypassed THEN 'yes' ELSE 'no' END AS \"Bypassed\" FROM usage_events WHERE COALESCE(billable, true) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) ORDER BY timestamp DESC LIMIT 50",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -536,6 +536,27 @@
           "text": "All"
         },
         "refresh": 2
+      },
+      {
+        "name": "team",
+        "type": "query",
+        "label": "Team",
+        "description": "The authenticated team (usage_events.team; 'default' = no team, which also covers rows written before teams existed). Filters every panel that reads usage_events; Prometheus panels are not filtered by team.",
+        "datasource": {
+          "type": "postgres",
+          "uid": "app-postgres"
+        },
+        "definition": "SELECT DISTINCT COALESCE(NULLIF(team, ''), 'default') AS team FROM usage_events WHERE $__timeFilter(timestamp) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') ORDER BY 1",
+        "query": "SELECT DISTINCT COALESCE(NULLIF(team, ''), 'default') AS team FROM usage_events WHERE $__timeFilter(timestamp) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') ORDER BY 1",
+        "includeAll": true,
+        "multi": false,
+        "allValue": "'.*'",
+        "current": {
+          "value": "$__all",
+          "text": "All"
+        },
+        "refresh": 2,
+        "sort": 1
       }
     ]
   }

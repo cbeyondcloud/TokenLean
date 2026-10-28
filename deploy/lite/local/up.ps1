@@ -3,12 +3,14 @@
   Start the TokenLean LITE stack: proxy (LITE profile) + Postgres + Redis.
 
 .DESCRIPTION
-  up.ps1 [-Qdrant] [-Langfuse] [-Mock] [-NoBuild]
+  up.ps1 [-Qdrant] [-Langfuse] [-Mock] [-Grafana] [-NoBuild]
 
   -Qdrant    also start Qdrant (for optimisations you later turn on that need it)
   -Langfuse  also start Langfuse and send traces to it (UI on LITE_LANGFUSE_PORT)
   -Mock      also start a local OpenAI-compatible stand-in and route every model to it:
              no provider key, no spend (what CI and smoke use)
+  -Grafana   also start Grafana with the LITE dashboards, and the Prometheus they read
+             (UI on LITE_GRAFANA_PORT; Per Call too with -Langfuse)
   -NoBuild   do not rebuild the proxy image
 
   First run: creates .env.lite from .env.lite.template and generates its secrets and proxy
@@ -19,6 +21,7 @@ param(
     [switch]$Qdrant,
     [switch]$Langfuse,
     [switch]$Mock,
+    [switch]$Grafana,
     [switch]$NoBuild
 )
 . (Join-Path $PSScriptRoot '_lib.ps1')
@@ -61,6 +64,7 @@ Set-IfEmpty 'LANGFUSE_SECRET_KEY' ('sk-lf-' + (New-LiteHex 24))
 Set-IfEmpty 'LANGFUSE_NEXTAUTH_SECRET' (New-LiteHex 32)
 Set-IfEmpty 'LANGFUSE_SALT' (New-LiteHex 32)
 Set-IfEmpty 'LANGFUSE_INIT_USER_PASSWORD' (New-LiteHex 16)
+Set-IfEmpty 'GRAFANA_ADMIN_PASSWORD' (New-LiteHex 16)
 Write-LiteFile $LiteEnvFile (($lines -join "`n") + "`n")
 Import-LiteEnv
 
@@ -77,6 +81,17 @@ if ($IsLinux -or $IsMacOS) {
     & chmod 644 (Join-Path $LiteStateDir 'local-keys.json')
 }
 
+# Prometheus (-Grafana) presents METRICS_SCRAPE_TOKEN to /metrics: owner-only file, read by
+# the Prometheus container as root. Written on every up, so an edited token is picked up.
+$promDir = Join-Path $LiteStateDir 'prometheus'
+New-Item -ItemType Directory -Force -Path $promDir | Out-Null
+$tokenFile = Join-Path $promDir 'metrics-scrape-token'
+Write-LiteFile $tokenFile $env:METRICS_SCRAPE_TOKEN
+if ($IsLinux -or $IsMacOS) {
+    & chmod 700 $promDir
+    & chmod 600 $tokenFile
+}
+
 # Overlays (paths inside the proxy container) and compose profiles for this run.
 $overlays = '/app/lite/config/agentic.yaml'
 $profiles = @()
@@ -84,6 +99,12 @@ if ($Qdrant) { $profiles += @('--profile', 'qdrant') }
 if ($Langfuse) {
     $profiles += @('--profile', 'langfuse')
     $overlays += ',/app/lite/config/langfuse.yaml'
+}
+$env:LITE_GRAFANA_LANGFUSE = 'off'
+if ($Grafana) {
+    $profiles += @('--profile', 'grafana')
+    # Per Call and its Langfuse datasource only when Langfuse runs.
+    if ($Langfuse) { $env:LITE_GRAFANA_LANGFUSE = 'on' }
 }
 $mode = 'live'
 if ($Mock) {
@@ -135,11 +156,34 @@ while ($true) {
     Start-Sleep -Seconds 3
 }
 Write-Host ' ok'
+
+# Proxy keys live in Postgres (the LITE profile's key_store). The keys of .env.lite are copied
+# in only while its table is empty (the first up on fresh volumes), so check that the admin
+# key still opens /admin/keys.
+$code = 0
+try {
+    $r = Invoke-WebRequest -UseBasicParsing -Uri ((Get-LiteBaseUrl) + "/admin/keys?tenant_id=$tenant") `
+        -Headers @{ Authorization = "Bearer $($env:TOKENLEAN_ADMIN_KEY)" } -TimeoutSec 10
+    $code = [int]$r.StatusCode
+} catch {
+    if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+}
+if ($code -ne 200) {
+    Write-Host "lite: warning: TOKENLEAN_ADMIN_KEY was refused by /admin/keys (HTTP $code)." -ForegroundColor Yellow
+    Write-Host 'lite:   The key store copies the keys of .env.lite only into an empty table; a key changed' -ForegroundColor Yellow
+    Write-Host 'lite:   in .env.lite since is not there. Issue keys through /admin/keys, or start over' -ForegroundColor Yellow
+    Write-Host 'lite:   with down.ps1 -Purge (deletes the data) and up.ps1.' -ForegroundColor Yellow
+}
 Write-Host "lite: proxy  $(Get-LiteBaseUrl)  (OpenAI /v1/chat/completions, Anthropic /v1/messages, Gemini /v1beta)"
+Write-Host 'lite: admin  /admin/keys (proxy keys, team + user binding), /admin/routing (team caps, routing), /admin/usage-export'
 Write-Host "lite: key    TOKENLEAN_API_KEY in $LiteEnvFile"
 if ($Langfuse) {
     $lfPort = if ($env:LITE_LANGFUSE_PORT) { $env:LITE_LANGFUSE_PORT } else { '3110' }
     Write-Host "lite: langfuse http://127.0.0.1:$lfPort (password in .env.lite)"
+}
+if ($Grafana) {
+    $gfPort = if ($env:LITE_GRAFANA_PORT) { $env:LITE_GRAFANA_PORT } else { '3120' }
+    Write-Host "lite: grafana http://127.0.0.1:$gfPort (admin, GRAFANA_ADMIN_PASSWORD in .env.lite; folder TokenLean LITE)"
 }
 Write-Host 'lite: next   .\smoke.ps1'
 exit 0

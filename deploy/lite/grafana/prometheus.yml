@@ -1,0 +1,15 @@
+# Prometheus for the LITE dashboards (compose profile `grafana`): scrapes the proxy's /metrics on
+# the stack's own network. /metrics needs METRICS_SCRAPE_TOKEN as a bearer token; up writes it to
+# .state/prometheus/metrics-scrape-token (owner-only), mounted below /etc/prometheus/secrets.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: tokenlean-lite-proxy
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/metrics-scrape-token
+    static_configs:
+      - targets: ["proxy:8080"]

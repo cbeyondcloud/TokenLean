@@ -3,6 +3,7 @@
 LITE is TokenLean as a **gateway only**. It uses the same code and the same OSS image as the full stack, with the [LITE profile](config/agentic.yaml) applied on top of the shipped config:
 
 - **On:** authentication with per-user proxy keys, choosing the provider from the model name (OpenAI, Anthropic, Gemini, Mistral, Bedrock, Azure, any OpenAI-compatible endpoint), failover, rate limits and spend caps, a `usage_events` row and Prometheus metrics for every call, cost headers, provider prompt caching, and exact-match response caching. The trust and safety checks (PII, prompt injection, context trust, tool eligibility) also run, in `flag` mode, which records findings and never edits or blocks.
+- **Teams (one tenant, teams under it):** proxy keys bound to a team and a user, issued, revoked and rotated over HTTP (`/admin/keys`) and kept in Postgres; each team's monthly spend cap enforced (a `429` before any provider call); team limits and routing rules set over HTTP (`/admin/routing`); the `X-Agentic-*` usage tags (run, step, agent, ...) recorded on each usage row. See [Teams and keys](#teams-and-keys).
 - **Off:** every optimisation that changes the prompt, the model or the answer: compression, routing/cascade, the semantic cache, the step cache, memory, output and reasoning control, tool pruning, and so on. Also off: G21's request-editing knobs (system-message reordering, cache_control markers; its provider prompt-cache key stays) and the reasoning-model output-budget raise.
 - **Refused:** a model the config does not know gets a `400` (`model_not_configured`) instead of being answered by the default model.
 
@@ -22,16 +23,22 @@ deploy/lite/
 ├── config/
 │   ├── agentic.yaml            # the LITE profile (byte copy of config/profiles/agentic.yaml)
 │   └── langfuse.yaml           # overlay added by --langfuse: send traces to Langfuse
-└── local/                      # laptop / CI
-    ├── docker-compose.lite.yml # proxy + Postgres + Redis; profiles: qdrant, langfuse, mock
-    ├── .env.lite.template      # copied to .env.lite (git-ignored) by up
-    ├── up.sh    / up.ps1       # create .env.lite + secrets + key file, build, start, wait for /health
-    ├── down.sh  / down.ps1     # stop (volumes kept); --purge / -Purge deletes the volumes
-    ├── smoke.sh / smoke.ps1    # chat + streamed chat + messages, x-tokenlean-* headers, usage rows
-    └── mock/                   # local OpenAI-compatible stand-in for keyless runs (--mock)
+├── grafana/                    # the LITE dashboard set (--grafana), reusable by any Grafana
+│   ├── provisioning/           # datasources + dashboard providers (values from the environment)
+│   └── prometheus.yml          # scrapes the proxy's /metrics with the scrape token
+├── local/                      # laptop / CI
+│   ├── docker-compose.lite.yml # proxy + Postgres + Redis; profiles: qdrant, langfuse, mock, grafana
+│   ├── .env.lite.template      # copied to .env.lite (git-ignored) by up
+│   ├── up.sh    / up.ps1       # create .env.lite + secrets + key file, build, start, wait for /health
+│   ├── down.sh  / down.ps1     # stop (volumes kept); --purge / -Purge deletes the volumes
+│   ├── smoke.sh / smoke.ps1    # chat + stream + messages, headers, usage rows, a team-bound key
+│   └── mock/                   # local OpenAI-compatible stand-in for keyless runs (--mock)
+└── cloud/                      # managed Postgres + Redis (no Helm chart yet)
+    ├── tokenlean-lite.env.template  # the proxy container's environment, usable today
+    └── values/managed.yaml          # what the planned Helm chart reads
 ```
 
-The cloud part (Helm chart and install scripts for any Kubernetes) is planned for later and is not here yet.
+The cloud part is two files today (see [Cloud](#cloud-managed-postgres-and-redis)); the Helm chart and install scripts for any Kubernetes are planned.
 
 ## Prerequisites
 
@@ -75,9 +82,10 @@ powershell -ExecutionPolicy Bypass -File .\down.ps1
 | `--mock` | `-Mock` | start the stand-in LLM and route every model to it (no keys, no spend) |
 | `--qdrant` | `-Qdrant` | also run Qdrant (only needed once you enable an optimisation that uses it) |
 | `--langfuse` | `-Langfuse` | also run Langfuse 2 and send traces to it (UI: `http://127.0.0.1:3110`, login in `.env.lite`) |
+| `--grafana` | `-Grafana` | also run Grafana with the LITE dashboards and the Prometheus they read (UI: `http://127.0.0.1:3120`, user `admin`, `GRAFANA_ADMIN_PASSWORD` in `.env.lite`) |
 | `--no-build` | `-NoBuild` | reuse the existing proxy image |
 
-`down --purge` / `down.ps1 -Purge` also deletes the Postgres, Redis and Qdrant volumes. `.env.lite` is kept, so the next `up` reuses the same keys.
+`down --purge` / `down.ps1 -Purge` also deletes the Postgres, Redis, Qdrant, Prometheus and Grafana volumes, and with Postgres the keys issued through `/admin/keys`. `.env.lite` is kept, so the next `up` reuses the same keys and copies them into the fresh key store.
 
 ## Using it
 
@@ -86,19 +94,51 @@ powershell -ExecutionPolicy Bypass -File .\down.ps1
 - OpenAI SDKs: `base_url="http://127.0.0.1:4100/v1"`, `api_key=<TOKENLEAN_API_KEY>`.
 - Anthropic SDKs / Claude Code: `ANTHROPIC_BASE_URL=http://127.0.0.1:4100`, with the key as `x-api-key`.
 - Gemini: `POST /v1beta/models/{model}:generateContent` with `x-goog-api-key`.
-- Every served non-streamed completion carries `x-tokenlean-request-id`, `x-tokenlean-routed-model`, `x-tokenlean-cost-usd` (what the call cost) and the other `x-tokenlean-*` headers (errors do not). Every completed stream ends with `: x-tokenlean-cost {"request_id":…,"cost_usd":…}`, an SSE comment that SDKs ignore.
-- Usage rows: `POST /admin/usage-export` (your own tenant with a user key; any tenant with the admin key).
+- Every served non-streamed completion carries `x-tokenlean-request-id`, `x-tokenlean-routed-model`, `x-tokenlean-cost-usd` (what the call cost) and the other `x-tokenlean-*` headers (errors do not). A stream sends `x-tokenlean-request-id` with its headers, and every completed stream ends with `: x-tokenlean-cost {"request_id":…,"cost_usd":…}`, an SSE comment that SDKs ignore.
+- Usage rows: `POST /admin/usage-export` (your own tenant with a user key, your own team with a team-bound key; any tenant with the admin key). Each row has the call's `team` and its usage `tags`.
+
+## Teams and keys
+
+LITE runs one tenant (`LITE_TENANT_ID`) with teams under it. Proxy keys live in Postgres (`key_store.backend: postgres` in the profile): `up` copies the two keys of `.env.lite` into the key store the first time (an empty table), and every other key is issued through the admin API with `TOKENLEAN_ADMIN_KEY`. Full reference: `docs/config-reference.md`, sections "teams", "/admin/keys" and "/admin/routing".
+
+```bash
+ADMIN="Authorization: Bearer $TOKENLEAN_ADMIN_KEY"   # or put the header in a file: curl -H @file
+# a key for alice in team payments (the raw key is shown once)
+curl -s -X POST -H "$ADMIN" -H 'Content-Type: application/json' \
+  -d '{"tenant_id":"LITE-LOC-01","team":"payments","user":"alice@example.com"}' \
+  http://127.0.0.1:4100/admin/keys
+curl -s -H "$ADMIN" 'http://127.0.0.1:4100/admin/keys?team=payments'      # list (no raw keys)
+curl -s -X DELETE -H "$ADMIN" http://127.0.0.1:4100/admin/keys/<key_id>   # revoke
+# team payments may spend 50 USD a month (replaces the whole routing overlay; see GET first)
+curl -s -X PUT -H "$ADMIN" -H 'Content-Type: application/json' \
+  -d '{"fragment":{"tenants":{"LITE-LOC-01":{"teams":{"payments":{"monthly_spend_cap_usd":50}}}}}}' \
+  http://127.0.0.1:4100/admin/routing
+```
+
+`scripts/issue-key.sh --api http://127.0.0.1:4100` does the same from the command line. A team-bound key's requests are metered under its team (`usage_events.team`; `default` for a key with no team), counted against its team's cap and limits (`rate_limit.per_team`), and its team cannot be changed by a request header. A team over its cap gets `429 team_spend_cap_exceeded` until the month ends or the cap is raised. Keys and routing changes are audited.
+
+## Dashboards
+
+`up --grafana` starts Grafana with the LITE set of TokenLean's dashboards in the folder *TokenLean LITE*: Live Calls, Requests Explorer, Billing, Latency Breakup, SLA, Trust & Safety, Trends and Quarterly, plus Per Call when Langfuse runs too (`--langfuse`). Tenant Overview is left out (one tenant). Every dashboard that reads `usage_events` has a **Team** picker that filters all of those panels (rows from before teams existed count as `default`); the Prometheus panels are not filtered by team. The dashboards are read-only copies of `dashboard/dashboards/`; copy one to change it.
+
+To show the set in a Grafana you already run, mount `grafana/provisioning/datasources/lite.yaml`, `grafana/provisioning/dashboards/lite.yaml` and the eight JSON files (see the `grafana` service in `local/docker-compose.lite.yml`), and set `LITE_DB_HOST`, `LITE_DB_NAME`, `LITE_DB_USER`, `LITE_DB_PASSWORD`, `LITE_DB_SSLMODE` and `LITE_PROMETHEUS_URL` in its environment.
+
+## Cloud: managed Postgres and Redis
+
+`cloud/tokenlean-lite.env.template` is the proxy container's environment for a cloud deployment with a managed Postgres (TLS, `sslmode=require`) and Redis (`rediss://`), usable with any container platform today. `cloud/values/managed.yaml` holds the same deployment as the values the planned Helm chart will read; it names Kubernetes Secrets, never secret values. With Postgres keys, every replica sees a key issued or revoked through `/admin/keys` within `key_store.refresh_seconds` (5 s).
 
 ## Customising
 
 - **Turn an optimisation on:** write an overlay (only the keys you change), save it under `deploy/lite/config/`, and list it in `.env.lite` as `LITE_EXTRA_OVERLAYS=/app/lite/config/my-overlay.yaml`. Overlays are deep-merged in order (`CONFIG_OVERLAYS`, see `docs/config-reference.md`). A missing overlay stops the proxy from starting; it is never skipped silently.
 - **Ports / exposure:** `LITE_PROXY_PORT`, `LITE_LANGFUSE_PORT`, `LITE_BIND` (keep `127.0.0.1` unless the machine is on a private network). Postgres, Redis and Qdrant are never published.
 - **Next to the full stack:** the compose project is `tokenlean-lite`, and no container names or ports overlap with `docker-compose.yml` (`token-opt-*`, port 4000).
+- **A second LITE stack** (a review checkout, a CI job): set `LITE_PROJECT=<name>` in the environment (not in `.env.lite`) for `up`, `smoke` and `down`, with its own `LITE_PROXY_PORT` / `LITE_GRAFANA_PORT` / `LITE_LANGFUSE_PORT`.
 
 ## Troubleshooting
 
 - `up` waits up to `LITE_HEALTH_TIMEOUT` seconds (240) for `/health` to report `ok`, then prints `ps` and the proxy's last log lines.
 - `.env.lite not found`: run `up` first; `smoke` and `down` read it.
-- A `401` from smoke after editing keys: run `up` again. It rewrites `.state/local-keys.json` from `.env.lite`.
+- A `401` from smoke after editing keys in `.env.lite`: the key store copies the keys of `.env.lite` only into an empty table, so an edited key is not there (`up` warns about this). Issue a new key through `/admin/keys`, or start over with `down --purge` and `up`.
+- Windows Git Bash: the scripts stop Git Bash from rewriting the in-container overlay paths (`MSYS2_ENV_CONV_EXCL`); PowerShell needs nothing.
 - Windows: if Docker Desktop is not running, `docker compose version` fails and the scripts say so.
 - Linux: the proxy container runs as uid 1000 and reads `config/` and `deploy/lite/` through bind mounts, so those files must be world-readable. A checkout made under a restrictive `umask` (e.g. 077) needs `chmod -R a+rX config deploy/lite`. `up` already makes its own `.state/` readable.

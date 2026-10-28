@@ -44,7 +44,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT tokens_saved FROM usage_events WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' LIMIT 1",
+          "rawSql": "SELECT tokens_saved FROM usage_events WHERE ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND request_id = '${request_id}' LIMIT 1",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -109,7 +109,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT ROUND((CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 2) FROM usage_events WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' LIMIT 1",
+          "rawSql": "SELECT ROUND((CASE WHEN baseline_tokens = 0 THEN 0 ELSE tokens_saved * 100.0 / baseline_tokens END)::numeric, 2) FROM usage_events WHERE ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND request_id = '${request_id}' LIMIT 1",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -161,7 +161,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT cost_saved_usd FROM usage_events WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' LIMIT 1",
+          "rawSql": "SELECT cost_saved_usd FROM usage_events WHERE ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND request_id = '${request_id}' LIMIT 1",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -211,7 +211,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT routed_model FROM usage_events WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' LIMIT 1",
+          "rawSql": "SELECT routed_model FROM usage_events WHERE ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND request_id = '${request_id}' LIMIT 1",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -260,7 +260,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT CASE WHEN cache_hit THEN cache_level ELSE 'miss' END FROM usage_events WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' LIMIT 1",
+          "rawSql": "SELECT CASE WHEN cache_hit THEN cache_level ELSE 'miss' END FROM usage_events WHERE ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND request_id = '${request_id}' LIMIT 1",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -309,7 +309,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT key AS group, value::int AS tokens_saved FROM usage_events, jsonb_each_text(group_savings) WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' ORDER BY tokens_saved DESC",
+          "rawSql": "SELECT key AS group, value::int AS tokens_saved FROM usage_events, jsonb_each_text(group_savings) WHERE ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND request_id = '${request_id}' ORDER BY tokens_saved DESC",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -352,7 +352,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT key AS \"G-Group\", value::int AS \"Saved\", ROUND((CASE WHEN baseline_tokens = 0 THEN 0 ELSE value::int * 100.0 / baseline_tokens END)::numeric, 2) AS \"% of Baseline\" FROM usage_events, jsonb_each_text(group_savings) WHERE ('${tenant}' = '.*' OR tenant_id = '${tenant}') AND request_id = '${request_id}' ORDER BY key",
+          "rawSql": "SELECT key AS \"G-Group\", value::int AS \"Saved\", ROUND((CASE WHEN baseline_tokens = 0 THEN 0 ELSE value::int * 100.0 / baseline_tokens END)::numeric, 2) AS \"% of Baseline\" FROM usage_events, jsonb_each_text(group_savings) WHERE ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') AND (${team:sqlstring} = '.*' OR COALESCE(NULLIF(team, ''), 'default') = ${team:sqlstring}) AND request_id = '${request_id}' ORDER BY key",
           "format": "table",
           "datasource": {
             "type": "postgres",
@@ -476,6 +476,27 @@
           "text": "All"
         },
         "refresh": 2
+      },
+      {
+        "name": "team",
+        "type": "query",
+        "label": "Team",
+        "description": "The authenticated team (usage_events.team; 'default' = no team, which also covers rows written before teams existed). Filters every panel that reads usage_events; Prometheus panels are not filtered by team.",
+        "datasource": {
+          "type": "postgres",
+          "uid": "app-postgres"
+        },
+        "definition": "SELECT DISTINCT COALESCE(NULLIF(team, ''), 'default') AS team FROM usage_events WHERE $__timeFilter(timestamp) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') ORDER BY 1",
+        "query": "SELECT DISTINCT COALESCE(NULLIF(team, ''), 'default') AS team FROM usage_events WHERE $__timeFilter(timestamp) AND ('${tenant:percentencode}' = '.%2A' OR tenant_id = '${tenant:percentencode}') ORDER BY 1",
+        "includeAll": true,
+        "multi": false,
+        "allValue": "'.*'",
+        "current": {
+          "value": "$__all",
+          "text": "All"
+        },
+        "refresh": 2,
+        "sort": 1
       }
     ]
   },

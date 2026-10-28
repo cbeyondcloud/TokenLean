@@ -17,9 +17,13 @@ Config (``billing.metering.tags``, global only: a tenant cannot widen what is re
 * ``max_value_chars`` (default 256, at most 1024) — longer values are cut to it.
 
 A value is trimmed and must be printable ASCII; one that looks like a credential (a
-provider or proxy key, a bearer or basic token, a JWT, credentials in a URL, a
-``password=...`` pair, a private-key header) is dropped and counted, never stored. A
-section that is present but unreadable stores nothing (fail closed), with a warning.
+provider, registry or proxy key, a bearer or basic token, a JWT, credentials in a URL, a
+webhook or signed-URL secret, a ``password=...`` pair, a private-key header) is dropped and
+counted, never stored. Bare hex or base64 strings are kept: commit SHAs and run ids look the
+same, and they are what the tags are for. When a tag key arrives more than once (a header
+sent twice, or two allow-listed headers mapped to one key), the first value in the request
+decides (stored, or dropped as a credential); later ones are ignored and counted. A section
+that is present but unreadable stores nothing (fail closed), with a warning.
 """
 import logging
 import re
@@ -63,7 +67,13 @@ _SECRET_PATTERNS = (
     re.compile(r"\bGOCSPX-[0-9A-Za-z_-]{28}\b"),
     re.compile(r"\b(?:gh[pousr]_[0-9A-Za-z]{36,}|github_pat_[0-9A-Za-z_]{40,})\b"),
     re.compile(r"\bxox[abprs]-[0-9A-Za-z-]{10,}\b"),
-    re.compile(r"\b(?:sk|rk)_live_[0-9A-Za-z]{20,}\b"),
+    re.compile(r"\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{20,}\b"),
+    re.compile(r"\bhf_[0-9A-Za-z]{30,}\b"),                     # Hugging Face
+    re.compile(r"\bnpm_[0-9A-Za-z]{36,}\b"),                    # npm
+    re.compile(r"\bpypi-AgE[0-9A-Za-z_-]{50,}"),                # PyPI upload token
+    # Webhook URLs whose path is the secret, and a signed URL's signature (Azure SAS sig=).
+    re.compile(r"(?i)\bhooks\.slack\.com/(?:services|workflows|triggers)/[0-9A-Za-z/_-]{20,}"),
+    re.compile(r"(?i)(?:^|[?&\s])sig=[0-9A-Za-z%+/_=-]{16,}"),
     re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b"),
     # Provider / proxy keys in any case: sk-…, rk-…, tok-… with a long body that has a digit.
     re.compile(r"(?i)\b(?:sk|rk|tok)-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}"),
@@ -77,7 +87,7 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(?:secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|"
                r"private[_-]?key)\s*[=:]\s*(?:(?=\S*\d)\S{6,}|\S{20,})"),
 )
-_BASIC = re.compile(r"(?i)\bbasic" + _SEP + r"([A-Za-z0-9+/]{4,}={0,2})")
+_BASIC = re.compile(r"(?i)\bbasic" + _SEP + r"([A-Za-z0-9+/]{2,}={0,2})")
 _URL_USERINFO = re.compile(r"://([^/\s@]+)@")
 _TOKENISH = re.compile(r"(?=[A-Za-z0-9._~-]*\d)(?=[A-Za-z0-9._~-]*[A-Za-z])[A-Za-z0-9._~-]{20,}")
 
@@ -106,7 +116,7 @@ def _url_credentials(value: str) -> bool:
 TAGS_DROPPED = Counter(
     "token_opt_usage_tags_dropped_total",
     "Allow-listed usage-tag header values not stored, by reason",
-    ["reason"],   # secret | invalid
+    ["reason"],   # secret | invalid | duplicate
 )
 
 _warned: set = set()
@@ -201,6 +211,7 @@ def extract_tags(headers: Mapping[str, str], config: Any) -> Optional[Dict[str, 
     if not allowed or not headers:
         return None
     tags: Dict[str, str] = {}
+    seen: set = set()
     for name, raw in headers.items():
         key = allowed.get(str(name).lower())
         if key is None or not isinstance(raw, str):
@@ -208,6 +219,12 @@ def extract_tags(headers: Mapping[str, str], config: Any) -> Optional[Dict[str, 
         value = raw.strip()
         if not value:
             continue
+        # The first value for a key decides, stored or dropped: a later header can neither
+        # override a stored value nor stand in for one dropped as a credential.
+        if key in seen:
+            TAGS_DROPPED.labels(reason="duplicate").inc()
+            continue
+        seen.add(key)
         if not _PRINTABLE.fullmatch(value):
             TAGS_DROPPED.labels(reason="invalid").inc()
             continue

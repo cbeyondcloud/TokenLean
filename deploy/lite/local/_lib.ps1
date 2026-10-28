@@ -9,10 +9,17 @@ $LiteEnvFile = Join-Path $LiteDir '.env.lite'
 $LiteStateDir = Join-Path $LiteDir '.state'
 $LiteComposeFile = Join-Path $LiteDir 'docker-compose.lite.yml'
 # Every compose call names this project explicitly (-p), so nothing else can redirect it.
-$LiteProject = 'tokenlean-lite'
+# $env:LITE_PROJECT (environment only, never .env.lite) runs a second LITE stack next to the
+# first, e.g. a review checkout or a CI job; give it its own LITE_*_PORT values too.
+$LiteProject = if ($env:LITE_PROJECT) { $env:LITE_PROJECT } else { 'tokenlean-lite' }
+if ($LiteProject -cnotmatch '^[a-z0-9][a-z0-9_-]*$') {
+    Write-Host 'lite: LITE_PROJECT may hold only a-z 0-9 _ - (starting with a letter or digit)' -ForegroundColor Red
+    exit 1
+}
 # docker (default) or podman. Both are driven as '<engine> compose ...'.
 $LiteEngine = if ($env:CONTAINER_ENGINE) { $env:CONTAINER_ENGINE } else { 'docker' }
-$LiteAllProfiles = @('--profile', 'qdrant', '--profile', 'langfuse', '--profile', 'mock')
+$LiteAllProfiles = @('--profile', 'qdrant', '--profile', 'langfuse', '--profile', 'mock',
+                     '--profile', 'grafana')
 
 # Compose settings exported for another stack must never steer these scripts: the full
 # TokenLean .env sets COMPOSE_PROJECT_NAME=token-opt, and with it 'down -Purge' would

@@ -1,0 +1,22 @@
+# Mounted as langfuse.yaml when the stack runs with Langfuse (up --grafana --langfuse): Per Call's
+# trace panels read Langfuse's own database. Same server and login as the gateway's database.
+apiVersion: 1
+
+datasources:
+  - name: Langfuse Postgres
+    type: postgres
+    uid: langfuse-postgres
+    url: ${LITE_DB_HOST}
+    database: ${LITE_LANGFUSE_DB_NAME}
+    user: ${LITE_DB_USER}
+    secureJsonData:
+      password: ${LITE_DB_PASSWORD}
+    jsonData:
+      sslmode: ${LITE_DB_SSLMODE}
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+      postgresVersion: 1500
+      timescaledb: false
+    isDefault: false
+    editable: false

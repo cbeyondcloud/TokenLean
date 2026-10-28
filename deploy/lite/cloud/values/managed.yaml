@@ -1,0 +1,70 @@
+# TokenLean LITE on any Kubernetes, with a MANAGED Postgres and Redis: the values the LITE Helm
+# chart (planned: deploy/lite/cloud/helm/tokenlean-lite) reads. Until the chart exists, this
+# file fixes what it is given; ../tokenlean-lite.env.template is the same deployment as the
+# proxy container's environment, usable today.
+#
+# Secrets are never written here: each block names a Kubernetes Secret (existingSecret) and
+# the key in it. Create them from your secret store (External Secrets, Sealed Secrets, CSI).
+
+image:
+  repository: ghcr.io/your-org/tokenlean-proxy   # the OSS image, built from src/proxy/Dockerfile
+  tag: "set-me"                                  # an exact release, never latest
+  pullPolicy: IfNotPresent
+
+replicas: 2                 # every replica re-reads proxy keys and the routing overlay
+resources:
+  requests: {cpu: 250m, memory: 512Mi}
+  limits: {memory: 1Gi}
+
+config:
+  # A ConfigMap built from config/config.yaml.template, with the LITE profile applied first
+  # (CONFIG_OVERLAYS) and then any overlays listed below, in order.
+  profile: deploy/lite/config/agentic.yaml
+  overlays: []              # e.g. deploy/lite/config/langfuse.yaml, your own opt-in overlays
+
+postgres:                   # managed: Cloud SQL, RDS, Azure Database for PostgreSQL, ...
+  host: postgres.example.internal
+  port: 5432
+  database: tokenlean
+  user: tokenlean
+  sslmode: require          # require | verify-ca | verify-full
+  existingSecret: tokenlean-lite-postgres
+  passwordSecretKey: password
+  # DATABASE_URL = postgresql://<user>:<password>@<host>:<port>/<database>?sslmode=<sslmode>
+
+redis:                      # managed: Memorystore, ElastiCache, Azure Cache for Redis, ...
+  host: redis.example.internal
+  port: 6380
+  db: 0
+  tls: true                 # REDIS_URL = rediss://<host>:<port>/<db>
+  existingSecret: tokenlean-lite-redis
+  passwordSecretKey: password
+  caCertSecretKey: ""       # the key holding a private CA (REDIS_CA_CERT); "" = system trust
+
+proxyKeys:
+  backend: postgres         # the LITE profile's key_store: keys in the proxy_keys table
+  # local-keys.json (hashes only) with the bootstrap admin key; copied into an empty table once.
+  existingSecret: tokenlean-lite-bootstrap-keys
+  keysFileSecretKey: local-keys.json
+
+providerKeys:               # LLM_KEY_<PROVIDER> for each provider you use
+  existingSecret: tokenlean-lite-provider-keys
+
+metrics:
+  existingSecret: tokenlean-lite-metrics
+  scrapeTokenSecretKey: scrape-token   # METRICS_SCRAPE_TOKEN, presented by your Prometheus
+
+service:
+  port: 8080
+
+ingress:
+  enabled: true
+  className: ""
+  host: tokenlean.example.internal
+  tlsSecretName: tokenlean-lite-tls
+
+dashboards:
+  # The LITE set: mount these provisioning files and dashboard/dashboards (without
+  # tenant-overview.json) into your Grafana, and set LITE_DB_* / LITE_PROMETHEUS_URL in its
+  # environment. Per Call and its datasource only with Langfuse (langfuse-on.yaml files).
+  provisioning: deploy/lite/grafana/provisioning
