@@ -90,7 +90,7 @@ fastembed==0.8.0
     # via -r requirements.in
 fastuuid==0.14.0
     # via litellm
-filelock==3.32.2
+filelock==4.2.4
     # via
     #   huggingface-hub
     #   tldextract
@@ -444,7 +444,7 @@ scipy==1.17.1
     #   sentence-transformers
 sentence-transformers==5.7.0
     # via -r requirements.in
-setuptools==83.0.0
+setuptools==84.2.1
     # via
     #   grpcio-tools
     #   spacy

@@ -127,7 +127,7 @@ numpy==2.4.6
     # via qdrant-client
 openai==3.24.0
     # via -r requirements.in
-opentelemetry-api==1.45.0
+opentelemetry-api==1.45.1
     # via google-api-core
 packaging==26.3
     # via
@@ -179,7 +179,7 @@ requests==2.34.2
     #   google-cloud-bigquery
     #   google-cloud-storage
     #   google-genai
-setuptools==84.0.0
+setuptools==84.2.1
     # via grpcio-tools
 six==1.17.0
     # via python-dateutil

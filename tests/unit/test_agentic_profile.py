@@ -56,6 +56,9 @@ def _lite_config(monkeypatch):
     monkeypatch.delenv("CONFIG_GCS_BUCKET", raising=False)
     monkeypatch.setattr(config_loader, "_config", {})
     monkeypatch.setattr(config_loader, "_sleep", lambda s: None)
+    # The profile alone: a checkout's own gitignored config/params/*.yaml (a commercial
+    # tiers.yaml with a rate_card) is not part of what the profile sets.
+    monkeypatch.setattr(config_loader, "merge_params_dir", lambda base, params_dir: base)
     return copy.deepcopy(config_loader.load_config(required=True))
 
 

@@ -196,7 +196,7 @@ olefile==0.47
     # via python-oxmsg
 onnxruntime==1.30.0
     # via fastembed
-opentelemetry-api==1.45.0
+opentelemetry-api==1.45.1
     # via google-api-core
 orjson==3.12.0
     # via langsmith
@@ -291,7 +291,7 @@ requests-toolbelt==1.0.0
     #   unstructured-client
 rich==15.0.0
     # via typer
-setuptools==84.0.0
+setuptools==84.2.1
     # via
     #   grpcio-tools
     #   spacy
