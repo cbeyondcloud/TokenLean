@@ -174,7 +174,13 @@ if ($r.Status -eq 201 -and $teamKey -and $teamKeyId) {
         $b = "{`"model`":`"$model`",`"max_tokens`":16,`"messages`":[{`"role`":`"user`",`"content`":`"Reply with the word pong. ($nonce team $Suffix)`"}]}"
         return Send-Json '/v1/chat/completions' $b $teamAuth
     }
-    $t = Send-TeamCall 'a'
+    # A key issued through one worker or replica reaches the others within
+    # key_store.refresh_seconds (5 s): a 401 is retried for that long.
+    for ($try = 0; $try -lt 12; $try++) {
+        $t = Send-TeamCall 'a'
+        if ($t.Status -ne 401) { break }
+        Start-Sleep -Seconds 1
+    }
     $tid = ''
     if ($t.Response) { $tid = Get-Header $t.Response 'x-tokenlean-request-id' }
     if ($t.Status -eq 200 -and $tid) {
@@ -201,7 +207,9 @@ if ($r.Status -eq 201 -and $teamKey -and $teamKeyId) {
         $put = Send-Request 'Put' '/admin/routing' "{`"expected_version`":$rver,`"comment`":`"lite smoke`",`"fragment`":$fragment}" $admin
         if ($put.Status -eq 200) {
             $capped = $false; $last = 0
-            for ($i = 1; $i -le 5; $i++) {   # the first call's cost reaches the counter just after it
+            # The first call's cost reaches the counter just after it, and the overlay reaches
+            # every worker within admin_api.routing.poll_seconds (5 s).
+            for ($i = 1; $i -le 12; $i++) {
                 $c = Send-TeamCall "b$i"
                 $last = $c.Status
                 if ($c.Status -eq 429 -and $c.Text -match 'team_spend_cap_exceeded') { $capped = $true; break }
@@ -221,7 +229,13 @@ if ($r.Status -eq 201 -and $teamKey -and $teamKeyId) {
     }
 
     $del = Send-Request 'Delete' "/admin/keys/$teamKeyId" '' $admin
-    $after = Send-TeamCall 'c'
+    # Refused at once by the worker that revoked it, and by every other within
+    # key_store.refresh_seconds (5 s).
+    for ($try = 0; $try -lt 12; $try++) {
+        $after = Send-TeamCall 'c'
+        if ($after.Status -eq 401) { break }
+        Start-Sleep -Seconds 1
+    }
     if ($del.Status -eq 200 -and $after.Status -eq 401) { Write-Pass 'team key revoked and refused' }
     else { Write-Fail "team key revoke (DELETE status $($del.Status), then call status $($after.Status))" }
 } else {
