@@ -33,12 +33,18 @@ deploy/lite/
 │   ├── down.sh  / down.ps1     # stop (volumes kept); --purge / -Purge deletes the volumes
 │   ├── smoke.sh / smoke.ps1    # chat + stream + messages, headers, usage rows, a team-bound key
 │   └── mock/                   # local OpenAI-compatible stand-in for keyless runs (--mock)
-└── cloud/                      # managed Postgres + Redis (no Helm chart yet)
-    ├── tokenlean-lite.env.template  # the proxy container's environment, usable today
-    └── values/managed.yaml          # what the planned Helm chart reads
+└── cloud/                      # any Kubernetes: the LITE Helm chart and its scripts
+    ├── helm/tokenlean-lite/    # the chart: Chart.yaml, values.yaml (documented), templates/, files/
+    ├── values/                 # dev.yaml, staging.yaml, prod.yaml, managed.yaml
+    ├── install.sh   / .ps1     # helm upgrade --install with values/<env>.yaml, wait for the rollout
+    ├── upgrade.sh   / .ps1     # the same, for an installed release only
+    ├── uninstall.sh / .ps1     # helm uninstall (Secrets and data kept); --purge / -Purge
+    ├── smoke.sh     / .ps1     # the local smoke's checks, against the ingress or a port-forward
+    ├── kind/                   # e2e.sh: the whole cycle on a local kind cluster, keyless
+    └── tokenlean-lite.env.template  # the proxy container's environment, for other platforms
 ```
 
-The cloud part is two files today (see [Cloud](#cloud-managed-postgres-and-redis)); the Helm chart and install scripts for any Kubernetes are planned.
+See [Cloud](#cloud-any-kubernetes-helm) for the chart.
 
 ## Prerequisites
 
@@ -123,9 +129,88 @@ curl -s -X PUT -H "$ADMIN" -H 'Content-Type: application/json' \
 
 To show the set in a Grafana you already run, mount `grafana/provisioning/datasources/lite.yaml`, `grafana/provisioning/dashboards/lite.yaml` and the eight JSON files (see the `grafana` service in `local/docker-compose.lite.yml`), and set `LITE_DB_HOST`, `LITE_DB_NAME`, `LITE_DB_USER`, `LITE_DB_PASSWORD`, `LITE_DB_SSLMODE` and `LITE_PROMETHEUS_URL` in its environment.
 
-## Cloud: managed Postgres and Redis
+## Cloud: any Kubernetes (Helm)
 
-`cloud/tokenlean-lite.env.template` is the proxy container's environment for a cloud deployment with a managed Postgres (TLS, `sslmode=require`) and Redis (`rediss://`), usable with any container platform today. `cloud/values/managed.yaml` holds the same deployment as the values the planned Helm chart will read; it names Kubernetes Secrets, never secret values. With Postgres keys, every replica sees a key issued or revoked through `/admin/keys` within `key_store.refresh_seconds` (5 s).
+`cloud/helm/tokenlean-lite` runs the LITE proxy on any Kubernetes 1.29+. It renders the same config as the local stack: the shipped `config.yaml.template` with the LITE profile applied first, carried in a ConfigMap byte for byte. Postgres is always yours (a managed service or one you run). Redis is yours too, except on a dev cluster, where the chart can run one. No cloud vendor's resource is required.
+
+What it deploys: the proxy Deployment (startup, readiness and liveness probes on `/health`; non-root, read-only root filesystem, no capabilities; it serves only once billing, the audit log and the key store are wired), a Service, a PodDisruptionBudget, an optional HorizontalPodAutoscaler, an optional Ingress with TLS (cert-manager annotations, or your own certificate), Prometheus scrape annotations (or a ServiceMonitor), and a migration hook: before each install and upgrade, a Job runs the proxy's own schema steps once (`python -m schema_setup`), so replicas never race to create tables.
+
+### Values files
+
+| File | Replicas | Postgres | Redis | Ingress |
+|---|---|---|---|---|
+| `values/dev.yaml` | 1 | your dev Postgres, `sslmode=disable` | bundled (dev only, no TLS) | dev host, cert-manager |
+| `values/staging.yaml` | HPA 2-4 | managed, `sslmode=require` | managed, TLS | staging host, cert-manager |
+| `values/prod.yaml` | HPA 3-10, spread over zones and nodes | managed, `sslmode=verify-full` | managed, TLS | prod host, cert-manager |
+| `values/managed.yaml` | 2 | managed, `sslmode=require` | managed, TLS | your certificate |
+
+Each file is layered over the chart's `values.yaml`, which documents every setting. Put your own hosts, Secret names and sizes in a values file of your own and pass it with `--values` / `-Values`; it wins over the environment's file.
+
+### Secrets
+
+Values files name Secrets; they never hold secret values. Create these in the release's namespace from your secret store (External Secrets, Sealed Secrets, the CSI driver) before installing:
+
+| Secret (default name) | Key | What |
+|---|---|---|
+| `tokenlean-lite-postgres` | `password` | the Postgres user's password (reaches the proxy as `PGPASSWORD`, never inside `DATABASE_URL`) |
+| `tokenlean-lite-redis` | `password` | the Redis password (and an optional CA key, `redis.caCertSecretKey`) |
+| `tokenlean-lite-bootstrap-keys` | `local-keys.json` | the bootstrap proxy keys, hashes only (`scripts/generate_proxy_key.py`); copied into an empty `proxy_keys` table once |
+| `tokenlean-lite-provider-keys` | `LLM_KEY_<PROVIDER>` | one key per provider you use; every key becomes an environment variable |
+| `tokenlean-lite-metrics` | `scrape-token` | the bearer token `/metrics` answers to |
+
+On a dev cluster, `install.sh dev --create-secrets` creates the missing ones except Postgres's: random passwords, fresh bootstrap keys (the raw keys go to an owner-only, git-ignored file under `cloud/.state/` for smoke), and the `LLM_KEY_*` variables set in your shell. Values reach `kubectl` in files, never on a command line.
+
+### Install, smoke, upgrade, uninstall
+
+**macOS / Linux (bash or zsh):**
+
+```bash
+cd deploy/lite/cloud
+./install.sh staging --image registry.example.com/tokenlean-proxy:1.0.0 --values my-staging.yaml
+TOKENLEAN_API_KEY=... TOKENLEAN_ADMIN_KEY=... LITE_TENANT_ID=... SMOKE_MODEL=gpt-4o-mini \
+  ./smoke.sh --url https://tokenlean-lite.staging.example.internal
+./upgrade.sh staging --image registry.example.com/tokenlean-proxy:1.0.1 --values my-staging.yaml
+./uninstall.sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+cd deploy\lite\cloud
+.\install.ps1 staging -Image registry.example.com/tokenlean-proxy:1.0.0 -Values my-staging.yaml
+.\smoke.ps1 -Url https://tokenlean-lite.staging.example.internal   # keys and model from $env:
+.\upgrade.ps1 staging -Image registry.example.com/tokenlean-proxy:1.0.1 -Values my-staging.yaml
+.\uninstall.ps1
+```
+
+**A dev cluster, keyless:** `./install.sh dev --image <image> --create-secrets --mock`, then `./smoke.sh` (it port-forwards the Service and finds the keys and the mock model by itself).
+
+- The scripts need `helm` 3.8+ (or 4) and `kubectl`, or `HELM` / `KUBECTL` naming them. Every script takes `--namespace`, `--release` and `--context` (`-Namespace`, `-Release`, `-Context`), and prints the context it acts on.
+- `install` and `upgrade` wait for the rollout (`--timeout`, default 10m) and print the pods, events and logs when it fails. A failed upgrade leaves the previous revision serving.
+- `smoke` runs `local/smoke.sh` (or `smoke.ps1`): the same checks as the local stack, at the address it is given (`LITE_BASE_URL`, `LITE_ENV_FILE`). Without `--url` it port-forwards the proxy Service to `127.0.0.1:4180`. Through an ingress with a private CA, set `CURL_CA_BUNDLE` (bash) or trust the CA in the system store (PowerShell).
+- `uninstall` keeps the namespace, the Secrets and your Postgres data. `--purge` also deletes the Secrets `--create-secrets` made and the bundled Redis's volume.
+
+### Config and overlays
+
+The ConfigMap carries `files/config.yaml.template` and `files/agentic.yaml`, byte copies of the repository's `config/config.yaml.template` and of `deploy/lite/config/agentic.yaml` (helm reads nothing outside a chart). After changing either source, run `python scripts/sync_lite_chart.py`; a test fails while a copy is stale. `config.overlays` lists overlays the chart carries (`deploy/lite/config/langfuse.yaml`); `config.extraOverlays` adds your own, by name and content, applied last in order. Keep secrets out of overlays: use `${VAR}` placeholders and `proxy.extraEnvFrom`.
+
+### Ingress, metrics, migrations
+
+- **Ingress:** set `ingress.host`, `ingress.tlsSecretName` and `ingress.certManager.clusterIssuer` (or `issuer`); leave the issuer empty to bring your own certificate in that Secret. Streamed answers need an unbuffered proxy path and long read timeouts: set your controller's annotations in `ingress.annotations` (examples in `values.yaml`).
+- **Metrics:** the pods carry `prometheus.io/scrape|path|port`. `/metrics` answers only to the scrape token, so the scrape job must present it (`authorization.credentials_file`), or set `metrics.serviceMonitor.enabled=true` with the Prometheus Operator: its ServiceMonitor reads the token from the metrics Secret.
+- **Migrations:** the hook runs as `postgres.user` by default. To run the proxy as a restricted role (`python -m audit.enforcement`), give the hook the tables' owner: `migrations.user` and `migrations.existingSecret`. `migrations.enabled=false` leaves the schema steps to the proxy's startup, as the local stack does.
+
+### In an umbrella chart
+
+The chart is self-contained (no dependencies, every object named after the release) so another chart can nest it. Its values then sit under the parent's `tokenlean-lite:` key, for example `tokenlean-lite.postgres.host`.
+
+### On a local kind cluster
+
+`cloud/kind/e2e.sh --image <image>` builds nothing; give it a proxy image you built (`docker build -t tokenlean-lite-proxy:1.0.0-dev src/proxy`). It creates a kind cluster, loads the image, starts a throwaway Postgres (`kind/dev-postgres.yaml`), then runs `install.sh dev --mock --create-secrets`, `smoke.sh`, `upgrade.sh`, `smoke.sh` and `uninstall.sh --purge`, and deletes the cluster. It needs Docker only: kind, helm and kubectl run in pinned containers. `TOKENLEAN_LITE_KIND_E2E=1 pytest tests/unit/test_lite_helm_chart.py -k kind` runs it from the suite (with `TOKENLEAN_IMAGE` set).
+
+### Other container platforms
+
+`cloud/tokenlean-lite.env.template` is the proxy container's environment for a managed Postgres (TLS, `sslmode=require`) and Redis (`rediss://`), for any platform that is not Kubernetes. With Postgres keys, every replica sees a key issued or revoked through `/admin/keys` within `key_store.refresh_seconds` (5 s).
 
 ## Customising
 

@@ -28,6 +28,8 @@ imagePullSecrets: []        # e.g. [{name: my-registry}]
 # overlay from Postgres (key_store.refresh_seconds, 5 s).
 replicas: 2
 
+# A HorizontalPodAutoscaler on CPU (and memory); it needs the cluster's resource metrics API
+# (metrics-server or an equivalent).
 autoscaling:
   enabled: false
   minReplicas: 2

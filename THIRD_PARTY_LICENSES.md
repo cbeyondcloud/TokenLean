@@ -98,6 +98,9 @@ card, or by the LICENSE file in its repository; checked 2026-10-04.
 | GitHub Actions `actions/checkout`, `actions/setup-python` (SHA-pinned in `ci.yml`) | MIT | CI only |
 | Google Cloud SDK (`gcloud`, `gsutil`), Cloud SQL Auth Proxy, `gcr.io/cloud-builders/gcloud` | Apache-2.0 | GCP deploy |
 | Docker Engine / Docker Compose | Apache-2.0 | Local stack |
+| Helm, kubectl (`deploy/lite/cloud` scripts; chart tests in the pinned `alpine/helm` and `alpine/k8s` images) | Apache-2.0 | LITE on Kubernetes. The images' Alpine packages carry their own licences |
+| kind, the Docker CLI image `docker:cli` (`deploy/lite/cloud/kind/e2e.sh`), kubeconform (chart tests, `ghcr.io/yannh/kubeconform`) | Apache-2.0 | Local cluster and manifest checks only; run in pinned containers |
+| cert-manager (optional; the chart only sets its annotations) | Apache-2.0 | Yours, if your cluster runs it |
 | pip-tools | BSD-3-Clause | `scripts/compile-requirements.sh` |
 
 ## Starter templates (`src/templates/`)

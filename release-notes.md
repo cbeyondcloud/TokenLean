@@ -21,6 +21,21 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-10-29
+
+### LITE on any Kubernetes: a Helm chart and install / upgrade / uninstall / smoke scripts (ST-8) — Enhancement (OSS)
+`deploy/lite/cloud/helm/tokenlean-lite` runs the LITE proxy on any Kubernetes 1.29+ with the same
+config the local stack proves (the shipped config and the LITE profile, carried byte for byte
+and test-pinned): probes on `/health`, non-root with a read-only root filesystem, HPA and PDB,
+optional Ingress with cert-manager TLS, Secret references only, Prometheus annotations or a
+ServiceMonitor, and a migration hook (`python -m schema_setup`, the proxy's own schema steps,
+once per deploy). Postgres is yours; Redis too, or bundled on a dev cluster. `values/` adds
+dev, staging and prod next to managed. `install`, `upgrade`, `uninstall` and `smoke` ship for
+bash and PowerShell; smoke runs the local smoke's checks against the ingress or a
+port-forward, and `kind/e2e.sh` runs the whole cycle on a local kind cluster, keyless.
+- **OSS:** the chart, values files, scripts, `schema_setup`, and `scripts/sync_lite_chart.py`
+  (refreshes the chart's copies; a test fails while one is stale). The local stack is unchanged.
+
 ## 2026-10-28
 
 ### `/v1/responses` no longer hands a client a tool call cut off by the output limit — Bug fix

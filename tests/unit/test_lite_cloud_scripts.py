@@ -77,6 +77,28 @@ def test_bash_scripts_are_committed_executable(script):
     assert out.split()[0] == "100755", out
 
 
+def test_the_kind_e2e_script_parses_is_lf_and_executable():
+    path = os.path.join(_CLOUD, "kind", "e2e.sh")
+    assert b"\r\n" not in _read(path, "rb")
+    bash = _bash()
+    if bash:
+        out = subprocess.run([bash, "-n", "./e2e.sh"], cwd=os.path.dirname(path),
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+    staged = _git("ls-files", "-s", "deploy/lite/cloud/kind/e2e.sh").stdout
+    if staged:
+        assert staged.split()[0] == "100755", staged
+
+
+def test_the_kind_e2e_pins_every_image_by_digest():
+    text = _read(os.path.join(_CLOUD, "kind", "e2e.sh"))
+    for name in ("NODE_IMAGE", "DOCKER_CLI_IMAGE", "K8S_TOOLS_IMAGE"):
+        value = re.search(rf"^{name}=(\S+)$", text, re.M).group(1)
+        assert re.search(r":v?\d+\.\d+\.\d+[^@]*@sha256:[0-9a-f]{64}$", value), (name, value)
+    assert re.search(r"^KIND_SHA256=[0-9a-f]{64}$", text, re.M)
+    assert "sha256sum -c" in text
+
+
 def test_the_state_directory_is_ignored():
     if _git("check-ignore", "-q", "deploy/lite/cloud/.state/x.env").returncode != 0:
         pytest.fail("deploy/lite/cloud/.state/ (generated keys) must be git-ignored")
@@ -132,6 +154,19 @@ def test_smoke_runs_the_local_checks_against_the_cluster(script):
     assert "local" in text and ("smoke.sh" in text or "smoke.ps1" in text)
     assert "LITE_BASE_URL" in text and "LITE_ENV_FILE" in text
     assert "port-forward" in text
+
+
+@pytest.mark.parametrize("script", ["smoke.sh", "smoke.ps1"])
+def test_the_shared_smoke_waits_out_the_key_store_refresh(script):
+    """A key issued or revoked on one worker (the image runs two) or replica reaches the
+    others within key_store.refresh_seconds, and a routing overlay within poll_seconds (5 s
+    each): the checks retry for 12 s instead of reading the first answer (seen on kind)."""
+    text = _read(os.path.join(_LOCAL, script))
+    assert text.count("key_store.refresh_seconds") >= 2, script
+    assert "poll_seconds" in text
+    loops = re.findall(r"for _ in 1 2 3 4 5 6 7 8 9 10 11 12;|\$try -lt 12|\$i -le 12|"
+                       r"for i in 1 2 3 4 5 6 7 8 9 10 11 12;", text)
+    assert len(loops) == 3, (script, loops)
 
 
 # ── The scripts run against stub helm / kubectl ────────────────────────────────────────

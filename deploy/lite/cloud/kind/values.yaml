@@ -1,0 +1,12 @@
+# Over values/dev.yaml on a local kind cluster (e2e.sh): the throwaway Postgres of
+# dev-postgres.yaml, no ingress controller (smoke port-forwards), and the image kind loaded.
+postgres:
+  host: tokenlean-lite-dev-postgres
+  sslmode: disable
+ingress:
+  enabled: false
+image:
+  pullPolicy: IfNotPresent    # the image `kind load` put on the node; never pulled
+resources:
+  requests: {cpu: 100m, memory: 384Mi}
+  limits: {memory: 1Gi}

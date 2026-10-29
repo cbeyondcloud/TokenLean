@@ -496,6 +496,34 @@ def test_every_image_is_pinned_to_an_exact_release(env):
             assert repo and re.match(r"^v?\d+\.\d+\.\d+", tag), c["image"]
 
 
+def test_the_kind_values_render_over_dev_with_the_mock():
+    """kind/values.yaml (e2e.sh): the throwaway Postgres, no ingress, the loaded image."""
+    docs = _render("dev", "-f", "kind/values.yaml", "--set", "mockProvider.enabled=true")
+    assert not _kind(docs, "Ingress")
+    env_vars = _env(_container(_proxy(docs)))
+    assert env_vars["DATABASE_URL"]["value"] == (
+        "postgresql://tokenlean@tokenlean-lite-dev-postgres:5432/tokenlean?sslmode=disable")
+    _one(docs, "Deployment", "mock")
+    _one(docs, "StatefulSet", "redis")
+
+
+@pytest.mark.skipif(os.environ.get("TOKENLEAN_LITE_KIND_E2E") != "1",
+                    reason="slow (a kind cluster): set TOKENLEAN_LITE_KIND_E2E=1 and "
+                           "TOKENLEAN_IMAGE to a proxy image built from src/proxy")
+def test_kind_end_to_end():
+    """install, smoke, upgrade, smoke, uninstall --purge on a local kind cluster, keyless."""
+    _engine()
+    bash = shutil.which("bash")
+    if sys.platform == "win32" and os.path.exists(r"C:\Program Files\Git\bin\bash.exe"):
+        bash = r"C:\Program Files\Git\bin\bash.exe"
+    image = os.environ.get("TOKENLEAN_IMAGE", "")
+    assert image, "TOKENLEAN_IMAGE must name a proxy image built from src/proxy"
+    out = subprocess.run([bash, "./e2e.sh", "--image", image], cwd=os.path.join(_CLOUD, "kind"),
+                         capture_output=True, text=True, timeout=3600)
+    assert out.returncode == 0, out.stdout[-6000:] + out.stderr[-3000:]
+    assert "e2e: all steps passed" in out.stdout
+
+
 @pytest.mark.parametrize("env", _ENVS)
 def test_names_are_namespaced_by_the_release(env):
     """An umbrella chart nests this chart: every object carries the release's labels and a
