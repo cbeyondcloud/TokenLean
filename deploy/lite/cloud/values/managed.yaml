@@ -1,7 +1,9 @@
-# TokenLean LITE on any Kubernetes, with a MANAGED Postgres and Redis: the values the LITE Helm
-# chart (planned: deploy/lite/cloud/helm/tokenlean-lite) reads. Until the chart exists, this
-# file fixes what it is given; ../tokenlean-lite.env.template is the same deployment as the
-# proxy container's environment, usable today.
+# TokenLean LITE on any Kubernetes, with a MANAGED Postgres and Redis: values for the LITE Helm
+# chart (../helm/tokenlean-lite), complete on their own. Install with
+#   ../install.sh managed --image <registry>/tokenlean-proxy:<release>
+# ../tokenlean-lite.env.template is the same deployment as the proxy container's environment,
+# for any other container platform. dev.yaml, staging.yaml and prod.yaml are per-environment
+# variants.
 #
 # Secrets are never written here: each block names a Kubernetes Secret (existingSecret) and
 # the key in it. Create them from your secret store (External Secrets, Sealed Secrets, CSI).
@@ -30,7 +32,8 @@ postgres:                   # managed: Cloud SQL, RDS, Azure Database for Postgr
   sslmode: require          # require | verify-ca | verify-full
   existingSecret: tokenlean-lite-postgres
   passwordSecretKey: password
-  # DATABASE_URL = postgresql://<user>:<password>@<host>:<port>/<database>?sslmode=<sslmode>
+  # DATABASE_URL = postgresql://<user>@<host>:<port>/<database>?sslmode=<sslmode>, and the
+  # password reaches the proxy as PGPASSWORD (never inside the URL).
 
 redis:                      # managed: Memorystore, ElastiCache, Azure Cache for Redis, ...
   host: redis.example.internal

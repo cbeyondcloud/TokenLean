@@ -1,0 +1,11 @@
+# Patterns to ignore when packaging the chart (helm package).
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/

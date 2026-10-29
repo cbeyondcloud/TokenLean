@@ -1,0 +1,19 @@
+apiVersion: v2
+name: tokenlean-lite
+description: >-
+  TokenLean LITE on any Kubernetes: the gateway-only LLM proxy (one metered, key-managed
+  endpoint for every provider) with an external Postgres and Redis.
+type: application
+# The chart's own version. appVersion is the proxy release it was written for; set
+# image.tag to the exact proxy image you run.
+version: 0.1.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.29.0-0"
+home: https://github.com/cbeyondcloud/TokenLean
+sources:
+  - https://github.com/cbeyondcloud/TokenLean/tree/main/deploy/lite
+keywords:
+  - llm
+  - gateway
+  - proxy
+  - tokenlean

@@ -1,0 +1,43 @@
+# TokenLean LITE on a DEV cluster: one replica, a bundled Redis, your dev Postgres.
+# Layered over the chart's values.yaml (helm/tokenlean-lite); only what differs is here.
+#   ./install.sh dev --image <registry>/tokenlean-proxy:<release> [--create-secrets] [--mock]
+#
+# Secrets are never written here: each block names a Kubernetes Secret and the key in it.
+# On a dev cluster, install.sh --create-secrets creates the ones this file names (random
+# values, bootstrap keys) except the Postgres one, which belongs to your dev Postgres.
+
+replicas: 1
+autoscaling:
+  enabled: false
+podDisruptionBudget:
+  enabled: false            # one replica: nothing to keep up during a drain
+
+resources:
+  requests: {cpu: 100m, memory: 384Mi}
+  limits: {memory: 768Mi}
+
+postgres:                   # a dev Postgres you run (in or out of the cluster)
+  host: postgres.tokenlean-dev.svc.cluster.local
+  port: 5432
+  database: tokenlean
+  user: tokenlean
+  sslmode: disable          # inside the cluster network; use require for anything shared
+  existingSecret: tokenlean-lite-postgres
+  passwordSecretKey: password
+
+redis:
+  existingSecret: tokenlean-lite-redis
+  passwordSecretKey: password
+  bundled:
+    enabled: true           # dev only: Redis runs in the release, no TLS, no persistence
+
+ingress:
+  enabled: true
+  className: ""             # your cluster's ingress class ("" = the cluster default)
+  host: tokenlean-lite.dev.example.internal
+  tlsSecretName: tokenlean-lite-dev-tls
+  certManager:
+    clusterIssuer: your-dev-cluster-issuer   # a cert-manager ClusterIssuer of your cluster
+
+proxy:
+  logLevel: DEBUG

@@ -1,0 +1,41 @@
+{{- include "tokenlean-lite.validate" . }}
+{{- $known := include "tokenlean-lite.knownOverlays" . | fromYaml }}
+# The proxy's config: the shipped config.yaml.template and the LITE profile, byte copies of
+# config/config.yaml.template and deploy/lite/config/agentic.yaml (files/), then the overlays.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tokenlean-lite.fullname" . }}-config
+  labels:
+    {{- include "tokenlean-lite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+data:
+  {{- (.Files.Glob "files/config.yaml.template").AsConfig | nindent 2 }}
+  {{- (.Files.Glob "files/agentic.yaml").AsConfig | nindent 2 }}
+  {{- range .Values.config.overlays }}
+  {{- ($.Files.Glob (printf "files/%s" (get $known .))).AsConfig | nindent 2 }}
+  {{- end }}
+  {{- if .Values.mockProvider.enabled }}
+  mock-provider.yaml: |
+    # deploy/lite/local/mock/mock-provider.yaml, with the address of this release's mock.
+    proxy:
+      default_model: lite-mock-1
+      fallback_request_model: lite-mock-1
+      default_provider: litemock
+    providers:
+    - name: litemock
+      adapter: generic
+      openai_compatible: true
+      api_base: http://{{ include "tokenlean-lite.fullname" . }}-mock:8080/v1
+      model_prefixes:
+      - lite-mock
+      models:
+      - lite-mock-1
+    pricing:
+      lite-mock:
+        input: 0.001
+        output: 0.002
+  {{- end }}
+  {{- range .Values.config.extraOverlays }}
+  {{- toYaml (dict (toString .name) (toString .content)) | nindent 2 }}
+  {{- end }}

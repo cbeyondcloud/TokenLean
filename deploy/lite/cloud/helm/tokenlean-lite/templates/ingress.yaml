@@ -1,0 +1,43 @@
+{{- if .Values.ingress.enabled }}
+{{- if not .Values.ingress.host }}
+{{- fail "ingress.host is empty: name the host the proxy is served on" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "tokenlean-lite.fullname" . }}
+  labels:
+    {{- include "tokenlean-lite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+  {{- $cm := .Values.ingress.certManager | default dict }}
+  {{- if or $cm.clusterIssuer $cm.issuer .Values.ingress.annotations }}
+  annotations:
+    {{- with $cm.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ . | quote }}
+    {{- end }}
+    {{- with $cm.issuer }}
+    cert-manager.io/issuer: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  tls:
+    - hosts: [{{ .Values.ingress.host | quote }}]
+      secretName: {{ required "ingress.tlsSecretName must name the Secret that holds (or receives) the TLS certificate" .Values.ingress.tlsSecretName }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "tokenlean-lite.fullname" . }}
+                port:
+                  name: http
+{{- end }}

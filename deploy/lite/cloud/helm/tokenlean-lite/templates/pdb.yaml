@@ -1,0 +1,15 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tokenlean-lite.fullname" . }}
+  labels:
+    {{- include "tokenlean-lite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "tokenlean-lite.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: proxy
+{{- end }}

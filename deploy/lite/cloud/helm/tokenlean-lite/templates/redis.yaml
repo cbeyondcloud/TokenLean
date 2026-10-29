@@ -1,0 +1,111 @@
+{{- if .Values.redis.bundled.enabled }}
+{{- $r := .Values.redis.bundled }}
+{{- $name := printf "%s-redis" (include "tokenlean-lite.fullname" .) }}
+{{- if not .Values.redis.existingSecret }}
+{{- fail "redis.bundled needs redis.existingSecret: the bundled Redis requires a password" }}
+{{- end }}
+# A bundled Redis for a dev cluster only: one pod, no TLS, no replication. Use an external
+# Redis for staging and production (redis.bundled.enabled=false).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "tokenlean-lite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "tokenlean-lite.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "tokenlean-lite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  replicas: 1
+  serviceName: {{ $name }}
+  selector:
+    matchLabels:
+      {{- include "tokenlean-lite.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        {{- include "tokenlean-lite.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: redis
+    spec:
+      # The image's redis user (uid 999); the entrypoint then skips its chown.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      automountServiceAccountToken: false
+      containers:
+        - name: redis
+          image: {{ printf "%s:%s" $r.image.repository $r.image.tag }}
+          imagePullPolicy: {{ $r.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # $(REDIS_PASSWORD) is filled in by the kubelet; the pod spec holds only the reference.
+          args: ["--requirepass", "$(REDIS_PASSWORD)", "--appendonly", "yes", "--dir", "/data"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: {{ .Values.redis.passwordSecretKey }}
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: {{ .Values.redis.passwordSecretKey }}
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          readinessProbe:
+            exec: {command: ["redis-cli", "ping"]}
+            periodSeconds: 5
+          livenessProbe:
+            exec: {command: ["redis-cli", "ping"]}
+            periodSeconds: 20
+          resources:
+            {{- toYaml $r.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 16Mi}
+        {{- if not $r.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if $r.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with $r.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $r.persistence.size }}
+  {{- end }}
+{{- end }}

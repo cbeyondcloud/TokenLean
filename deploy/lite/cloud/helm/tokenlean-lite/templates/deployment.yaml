@@ -1,0 +1,205 @@
+{{- $fullname := include "tokenlean-lite.fullname" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "tokenlean-lite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels:
+      {{- include "tokenlean-lite.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: proxy
+  template:
+    metadata:
+      labels:
+        {{- include "tokenlean-lite.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: proxy
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # A changed config or overlay rolls the pods.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.metrics.podAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8080"
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "tokenlean-lite.serviceAccountName" . }}
+      {{- include "tokenlean-lite.podSecurity" . | nindent 6 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.proxy.terminationGracePeriodSeconds }}
+      containers:
+        - name: proxy
+          image: {{ include "tokenlean-lite.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              value: {{ .Values.proxy.logLevel | quote }}
+            - name: CONFIG_LOCAL_PATH
+              value: /app/config/config.yaml.template
+            - name: CONFIG_OVERLAYS
+              value: {{ include "tokenlean-lite.overlays" . | quote }}
+            - name: STORAGE_BACKEND
+              value: local
+            # A local export writes here: the root filesystem is read-only.
+            - name: STORAGE_LOCAL_PATH
+              value: /tmp/token-usage-logs
+            - name: LOCAL_PROXY_KEYS_FILE
+              value: /app/lite/state/local-keys.json
+            - name: MANAGED_DEPLOY
+              value: {{ .Values.proxy.managedDeploy | quote }}
+            - name: DATABASE_URL
+              value: {{ include "tokenlean-lite.databaseUrl" (dict "root" . "user" .Values.postgres.user) | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret }}
+                  key: {{ .Values.postgres.passwordSecretKey }}
+            - name: REDIS_URL
+              value: {{ include "tokenlean-lite.redisUrl" . | quote }}
+            {{- if .Values.redis.existingSecret }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: {{ .Values.redis.passwordSecretKey }}
+            {{- end }}
+            {{- if and .Values.redis.caCertSecretKey (not .Values.redis.bundled.enabled) }}
+            - name: REDIS_CA_CERT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: {{ .Values.redis.caCertSecretKey }}
+            {{- end }}
+            {{- if .Values.metrics.existingSecret }}
+            - name: METRICS_SCRAPE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.metrics.existingSecret }}
+                  key: {{ .Values.metrics.scrapeTokenSecretKey }}
+            {{- end }}
+            - name: METRICS_ALLOW_UNAUTHENTICATED
+              value: "false"
+            {{- with .Values.proxy.corsOrigins }}
+            - name: CORS_ORIGINS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.mockProvider.enabled }}
+            # Not a secret: the mock accepts any key; the provider client refuses to send none.
+            - name: LLM_KEY_LITEMOCK
+              value: lite-mock-accepts-any-key
+            {{- end }}
+            {{- with .Values.proxy.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if or .Values.providerKeys.existingSecret .Values.proxy.extraEnvFrom }}
+          envFrom:
+            {{- with .Values.providerKeys.existingSecret }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
+            {{- with .Values.proxy.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            {{- toYaml .Values.proxy.startupProbe | nindent 12 }}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            {{- toYaml .Values.proxy.readinessProbe | nindent 12 }}
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            {{- toYaml .Values.proxy.livenessProbe | nindent 12 }}
+          {{- if .Values.proxy.preStopSleepSeconds }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "{{ .Values.proxy.preStopSleepSeconds }}"]
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            - name: lite-config
+              mountPath: /app/lite/config
+              readOnly: true
+            - name: bootstrap-keys
+              mountPath: /app/lite/state
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $fullname }}-config
+            items:
+              - {key: config.yaml.template, path: config.yaml.template}
+        - name: lite-config
+          configMap:
+            name: {{ $fullname }}-config
+            items:
+              - {key: agentic.yaml, path: agentic.yaml}
+              {{- $known := include "tokenlean-lite.knownOverlays" . | fromYaml }}
+              {{- range .Values.config.overlays }}
+              - {key: {{ get $known . }}, path: {{ get $known . }}}
+              {{- end }}
+              {{- if .Values.mockProvider.enabled }}
+              - {key: mock-provider.yaml, path: mock-provider.yaml}
+              {{- end }}
+              {{- range .Values.config.extraOverlays }}
+              - {key: {{ .name }}, path: {{ .name }}}
+              {{- end }}
+        - name: bootstrap-keys
+          secret:
+            secretName: {{ .Values.proxyKeys.existingSecret }}
+            items:
+              - {key: {{ .Values.proxyKeys.keysFileSecretKey }}, path: local-keys.json}
+        - name: tmp
+          emptyDir: {sizeLimit: 512Mi}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,72 @@
+# TokenLean LITE in PRODUCTION: autoscaled from three replicas spread over nodes and zones,
+# an external Postgres (certificate checked) and Redis over TLS, a cert-manager certificate.
+# Layered over the chart's values.yaml (helm/tokenlean-lite); only what differs is here.
+#   ./install.sh prod --image <registry>/tokenlean-proxy:<release>
+#
+# Secrets are never written here: each block names a Kubernetes Secret (existingSecret) and
+# the key in it. Create them from your secret store before installing.
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 65
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+resources:
+  requests: {cpu: 500m, memory: 768Mi}
+  limits: {memory: 1536Mi}
+
+postgres:                   # managed: Cloud SQL, RDS, Azure Database for PostgreSQL, ...
+  host: postgres.prod.example.internal
+  port: 5432
+  database: tokenlean
+  user: tokenlean
+  sslmode: verify-full      # the server certificate and its host name are checked
+  existingSecret: tokenlean-lite-postgres
+  passwordSecretKey: password
+
+redis:                      # managed: Memorystore, ElastiCache, Azure Cache for Redis, ...
+  host: redis.prod.example.internal
+  port: 6380
+  db: 0
+  tls: true
+  existingSecret: tokenlean-lite-redis
+  passwordSecretKey: password
+  caCertSecretKey: ""       # the key holding a private CA; "" = the system trust store
+
+# The schema steps can run as the tables' owner while the proxy runs as a restricted role
+# (python -m audit.enforcement; docs/config-reference.md). Then set, for example:
+#   migrations: {user: tokenlean_owner, existingSecret: tokenlean-lite-postgres-owner}
+migrations:
+  enabled: true
+
+ingress:
+  enabled: true
+  className: ""
+  host: tokenlean-lite.example.internal
+  tlsSecretName: tokenlean-lite-prod-tls
+  certManager:
+    clusterIssuer: your-cluster-issuer   # a cert-manager ClusterIssuer of your cluster
+
+metrics:
+  existingSecret: tokenlean-lite-metrics
+  scrapeTokenSecretKey: scrape-token
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: tokenlean-lite
+        app.kubernetes.io/component: proxy
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: tokenlean-lite
+        app.kubernetes.io/component: proxy

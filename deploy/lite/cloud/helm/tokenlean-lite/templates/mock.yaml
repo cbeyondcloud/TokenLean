@@ -1,0 +1,83 @@
+{{- if .Values.mockProvider.enabled }}
+{{- $name := printf "%s-mock" (include "tokenlean-lite.fullname" .) }}
+# The local OpenAI-compatible stand-in (deploy/lite/local/mock/mock_llm.py, standard library
+# only), run on the proxy's own image so no other image is pulled. Dev and smoke runs only.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "tokenlean-lite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-llm
+data:
+  {{- (.Files.Glob "files/mock_llm.py").AsConfig | nindent 2 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "tokenlean-lite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-llm
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "tokenlean-lite.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-llm
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "tokenlean-lite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "tokenlean-lite.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mock-llm
+  template:
+    metadata:
+      labels:
+        {{- include "tokenlean-lite.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mock-llm
+      annotations:
+        checksum/mock: {{ .Files.Get "files/mock_llm.py" | sha256sum }}
+    spec:
+      {{- include "tokenlean-lite.podSecurity" . | nindent 6 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mock-llm
+          image: {{ include "tokenlean-lite.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ["python", "/app/lite/mock/mock_llm.py"]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.mockProvider.resources | nindent 12 }}
+          volumeMounts:
+            - name: mock
+              mountPath: /app/lite/mock
+              readOnly: true
+      volumes:
+        - name: mock
+          configMap:
+            name: {{ $name }}
+{{- end }}

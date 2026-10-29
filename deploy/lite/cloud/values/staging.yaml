@@ -1,0 +1,55 @@
+# TokenLean LITE on a STAGING cluster: autoscaled from two replicas, an external Postgres and
+# Redis over TLS, served on its own host with a cert-manager certificate.
+# Layered over the chart's values.yaml (helm/tokenlean-lite); only what differs is here.
+#   ./install.sh staging --image <registry>/tokenlean-proxy:<release>
+#
+# Secrets are never written here: each block names a Kubernetes Secret (existingSecret) and
+# the key in it. Create them from your secret store before installing.
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+resources:
+  requests: {cpu: 250m, memory: 512Mi}
+  limits: {memory: 1Gi}
+
+postgres:                   # managed: Cloud SQL, RDS, Azure Database for PostgreSQL, ...
+  host: postgres.staging.example.internal
+  port: 5432
+  database: tokenlean
+  user: tokenlean
+  sslmode: require
+  existingSecret: tokenlean-lite-postgres
+  passwordSecretKey: password
+
+redis:                      # managed: Memorystore, ElastiCache, Azure Cache for Redis, ...
+  host: redis.staging.example.internal
+  port: 6380
+  db: 0
+  tls: true
+  existingSecret: tokenlean-lite-redis
+  passwordSecretKey: password
+  caCertSecretKey: ""
+
+ingress:
+  enabled: true
+  className: ""
+  host: tokenlean-lite.staging.example.internal
+  tlsSecretName: tokenlean-lite-staging-tls
+  certManager:
+    clusterIssuer: your-cluster-issuer   # a cert-manager ClusterIssuer of your cluster
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: tokenlean-lite
+        app.kubernetes.io/component: proxy
