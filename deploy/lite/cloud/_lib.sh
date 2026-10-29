@@ -22,6 +22,7 @@ CLOUD_CREATE_SECRETS=0
 CLOUD_PURGE=0
 CLOUD_URL=""
 CLOUD_LOCAL_PORT=4180
+CLOUD_SECRET_DIR=.          # where cloud_make_secret finds its files (set per run)
 # Labels the Secrets that install --create-secrets made, so uninstall --purge finds only them.
 CLOUD_CREATED_BY="app.kubernetes.io/created-by=tokenlean-lite-install"
 

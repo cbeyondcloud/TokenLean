@@ -183,7 +183,7 @@ cd deploy\lite\cloud
 .\uninstall.ps1
 ```
 
-**A dev cluster, keyless:** `./install.sh dev --image <image> --create-secrets --mock`, then `./smoke.sh` (it port-forwards the Service and finds the keys and the mock model by itself).
+**A dev cluster, keyless:** name your dev Postgres in a values file (`postgres.host`, ...) and create its Secret (`tokenlean-lite-postgres`, key `password`), then run `./install.sh dev --image <image> --values my-dev.yaml --create-secrets --mock` and `./smoke.sh`. Smoke port-forwards the Service and finds the keys and the mock model by itself.
 
 - The scripts need `helm` 3.8+ (or 4) and `kubectl`, or `HELM` / `KUBECTL` naming them. Every script takes `--namespace`, `--release` and `--context` (`-Namespace`, `-Release`, `-Context`), and prints the context it acts on.
 - `install` and `upgrade` wait for the rollout (`--timeout`, default 10m) and print the pods, events and logs when it fails. A failed upgrade leaves the previous revision serving.
