@@ -310,6 +310,9 @@ def test_install_create_secrets_makes_the_dev_secrets_from_files(stubs):
     assert names == {"tokenlean-lite-bootstrap-keys", "tokenlean-lite-redis",
                      "tokenlean-lite-metrics", "tokenlean-lite-provider-keys"}
     assert not [c for c in created if "--from-literal" in c]
+    # Relative file names: Git Bash rewrites no path after `--from-file=key=`, so an absolute
+    # /tmp path would not reach a Windows kubectl.exe.
+    assert not [c for c in created if re.search(r"--from-file=[^= ]+=/", c)], created
     # the bootstrap key file holds hashes only; the raw keys are in the owner-only state file
     keys = dict(line.split("=", 1) for line in
                 (state / "tokenlean-lite.tokenlean-lite.env").read_text().splitlines() if line)

@@ -202,8 +202,10 @@ else
   cloud_sha256() { printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; }
 fi
 
-# cloud_make_secret NAME [key=file ...]: create the Secret from files (never from values on
-# the command line) and label it, unless it exists. Returns 1 when it already existed.
+# cloud_make_secret NAME [key=file ...]: create the Secret from files in CLOUD_SECRET_DIR (never
+# from values on the command line) and label it, unless it exists. Returns 1 when it already
+# existed. kubectl runs in that folder and gets relative names: Git Bash rewrites no path after
+# `--from-file=key=`, so an absolute /tmp path would not reach a Windows kubectl.exe.
 cloud_make_secret() {
   local name=$1 arg
   shift
@@ -213,7 +215,9 @@ cloud_make_secret() {
   fi
   local args=(create secret generic "$name")
   for arg in "$@"; do args+=("--from-file=$arg"); done
-  cloud_kubectl "${args[@]}" >/dev/null || cloud_die "could not create the Secret $name"
+  if ! (cd "$CLOUD_SECRET_DIR" && cloud_kubectl "${args[@]}" >/dev/null); then
+    cloud_die "could not create the Secret $name"
+  fi
   cloud_kubectl label secret "$name" "$CLOUD_CREATED_BY" \
     "app.kubernetes.io/instance=$CLOUD_RELEASE" >/dev/null || true
   echo "tokenlean-lite: created the Secret $name"
@@ -234,11 +238,12 @@ cloud_create_dev_secrets() {
   fi
   tmp=$(umask 077 && mktemp -d 2>/dev/null || mktemp -d -t tokenlean-lite)
   chmod 700 "$tmp"
+  CLOUD_SECRET_DIR=$tmp
   api="tok-$tenant-$(cloud_rand_hex 24)"
   admin="tok-$tenant-admin-$(cloud_rand_hex 24)"
   printf '{\n  "%s": {"tenant_id": "%s", "tier": "free"},\n  "%s": {"tenant_id": "%s", "tier": "free", "admin": true}\n}\n' \
     "$(cloud_sha256 "$api")" "$tenant" "$(cloud_sha256 "$admin")" "$tenant" >"$tmp/local-keys.json"
-  if cloud_make_secret tokenlean-lite-bootstrap-keys "local-keys.json=$tmp/local-keys.json"; then
+  if cloud_make_secret tokenlean-lite-bootstrap-keys "local-keys.json=local-keys.json"; then
     cloud_state_set TOKENLEAN_API_KEY "$api"
     cloud_state_set TOKENLEAN_ADMIN_KEY "$admin"
     cloud_state_set LITE_TENANT_ID "$tenant"
@@ -247,13 +252,13 @@ cloud_create_dev_secrets() {
     echo "tokenlean-lite: note: no keys on file for this release; smoke needs TOKENLEAN_API_KEY and TOKENLEAN_ADMIN_KEY" >&2
   fi
   cloud_rand_hex 24 >"$tmp/redis-password"
-  cloud_make_secret tokenlean-lite-redis "password=$tmp/redis-password" || true
+  cloud_make_secret tokenlean-lite-redis "password=redis-password" || true
   cloud_rand_hex 24 >"$tmp/scrape-token"
-  cloud_make_secret tokenlean-lite-metrics "scrape-token=$tmp/scrape-token" || true
+  cloud_make_secret tokenlean-lite-metrics "scrape-token=scrape-token" || true
   local provider=()
   for var in $(env | sed -n 's/^\(LLM_KEY_[A-Z0-9_]*\)=.\{1,\}$/\1/p'); do
     printf '%s' "${!var}" >"$tmp/$var"
-    provider+=("$var=$tmp/$var")
+    provider+=("$var=$var")
   done
   cloud_make_secret tokenlean-lite-provider-keys ${provider[@]+"${provider[@]}"} || true
   rm -rf "$tmp"
