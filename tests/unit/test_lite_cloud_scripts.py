@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 
 import pytest
 import yaml
@@ -180,6 +181,8 @@ case "$tool $*" in
   *"get namespace"*) exit 0 ;;
   *"status "*) exit "${STUB_RELEASE_EXISTS:-0}" ;;
   *"get deployment"*"-o name"*) echo "deployment.apps/tokenlean-lite" ;;
+  *"get service"*"-o name"*) echo "service/tokenlean-lite" ;;
+  *"port-forward"*) printf '%s\n' "$$" >"${STUB_PF_PID:-/dev/null}"; exec sleep 120 ;;
   *"create secret"*)
     for arg in "$@"; do
       case "$arg" in --from-file=*) f=${arg#*=}; f=${f#*=}; printf 'FILE %s\n' "$f" >>"$STUB_LOG"
@@ -386,6 +389,103 @@ def test_smoke_needs_a_model_when_not_installed_with_mock(stubs):
     out = _run("smoke.sh", ["--url", "http://127.0.0.1:9"],
                dict(env, TOKENLEAN_API_KEY="k1", TOKENLEAN_ADMIN_KEY="k2"), ok=False)
     assert out.returncode != 0 and "SMOKE_MODEL" in out.stderr
+
+
+# Answers every request with nothing: the port-forward's /health wait passes at once, and the
+# local smoke's checks then fail fast.
+_STUB_CURL = "#!/usr/bin/env bash\nexit 0\n"
+
+
+def _alive(pid):
+    """Whether *pid* (as bash numbers it: an MSYS pid under Git Bash) still runs."""
+    return subprocess.run([_bash(), "-c", f"kill -0 {int(pid)} 2>/dev/null"],
+                          capture_output=True, timeout=60).returncode == 0
+
+
+def test_smoke_stops_its_port_forward(stubs, tmp_path):
+    """The cleanup must reach kubectl itself: a port-forward left running keeps the local
+    port, and the next smoke (after an upgrade) then tests the old pod or cannot bind."""
+    env, log, _state = stubs
+    curl = tmp_path / "bin" / "curl"
+    curl.write_bytes(_STUB_CURL.encode())
+    curl.chmod(curl.stat().st_mode | stat.S_IEXEC)
+    pid_file = tmp_path / "port-forward.pid"
+    env = dict(env, PATH=str(tmp_path / "bin") + os.pathsep + env["PATH"],
+               STUB_PF_PID=pid_file.as_posix(), TOKENLEAN_API_KEY="k1",
+               TOKENLEAN_ADMIN_KEY="k2", SMOKE_MODEL="lite-mock-1")
+    out = _run("smoke.sh", ["--local-port", "4199"], env, ok=False)
+    assert out.returncode != 0, out.stdout     # the stub curl answers nothing
+    assert any(" port-forward service/tokenlean-lite 4199:http" in " " + c
+               for c in _calls(log, "kubectl")), _calls(log, "kubectl")
+    deadline = time.monotonic() + 10
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    pid = pid_file.read_text(encoding="utf-8").strip()
+    try:
+        while _alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        assert not _alive(pid), "the kubectl port-forward outlived smoke.sh"
+    finally:
+        subprocess.run([_bash(), "-c", f"kill {int(pid)} 2>/dev/null"], timeout=60)
+
+
+# ── kind/e2e.sh against a stub docker (kind, helm and kubectl run "in containers") ────────
+
+_STUB_DOCKER = r"""#!/usr/bin/env bash
+printf 'docker %s\n' "$*" >>"$STUB_LOG"
+case "$*" in
+  *" get clusters") printf '%s\n' ${STUB_KIND_CLUSTERS:-} ;;
+  *" create cluster "*) exit "${STUB_KIND_CREATE:-0}" ;;
+esac
+exit 0
+"""
+
+
+def _e2e(tmp_path, args, **env_extra):
+    if not _bash():
+        pytest.skip("bash not available")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    docker = bin_dir / "docker"
+    docker.write_bytes(_STUB_DOCKER.encode())
+    docker.chmod(docker.stat().st_mode | stat.S_IEXEC)
+    log = tmp_path / "docker.log"
+    log.write_text("", encoding="utf-8")
+    env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+               STUB_LOG=log.as_posix())
+    for key in ("KIND_CLUSTER", "TOKENLEAN_IMAGE"):
+        env.pop(key, None)
+    env.update(env_extra)
+    out = subprocess.run([_bash(), "kind/e2e.sh", *args], cwd=_CLOUD, env=env,
+                         capture_output=True, text=True, timeout=120)
+    kind_calls = [line for line in log.read_text(encoding="utf-8").splitlines()
+                  if " create cluster " in line or " delete cluster " in line]
+    return out, kind_calls
+
+
+def test_kind_e2e_deletes_the_cluster_it_created(tmp_path):
+    out, calls = _e2e(tmp_path, ["--image", "reg/p:1.0.0"], KIND_CLUSTER="lite-e2e-t1")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert [c for c in calls if "create cluster --name lite-e2e-t1" in c]
+    assert [c for c in calls if "delete cluster --name lite-e2e-t1" in c]
+
+
+@pytest.mark.parametrize("create_code", ["0", "1"])
+def test_kind_e2e_never_deletes_a_cluster_it_did_not_create(tmp_path, create_code):
+    """KIND_CLUSTER=kind (kind's default) or a cluster kept with --keep: the run refuses it,
+    and neither a refusal nor a failed create deletes it."""
+    out, calls = _e2e(tmp_path, ["--image", "reg/p:1.0.0"], KIND_CLUSTER="kind",
+                      STUB_KIND_CLUSTERS="other kind", STUB_KIND_CREATE=create_code)
+    assert out.returncode != 0, out.stdout
+    assert "already exists" in out.stderr, out.stderr
+    assert not [c for c in calls if "delete cluster" in c], calls
+
+
+def test_kind_e2e_delete_removes_the_named_cluster(tmp_path):
+    out, calls = _e2e(tmp_path, ["--delete"], KIND_CLUSTER="lite-e2e-t2",
+                      STUB_KIND_CLUSTERS="lite-e2e-t2")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert [c for c in calls if "delete cluster --name lite-e2e-t2" in c]
 
 
 # ── The same, in PowerShell ────────────────────────────────────────────────────────────

@@ -118,6 +118,32 @@ deploy/lite/config/langfuse.yaml: langfuse.yaml
 {{- printf "postgresql://%s@%s:%v/%s?sslmode=%s" (urlquery .user) $p.host $p.port $p.database $p.sslmode }}
 {{- end }}
 
+{{/* A private Postgres CA (postgres.caCertSecretKey): its env entry, mount and volume. */}}
+{{- define "tokenlean-lite.postgresCaEnv" -}}
+{{- if .Values.postgres.caCertSecretKey }}
+- name: PGSSLROOTCERT
+  value: /etc/tokenlean-lite/postgres-ca/ca.crt
+{{- end }}
+{{- end }}
+
+{{- define "tokenlean-lite.postgresCaMount" -}}
+{{- if .Values.postgres.caCertSecretKey }}
+- name: postgres-ca
+  mountPath: /etc/tokenlean-lite/postgres-ca
+  readOnly: true
+{{- end }}
+{{- end }}
+
+{{- define "tokenlean-lite.postgresCaVolume" -}}
+{{- if .Values.postgres.caCertSecretKey }}
+- name: postgres-ca
+  secret:
+    secretName: {{ .Values.postgres.existingSecret }}
+    items:
+      - {key: {{ .Values.postgres.caCertSecretKey }}, path: ca.crt}
+{{- end }}
+{{- end }}
+
 {{- define "tokenlean-lite.podSecurity" -}}
 securityContext:
   {{- toYaml .Values.podSecurityContext | nindent 2 }}

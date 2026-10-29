@@ -27,6 +27,7 @@ postgres:                   # managed: Cloud SQL, RDS, Azure Database for Postgr
   sslmode: require
   existingSecret: tokenlean-lite-postgres
   passwordSecretKey: password
+  caCertSecretKey: ""       # the key holding a private CA, for verify-ca / verify-full
 
 redis:                      # managed: Memorystore, ElastiCache, Azure Cache for Redis, ...
   host: redis.staging.example.internal

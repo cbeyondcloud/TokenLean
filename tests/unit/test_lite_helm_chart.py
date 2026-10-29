@@ -87,6 +87,44 @@ def test_chart_files_are_byte_copies_of_their_source(copy):
         f"{copy} differs from its source: run python scripts/sync_lite_chart.py")
 
 
+def _eol_attributes(path):
+    out = subprocess.run(["git", "check-attr", "text", "eol", "--",
+                          os.path.relpath(path, _REPO).replace(os.sep, "/")],
+                         cwd=_REPO, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return [line.rsplit(": ", 1)[-1] for line in out.stdout.splitlines()]
+
+
+@pytest.mark.parametrize("copy", sorted(COPIES))
+def test_each_source_checks_out_with_its_copys_line_endings(copy):
+    """A copy pinned to LF next to a source left to core.autocrlf would differ on a Windows
+    checkout (autocrlf=true writes the source as CRLF), and the byte checks would fail there."""
+    if not shutil.which("git") or not os.path.exists(os.path.join(_REPO, ".git")):
+        pytest.skip("not a git checkout")
+    assert _eol_attributes(COPIES[copy]) == _eol_attributes(os.path.join(_CHART, copy)), copy
+
+
+def test_the_sync_script_never_copies_crlf_into_a_copy(tmp_path, monkeypatch, capsys):
+    """A clone made before the source was pinned to LF can still hold it as CRLF: the sync
+    says how to check it out again, and leaves the LF copy as it is."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "sync_lite_chart", os.path.join(_REPO, "scripts", "sync_lite_chart.py"))
+    sync = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sync)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "chart" / "files").mkdir(parents=True)
+    (tmp_path / "config" / "c.template").write_bytes(b"a: 1\r\nb: 2\r\n")
+    (tmp_path / "chart" / "files" / "c.template").write_bytes(b"a: 1\nb: 2\n")
+    monkeypatch.setattr(sync, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sync, "CHART", tmp_path / "chart")
+    monkeypatch.setattr(sync, "COPIES", {"files/c.template": "config/c.template"})
+    for argv in (["--check"], []):
+        assert sync.main(argv) == 1
+        assert "git checkout -- config/c.template" in capsys.readouterr().err
+    assert (tmp_path / "chart" / "files" / "c.template").read_bytes() == b"a: 1\nb: 2\n"
+
+
 def test_the_sync_script_knows_every_copy_and_reports_none_stale():
     out = subprocess.run([sys.executable, os.path.join(_REPO, "scripts", "sync_lite_chart.py"),
                           "--check"], cwd=_REPO, capture_output=True, text=True, timeout=60)
@@ -237,7 +275,20 @@ def test_helm_lint_passes(helm_image, env):
 
 @pytest.mark.parametrize("env", _ENVS)
 def test_kubeconform_accepts_every_render(env, tmp_path):
-    code, stdout, stderr = _render_text(env, "--set", "metrics.serviceMonitor.enabled=false")
+    _kubeconform(tmp_path, env)
+
+
+def test_kubeconform_accepts_a_postgres_ca_and_extra_volumes(tmp_path):
+    _kubeconform(tmp_path, "prod", "--set", "postgres.caCertSecretKey=ca.crt",
+                 "--set", "proxy.extraVolumes[0].name=corp-ca",
+                 "--set", "proxy.extraVolumes[0].configMap.name=corp-ca-bundle",
+                 "--set", "proxy.extraVolumeMounts[0].name=corp-ca",
+                 "--set", "proxy.extraVolumeMounts[0].mountPath=/etc/corp-ca")
+
+
+def _kubeconform(tmp_path, env, *extra):
+    code, stdout, stderr = _render_text(env, "--set", "metrics.serviceMonitor.enabled=false",
+                                        *extra)
     assert code == 0, stderr
     manifest = tmp_path / "rendered.yaml"
     manifest.write_text(stdout, encoding="utf-8")
@@ -441,6 +492,51 @@ def test_the_migration_hook_can_use_an_owner_role():
     assert env_vars["DATABASE_URL"]["value"].startswith("postgresql://tokenlean_owner@")
     assert env_vars["PGPASSWORD"]["valueFrom"]["secretKeyRef"]["name"] == \
         "tokenlean-lite-postgres-owner"
+
+
+_PG_CA_FILE = "/etc/tokenlean-lite/postgres-ca/ca.crt"
+
+
+def _pod_specs(docs):
+    """The proxy's and the migration hook's pod specs, with their one container."""
+    job = _one(docs, "Job")["spec"]["template"]["spec"]
+    proxy = _proxy(docs)["spec"]["template"]["spec"]
+    return {"proxy": (proxy, _container(_proxy(docs))), "migrate": (job, job["containers"][0])}
+
+
+def test_a_private_postgres_ca_reaches_the_proxy_and_the_migration_hook():
+    """verify-full against a managed Postgres signed by a private CA: the CA comes from the
+    Postgres Secret as a file, and PGSSLROOTCERT (read by the driver) names it."""
+    docs = _render("prod", "--set", "postgres.caCertSecretKey=ca.crt")
+    for name, (spec, container) in _pod_specs(docs).items():
+        volume = [v for v in spec["volumes"] if v["name"] == "postgres-ca"]
+        assert volume and volume[0]["secret"] == {
+            "secretName": "tokenlean-lite-postgres",
+            "items": [{"key": "ca.crt", "path": "ca.crt"}]}, (name, spec["volumes"])
+        mounts = {m["name"]: m for m in container["volumeMounts"]}
+        assert mounts["postgres-ca"]["mountPath"] == os.path.dirname(_PG_CA_FILE), name
+        assert mounts["postgres-ca"]["readOnly"] is True, name
+        assert _env(container)["PGSSLROOTCERT"]["value"] == _PG_CA_FILE, name
+
+
+@pytest.mark.parametrize("env", _ENVS)
+def test_without_a_postgres_ca_the_system_trust_store_is_used(env):
+    docs = _render(env)
+    for name, (spec, container) in _pod_specs(docs).items():
+        assert "PGSSLROOTCERT" not in _env(container), name
+        assert not [v for v in spec["volumes"] if v["name"] == "postgres-ca"], name
+
+
+def test_extra_volumes_and_mounts_reach_the_proxy():
+    docs = _render("prod", "--set", "proxy.extraVolumes[0].name=corp-ca",
+                   "--set", "proxy.extraVolumes[0].configMap.name=corp-ca-bundle",
+                   "--set", "proxy.extraVolumeMounts[0].name=corp-ca",
+                   "--set", "proxy.extraVolumeMounts[0].mountPath=/etc/corp-ca",
+                   "--set", "proxy.extraVolumeMounts[0].readOnly=true")
+    spec = _proxy(docs)["spec"]["template"]["spec"]
+    assert {"name": "corp-ca", "configMap": {"name": "corp-ca-bundle"}} in spec["volumes"]
+    mounts = _container(_proxy(docs))["volumeMounts"]
+    assert {"name": "corp-ca", "mountPath": "/etc/corp-ca", "readOnly": True} in mounts
 
 
 def test_the_mock_provider_is_off_by_default_and_matches_the_local_overlay():

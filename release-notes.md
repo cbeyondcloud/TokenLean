@@ -35,6 +35,9 @@ bash and PowerShell; smoke runs the local smoke's checks against the ingress or 
 port-forward, and `kind/e2e.sh` runs the whole cycle on a local kind cluster, keyless.
 - **OSS:** the chart, values files, scripts, `schema_setup`, and `scripts/sync_lite_chart.py`
   (refreshes the chart's copies; a test fails while one is stale). The local stack is unchanged.
+  A private Postgres CA (`postgres.caCertSecretKey`, for `verify-full`) reaches the proxy
+  and the migration hook; `proxy.extraVolumes` / `extraVolumeMounts` add more. Smoke stops
+  its port-forward, and `e2e.sh` never deletes a kind cluster it did not create.
 
 ## 2026-10-28
 

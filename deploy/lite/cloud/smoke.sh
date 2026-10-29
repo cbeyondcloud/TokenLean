@@ -46,7 +46,12 @@ if [ -z "$URL" ]; then
   cloud_check_tools
   SVC=$(cloud_kubectl get service -l "$(cloud_selector proxy)" -o name | head -n 1)
   [ -n "$SVC" ] || cloud_die "no proxy Service for release $CLOUD_RELEASE in namespace $CLOUD_NAMESPACE"
-  cloud_kubectl port-forward "$SVC" "$CLOUD_LOCAL_PORT:http" >"$TMP/port-forward.log" 2>&1 &
+  # kubectl itself goes to the background, not cloud_kubectl (a function): $! would then be a
+  # subshell, and the cleanup would leave the real port-forward holding the port.
+  PF=("$CLOUD_KUBECTL")
+  if [ -n "$CLOUD_CONTEXT" ]; then PF+=(--context "$CLOUD_CONTEXT"); fi
+  "${PF[@]}" -n "$CLOUD_NAMESPACE" port-forward "$SVC" "$CLOUD_LOCAL_PORT:http" \
+    >"$TMP/port-forward.log" 2>&1 &
   PF_PID=$!
   URL="http://127.0.0.1:$CLOUD_LOCAL_PORT"
   for _ in $(seq 1 30); do

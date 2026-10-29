@@ -152,7 +152,7 @@ Values files name Secrets; they never hold secret values. Create these in the re
 
 | Secret (default name) | Key | What |
 |---|---|---|
-| `tokenlean-lite-postgres` | `password` | the Postgres user's password (reaches the proxy as `PGPASSWORD`, never inside `DATABASE_URL`) |
+| `tokenlean-lite-postgres` | `password` | the Postgres user's password (reaches the proxy as `PGPASSWORD`, never inside `DATABASE_URL`), and an optional CA key, `postgres.caCertSecretKey`. `verify-full` (prod's default) needs the CA when the server's certificate comes from a private CA or the provider's own |
 | `tokenlean-lite-redis` | `password` | the Redis password (and an optional CA key, `redis.caCertSecretKey`) |
 | `tokenlean-lite-bootstrap-keys` | `local-keys.json` | the bootstrap proxy keys, hashes only (`scripts/generate_proxy_key.py`); copied into an empty `proxy_keys` table once |
 | `tokenlean-lite-provider-keys` | `LLM_KEY_<PROVIDER>` | one key per provider you use; every key becomes an environment variable |
@@ -206,7 +206,7 @@ The chart is self-contained (no dependencies, every object named after the relea
 
 ### On a local kind cluster
 
-`cloud/kind/e2e.sh --image <image>` builds nothing; give it a proxy image you built (`docker build -t tokenlean-lite-proxy:1.0.0-dev src/proxy`). It creates a kind cluster, loads the image, starts a throwaway Postgres (`kind/dev-postgres.yaml`), then runs `install.sh dev --mock --create-secrets`, `smoke.sh`, `upgrade.sh`, `smoke.sh` and `uninstall.sh --purge`, and deletes the cluster. It needs Docker only: kind, helm and kubectl run in pinned containers. `TOKENLEAN_LITE_KIND_E2E=1 pytest tests/unit/test_lite_helm_chart.py -k kind` runs it from the suite (with `TOKENLEAN_IMAGE` set).
+`cloud/kind/e2e.sh --image <image>` builds nothing; give it a proxy image you built (`docker build -t tokenlean-lite-proxy:1.0.0-dev src/proxy`). It creates a kind cluster, loads the image, starts a throwaway Postgres (`kind/dev-postgres.yaml`), then runs `install.sh dev --mock --create-secrets`, `smoke.sh`, `upgrade.sh`, `smoke.sh` and `uninstall.sh --purge`, and deletes the cluster. It refuses a `KIND_CLUSTER` name that already exists, and never deletes a cluster it did not create. It needs Docker only: kind, helm and kubectl run in pinned containers. `TOKENLEAN_LITE_KIND_E2E=1 pytest tests/unit/test_lite_helm_chart.py -k kind` runs it from the suite (with `TOKENLEAN_IMAGE` set).
 
 ### Other container platforms
 

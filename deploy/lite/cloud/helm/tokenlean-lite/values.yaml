@@ -73,6 +73,10 @@ postgres:
   sslmode: require          # disable | require | verify-ca | verify-full
   existingSecret: tokenlean-lite-postgres
   passwordSecretKey: password
+  # The key of existingSecret holding the server's CA (PEM), for verify-ca / verify-full
+  # against a private or provider CA that the image does not trust. It is mounted as a file
+  # into the proxy and the migration hook, and PGSSLROOTCERT names it. "" = the system trust.
+  caCertSecretKey: ""
   # DATABASE_URL = postgresql://<user>@<host>:<port>/<database>?sslmode=<sslmode>; the password
   # reaches the proxy as PGPASSWORD (read by its Postgres driver), never inside the URL.
 
@@ -181,6 +185,10 @@ proxy:
   # More (non-secret) variables, and whole Secrets/ConfigMaps as variables (e.g. LANGFUSE_*).
   extraEnv: []
   extraEnvFrom: []
+  # More volumes and their mounts on the proxy (e.g. a corporate CA bundle from a ConfigMap).
+  # The proxy only: the migration hook reads postgres.caCertSecretKey, not these.
+  extraVolumes: []
+  extraVolumeMounts: []
   startupProbe: {periodSeconds: 5, failureThreshold: 60, timeoutSeconds: 3}
   readinessProbe: {periodSeconds: 10, failureThreshold: 3, timeoutSeconds: 3}
   livenessProbe: {periodSeconds: 20, failureThreshold: 3, timeoutSeconds: 5}

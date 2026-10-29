@@ -38,6 +38,14 @@ def stale() -> list[str]:
     return out
 
 
+def crlf_only(copy: str) -> bool:
+    """Whether the copy differs from its source only by the source's CRLF line endings."""
+    target = CHART / copy
+    source = (REPO_ROOT / COPIES[copy]).read_bytes()
+    return (target.exists() and b"\r\n" in source
+            and source.replace(b"\r\n", b"\n") == target.read_bytes())
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true", help="report only, change nothing")
@@ -46,6 +54,14 @@ def main(argv=None) -> int:
     for copy, source in COPIES.items():
         state = "STALE" if copy in todo else "ok"
         print(f"{state:5}  {copy}  <-  {source}")
+    crlf = [COPIES[copy] for copy in todo if crlf_only(copy)]
+    if crlf:
+        # Copying would write CRLF into an LF-pinned copy: check the source out again instead.
+        for source in crlf:
+            print(f"{source} has CRLF line endings (a checkout from before .gitattributes "
+                  f"pinned it to LF): delete it, then run: git checkout -- {source}",
+                  file=sys.stderr)
+        return 1
     if args.check:
         if todo:
             print("run: python scripts/sync_lite_chart.py", file=sys.stderr)

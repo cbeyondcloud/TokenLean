@@ -32,6 +32,7 @@ postgres:                   # managed: Cloud SQL, RDS, Azure Database for Postgr
   sslmode: require          # require | verify-ca | verify-full
   existingSecret: tokenlean-lite-postgres
   passwordSecretKey: password
+  caCertSecretKey: ""       # the key holding a private CA (PGSSLROOTCERT); "" = system trust
   # DATABASE_URL = postgresql://<user>@<host>:<port>/<database>?sslmode=<sslmode>, and the
   # password reaches the proxy as PGPASSWORD (never inside the URL).
 

@@ -83,6 +83,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.postgres.existingSecret }}
                   key: {{ .Values.postgres.passwordSecretKey }}
+            {{- include "tokenlean-lite.postgresCaEnv" . | nindent 12 }}
             - name: REDIS_URL
               value: {{ include "tokenlean-lite.redisUrl" . | quote }}
             {{- if .Values.redis.existingSecret }}
@@ -159,6 +160,10 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {{- include "tokenlean-lite.postgresCaMount" . | nindent 12 }}
+            {{- with .Values.proxy.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -187,6 +192,10 @@ spec:
               - {key: {{ .Values.proxyKeys.keysFileSecretKey }}, path: local-keys.json}
         - name: tmp
           emptyDir: {sizeLimit: 512Mi}
+        {{- include "tokenlean-lite.postgresCaVolume" . | nindent 8 }}
+        {{- with .Values.proxy.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

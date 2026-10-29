@@ -27,6 +27,9 @@ postgres:                   # managed: Cloud SQL, RDS, Azure Database for Postgr
   sslmode: verify-full      # the server certificate and its host name are checked
   existingSecret: tokenlean-lite-postgres
   passwordSecretKey: password
+  # Managed Postgres is often signed by the provider's own CA, which the image does not trust:
+  # put that CA (PEM) in the Secret above and name its key here, or verify-full fails.
+  caCertSecretKey: ""       # e.g. ca.crt; "" = the system trust store
 
 redis:                      # managed: Memorystore, ElastiCache, Azure Cache for Redis, ...
   host: redis.prod.example.internal

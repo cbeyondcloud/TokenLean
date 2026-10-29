@@ -11,7 +11,8 @@
 #   --delete      only delete the cluster
 #
 # Needs Docker only (Docker Desktop, or Docker Engine on Linux): kind, helm and kubectl run in
-# pinned containers. KIND_CLUSTER names the cluster (default tokenlean-lite-e2e).
+# pinned containers. KIND_CLUSTER names the cluster (default tokenlean-lite-e2e). A cluster
+# that already has that name is refused, never deleted (unless --delete names it).
 set -euo pipefail
 # Git Bash (Windows): docker gets the host paths below as they are written.
 export MSYS_NO_PATHCONV=1
@@ -69,14 +70,18 @@ tools() {
     -w /repo/deploy/lite/cloud "$K8S_TOOLS_IMAGE" "$@"
 }
 
+# Only a cluster this run creates (or one --delete names) is ever deleted.
+OWNED=$DELETE_ONLY
 cleanup() {
   local code=$?
-  if [ "$KEEP" = 0 ]; then
-    echo "e2e: deleting cluster $CLUSTER"
-    kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
-    rm -rf "$WORK"
-  else
+  if [ "$KEEP" = 1 ] && [ "$OWNED" = 1 ]; then
     echo "e2e: kept cluster $CLUSTER; its kubeconfig and the smoke keys are in $WORK"
+  else
+    if [ "$OWNED" = 1 ]; then
+      echo "e2e: deleting cluster $CLUSTER"
+      kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$WORK"
   fi
   exit "$code"
 }
@@ -85,8 +90,17 @@ trap cleanup EXIT
 if [ "$DELETE_ONLY" = 1 ]; then exit 0; fi
 [ -n "$IMAGE" ] || { echo "e2e: --image (or TOKENLEAN_IMAGE) must name a proxy image you built" >&2; exit 1; }
 docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "e2e: image $IMAGE not found locally" >&2; exit 1; }
+EXISTING=$(kind get clusters 2>/dev/null)
+case $'\n'"$EXISTING"$'\n' in
+  *$'\n'"$CLUSTER"$'\n'*)
+    echo "e2e: a kind cluster named $CLUSTER already exists: set KIND_CLUSTER to another name, or delete it first (KIND_CLUSTER=$CLUSTER ./e2e.sh --delete)" >&2
+    exit 1
+    ;;
+esac
 
 echo "e2e: creating cluster $CLUSTER"
+# From here the cluster is this run's: a create that fails half way is cleaned up too.
+OWNED=1
 kind create cluster --name "$CLUSTER" --image "$NODE_IMAGE" --wait 180s
 kind get kubeconfig --internal --name "$CLUSTER" >"$WORK/kubeconfig"
 chmod 600 "$WORK/kubeconfig"

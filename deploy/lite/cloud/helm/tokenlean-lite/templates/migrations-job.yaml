@@ -46,6 +46,7 @@ spec:
                 secretKeyRef:
                   name: {{ $m.existingSecret | default .Values.postgres.existingSecret }}
                   key: {{ $m.passwordSecretKey | default .Values.postgres.passwordSecretKey }}
+            {{- include "tokenlean-lite.postgresCaEnv" . | nindent 12 }}
             - name: LOG_LEVEL
               value: {{ .Values.proxy.logLevel | quote }}
           resources:
@@ -53,9 +54,11 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- include "tokenlean-lite.postgresCaMount" . | nindent 12 }}
       volumes:
         - name: tmp
           emptyDir: {sizeLimit: 64Mi}
+        {{- include "tokenlean-lite.postgresCaVolume" . | nindent 8 }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
