@@ -5,7 +5,9 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $LiteDir = $PSScriptRoot
-$LiteEnvFile = Join-Path $LiteDir '.env.lite'
+# $env:LITE_ENV_FILE and $env:LITE_BASE_URL (environment only) point smoke at another stack:
+# the cloud smoke (deploy/lite/cloud/smoke.ps1) runs these same checks against a cluster.
+$LiteEnvFile = if ($env:LITE_ENV_FILE) { $env:LITE_ENV_FILE } else { Join-Path $LiteDir '.env.lite' }
 $LiteStateDir = Join-Path $LiteDir '.state'
 $LiteComposeFile = Join-Path $LiteDir 'docker-compose.lite.yml'
 # Every compose call names this project explicitly (-p), so nothing else can redirect it.
@@ -80,6 +82,7 @@ function Invoke-LiteCompose([string[]]$ComposeArgs, [string]$EnvFile = $LiteEnvF
 }
 
 function Get-LiteBaseUrl {
+    if ($env:LITE_BASE_URL) { return $env:LITE_BASE_URL.TrimEnd('/') }
     $port = if ($env:LITE_PROXY_PORT) { $env:LITE_PROXY_PORT } else { '4100' }
     return "http://127.0.0.1:$port"
 }

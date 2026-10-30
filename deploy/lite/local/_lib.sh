@@ -3,7 +3,9 @@
 # No jq, no GNU-only flags.
 
 LITE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-LITE_ENV_FILE="$LITE_DIR/.env.lite"
+# LITE_ENV_FILE and LITE_BASE_URL (environment only) point smoke at another stack: the cloud
+# smoke (deploy/lite/cloud/smoke.sh) runs these same checks against a cluster that way.
+LITE_ENV_FILE="${LITE_ENV_FILE:-$LITE_DIR/.env.lite}"
 LITE_STATE_DIR="$LITE_DIR/.state"
 LITE_COMPOSE_FILE="$LITE_DIR/docker-compose.lite.yml"
 # Every compose call names this project explicitly (-p), so nothing else can redirect it.
@@ -91,5 +93,9 @@ lite_compose() {
 }
 
 lite_base_url() {
-  echo "http://127.0.0.1:${LITE_PROXY_PORT:-4100}"
+  if [ -n "${LITE_BASE_URL:-}" ]; then
+    echo "${LITE_BASE_URL%/}"
+  else
+    echo "http://127.0.0.1:${LITE_PROXY_PORT:-4100}"
+  fi
 }

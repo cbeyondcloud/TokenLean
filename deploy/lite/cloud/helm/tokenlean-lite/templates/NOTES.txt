@@ -1,0 +1,23 @@
+TokenLean LITE ({{ .Chart.AppVersion }}) is installed as {{ include "tokenlean-lite.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+{{- if .Values.ingress.enabled }}
+Base URL:  https://{{ .Values.ingress.host }}
+{{- else }}
+Base URL:  no ingress. From your machine:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "tokenlean-lite.fullname" . }} 4100:{{ .Values.service.port }}
+  then http://127.0.0.1:4100
+{{- end }}
+
+Keys:      the bootstrap keys in Secret {{ .Values.proxyKeys.existingSecret }} open the proxy; issue
+           team and user keys through /admin/keys (deploy/lite/README.md, Teams and keys).
+Smoke:     deploy/lite/cloud/smoke.sh --namespace {{ .Release.Namespace }} --release {{ .Release.Name }}
+{{- if .Values.redis.bundled.enabled }}
+
+WARNING: Redis runs inside this release (redis.bundled). That is for a dev cluster only: use an
+external Redis for staging and production.
+{{- end }}
+{{- if .Values.mockProvider.enabled }}
+
+NOTE: every model is answered by the mock provider (mockProvider.enabled). Nothing reaches a
+real provider.
+{{- end }}

@@ -1,0 +1,4 @@
+# The LITE Helm chart carries a byte copy of this file (deploy/lite/cloud/helm/tokenlean-lite/
+# files/, pinned to LF by deploy/lite/.gitattributes). Both check out as LF, so the copy stays
+# equal to its source on Windows (core.autocrlf=true) too. See scripts/sync_lite_chart.py.
+config/config.yaml.template text eol=lf

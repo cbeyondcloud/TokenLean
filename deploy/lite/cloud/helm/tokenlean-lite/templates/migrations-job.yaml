@@ -1,0 +1,70 @@
+{{- if .Values.migrations.enabled }}
+{{- $m := .Values.migrations }}
+{{- $user := $m.user | default .Values.postgres.user }}
+# The migration hook: the proxy's own schema steps, once, before the new pods start. A hook
+# runs before the release's other objects exist, so it reads only the Postgres Secret, and
+# runs under the namespace's default service account (with no API token mounted).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tokenlean-lite.fullname" . }}-migrate
+  labels:
+    {{- include "tokenlean-lite.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrations
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $m.backoffLimit }}
+  activeDeadlineSeconds: {{ $m.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "tokenlean-lite.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrations
+    spec:
+      restartPolicy: Never
+      {{- include "tokenlean-lite.podSecurity" . | nindent 6 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "tokenlean-lite.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # The image keeps metrics in PROMETHEUS_MULTIPROC_DIR, under /tmp (an emptyDir).
+          command: ["sh", "-c", 'mkdir -p "$PROMETHEUS_MULTIPROC_DIR" && exec python -m schema_setup']
+          env:
+            - name: DATABASE_URL
+              value: {{ include "tokenlean-lite.databaseUrl" (dict "root" . "user" $user) | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $m.existingSecret | default .Values.postgres.existingSecret }}
+                  key: {{ $m.passwordSecretKey | default .Values.postgres.passwordSecretKey }}
+            {{- include "tokenlean-lite.postgresCaEnv" . | nindent 12 }}
+            - name: LOG_LEVEL
+              value: {{ .Values.proxy.logLevel | quote }}
+          resources:
+            {{- toYaml $m.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- include "tokenlean-lite.postgresCaMount" . | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+        {{- include "tokenlean-lite.postgresCaVolume" . | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

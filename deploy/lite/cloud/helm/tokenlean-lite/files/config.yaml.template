@@ -1,0 +1,1906 @@
+params_dir: config/params
+proxy:
+  port: 4000
+  api_key_header: Authorization
+  log_level: INFO
+  cors_origins:
+  - '*'
+  default_model: gpt-4o-mini
+  fallback_request_model: gpt-4o-mini
+  # Provider used when a model matches no providers[].model_prefixes (replaces the old
+  # hardcoded "openai" fallback). Set to whichever provider your default_model belongs to.
+  default_provider: openai
+  allow_user_id_header_override: true
+  allowed_user_id_headers:
+  - '*@*.test'
+services:
+  llmlingua_url: http://llmlingua-svc:8080/compress
+  qdrant_url: http://qdrant:6333
+  tika_url: http://tika-svc:9998
+  routellm_url: http://routellm-svc:8081
+  langfuse_host: http://langfuse-svc:3000
+  mem0_url: ''
+savings:
+  chars_per_token: 4
+  per_message_overhead: 4
+  per_tool_overhead: 4
+  # B2 / P11 — non-GPT models (Claude/Gemini/Mistral/…) use cl100k_base tiktoken locally
+  # for a closer-than-char/4 ingress baseline (no provider API call). Approximate but better
+  # than char/4; affects the savings-% estimate only — billed tokens come from provider usage.
+  non_gpt_tiktoken_fallback: true
+rate_limit:
+  enabled: true
+  default:
+    requests_per_minute: 60
+    requests_per_hour: 1000
+  per_user:
+    user-01:
+      requests_per_minute: 2
+      requests_per_hour: 120
+  # A rate-limit bucket is keyed on the AUTHENTICATED identity — the tenant + the key-bound
+  # principal + the team. `per_team` matches only an authenticated team: the team a key is
+  # bound to (`teams`, below), or a GATEWAY key's X-Team. X-Team is trusted only from a key
+  # issued with `gateway: true` (a customer's API gateway that stamps the team on every
+  # request); every other unbound key is team "default", so a caller cannot pick a
+  # bucket, claim a team's limit, or split its own limit by rotating X-Team / X-User-ID.
+  per_team:
+    team-alpha:
+      requests_per_minute: 20
+      requests_per_hour: 1200
+  # WS23: per-pricing-tier defaults + per-tenant overrides (most specific wins:
+  # per_user > per_team > per_tenant > tiers > default). per_tenant entries are
+  # normally applied by the operator through tenant_configs, not edited here.
+  tiers: {}
+  #  free:
+  #    requests_per_minute: 30
+  #    requests_per_hour: 600
+  per_tenant: {}
+  # Monthly request-quota gate from the billing rate card: 429 quota_exceeded past
+  # included_requests x (1 + grace_pct/100). OFF by default — OSS/self-host never
+  # enforces a quota; the managed SaaS enables it. included_requests of 0/absent
+  # means unlimited. Exempt tenants are never gated.
+  quota:
+    enabled: false
+    grace_pct: 10
+    exempt_tenants: [admin, default]
+  # Per-tenant monthly USD spend cap — the "denial-of-wallet" ceiling. 429
+  # spend_cap_exceeded once the running t:<id>:spend:<YYYYMM> counter (summed real
+  # cost_actual_usd) crosses the effective cap x (1 + grace_pct/100). OFF by default
+  # — OSS/self-host never enforces a dollar ceiling; the managed SaaS enables it.
+  # Effective cap = per-tenant override (limits.monthly_spend_cap_usd, set via the
+  # portal into tenant_configs) > tier default (billing.rate_card.<tier>). Absent /
+  # 0 cap means unlimited. Exempt tenants are never gated. Fail-open on Redis error.
+  # The same switch, grace and exemptions apply each team's own cap
+  # (teams.<team>.monthly_spend_cap_usd, below): 429 team_spend_cap_exceeded.
+  spend_cap:
+    enabled: false
+    grace_pct: 0
+    exempt_tenants: [admin, default]
+    warn_pct: 0                   # 0 = off. When >0, emit a one-shot `budget.threshold`
+                                  # outbound webhook event the first time monthly spend
+                                  # crosses this %% of the cap (e.g. 80). Delivery is a
+                                  # commercial feature; the emit is a no-op without it.
+  # Per-tenant FREE TRIAL gate: N days AND M served-2xx requests, whichever is hit
+  # first. OFF by default — OSS/self-host never enforces trials; the managed SaaS
+  # enables it. Per-tenant state lives in tenant_configs.config_overrides under
+  # `trial:` {status: active|converted|cancelled, started_at (UTC ISO), days,
+  # max_requests, generation} — written by the admin console at runtime and merged
+  # into ctx.config per request (no redeploy). Expiry (days elapsed OR requests
+  # exhausted) → HTTP 402 code=trial_expired until an operator converts or extends;
+  # the 402 is not billed and does not consume trial allowance. Counting basis = the
+  # billable unit (every served 2xx, incl. cache hits/bypasses; a batched request counts
+  # when it is queued). Trial requests are
+  # flagged on usage_events and excluded from invoices. Warn %%s fire a one-shot
+  # `trial.threshold` webhook per crossing (per trial generation); exhaustion fires
+  # one `trial.expired` (delivery is commercial; no-op without a dispatcher).
+  # Exempt tenants are never gated. Fail-open on Redis error (request dimension) and
+  # on malformed trial state.
+  trial:
+    enabled: false
+    exempt_tenants: [admin, default]
+    warn_pcts: [80, 90]
+# Teams under a tenant (optional). A proxy key bound to a team at issuance
+# (issue-key.sh --team NAME) carries that team on every request: usage_events.team, the
+# `team` metric label, rate_limit.per_team, and the block below. A team's block may also
+# come from the tenant's own tenant_configs overrides, and the operator's
+# tenants.<id>.teams.<team> is merged over it. `config` is merged over the tenant's config
+# for the team's requests (only its `groups` and `proxy` sections apply). No block, no
+# team-bound keys: nothing changes. See docs/config-reference.md "teams".
+# teams:
+#   payments:
+#     monthly_spend_cap_usd: 50
+#     config:
+#       groups:
+#         G5_cache: {cache_scope: tenant+model}
+#       proxy:
+#         default_model: gpt-4o-mini
+# Where proxy keys are validated (optional; absent = blob, as before). blob: the local key file
+# or the Secret Manager secret. postgres: the proxy_keys table (DATABASE_URL): each replica
+# re-reads it every refresh_seconds, so a key revoked through /admin/keys or any replica is
+# refused everywhere within that; a replica that cannot re-read for max_stale_seconds refuses
+# every key (503). Chosen at startup. See docs/config-reference.md "key_store".
+# key_store:
+#   backend: postgres
+#   refresh_seconds: 5
+#   max_stale_seconds: 300
+# The admin HTTP APIs (/admin/keys, /admin/routing): changes are refused while the audit log
+# is not wired, unless require_audit is false. See docs/config-reference.md "/admin/keys".
+# admin_api:
+#   require_audit: true
+#   routing:
+#     poll_seconds: 5          # replicas check for a newer /admin/routing version this often
+# WS25: periodic data-retention purge (default OFF — self-host keeps everything).
+# usage_days is clamped to a 400-day floor in code: usage_events is the billing
+# source of record and must outlive every invoice period.
+retention:
+  enabled: false
+  interval_hours: 24
+  audit_days: 0                 # 0 = keep audit_events forever
+  usage_days: 0                 # 0 = keep usage_events forever
+  cache_l2_expired_cleanup: true
+# App-level source-IP allowlist (CIDR) for the proxy request path, enforced in core
+# _authenticate for the /v1/* routes (net/ip_allowlist.py). enabled switches on
+# global_cidrs, which apply to ALL tenants (e.g. an office / VPN egress that must always
+# work): OFF by default — OSS/self-host is open — and no deploy script turns it on.
+# A tenant's own CIDRs, set from the admin console and stored in its keys' metadata, are
+# enforced whether enabled is on or off. Empty global + empty per-tenant ⇒ the tenant is
+# unrestricted. A request is allowed iff its source IP is in (global_cidrs ∪ tenant_cidrs).
+# The source IP is resolved as network: below describes.
+ip_allowlist:
+  enabled: false
+  global_cidrs: []              # e.g. ["203.0.113.0/24", "198.51.100.7/32"]
+# The caller's address, for the IP allowlist and the portal login limits (net/client_ip.py).
+# X-Forwarded-For is written left to right: a client may put anything in it, and each proxy
+# in front of TokenLean appends the address its connection came from. So the caller is the
+# entry trusted_proxy_hops places from the RIGHT. auto = 1 on Cloud Run (whose front end
+# appends one entry), else 0 (no proxy in front: the socket peer). Behind nginx or a single
+# load balancer that appends the peer, set 1; behind Google's external Application Load
+# Balancer, which appends two entries, set 2. Replaces ip_allowlist.trust_x_forwarded_for.
+network:
+  trusted_proxy_hops: auto
+  # enforce = use that address. observe = keep the old first X-Forwarded-For entry and log
+  # where the new address differs (a rollout step; CLIENT_IP_MODE overrides this).
+  client_ip_mode: enforce
+# OpenAI ingress (/v1/chat/completions) accepts only the documented Chat Completions
+# parameters, TokenLean's own client parameters (every x_* field, plus workflow_id,
+# template_id, rag_query, session_id, ...) and the names listed here. Other body fields
+# are dropped and their NAMES logged, never their values. Fields starting with "_" can
+# never be re-admitted, and litellm call arguments (api_base, extra_headers, ...) are
+# stripped again before the upstream call whatever is listed here. Global config only —
+# a tenant override cannot extend it.
+ingress:
+  extra_allowed_params: []      # e.g. ["metadata"]
+  # /v1/responses only. false: a client's prompt_cache_key (Codex: its thread id) reaches the
+  # provider as a tenant-scoped digest, which keeps caching working. Only a literal true sends
+  # the client's value as it is.
+  forward_prompt_cache_key: false
+  # /v1/responses only: more request headers kept from the pipeline, added to the built-in
+  # list (names, or prefixes ending in *), e.g. ["x-device-id", "x-corp-*"].
+  private_headers: []
+  responses:
+    keepalive_seconds: 15       # a ": keepalive" comment after this much silence; 0 = none
+providers:
+- name: openai
+  api_base: https://api.openai.com/v1
+  # Smallest prompt this provider will cache a prefix for. Below it the provider
+  # silently declines to cache -- no read, no write, no error. Only consulted when a
+  # feature opts in (groups.G1_compression.preserve_cacheable_prefix); 0 disables it.
+  # This provider measures the minimum over the ENTIRE prompt prefix in serialized
+  # order. From provider docs, 2026-09 -- verify before any default flip.
+  min_cacheable_tokens: 1024
+  # Per-model override, longest matching prefix wins. Every key is a PREFIX match with
+  # or without a trailing `*` -- `gpt-4o` also matches `gpt-4o-mini`, so list the more
+  # specific model too when they differ. This provider's minimum is flat across its
+  # catalog, so the map is illustrative rather than required:
+  #   min_cacheable_tokens_by_model:
+  #     gpt-4o: 1024
+  # Optional per-provider resilience override (merges over the top-level `resilience:`
+  # block). E.g. a flakier provider can trip its breaker sooner:
+  #   resilience:
+  #     failure_threshold: 3
+  #     num_retries: 2
+  # ── Model catalog ────────────────────────────────────────────────────────────────
+  # This list IS the model picker in the portal (Settings → Models & Keys) and the
+  # allowlist a caller's requested model is validated against. It is a plain static
+  # file, hot-reloaded like the rest of the config — add a newly-released model here
+  # and it appears in the dropdown within ~60s, no deploy and no code change.
+  # Order matters: newest / most-recommended first. Catalog verified 2026-08-06.
+  models:
+  - gpt-5.6-sol                  # frontier (gpt-5.6 is an alias for -sol)
+  - gpt-5.6-terra                # balanced production
+  - gpt-5.6-luna                 # cost-sensitive / high volume
+  - gpt-5.1
+  - gpt-4o-mini                  # legacy, still served
+  - gpt-4o
+  - o1
+  - o3
+  - gpt-4-5
+  # A model whose name matches NO prefix here is treated as unknown, and G06's
+  # disabled/no-tiers path then downgrades it to `default_model` -- silently swapping a
+  # reasoning model for a cheap one. `o4` was missing until 2026-09-08 and an o4-mini
+  # request was served by gpt-4o-mini with the reasoning params stripped. Keep this list
+  # ahead of the model families you actually send.
+  model_prefixes:
+  - gpt
+  - o1
+  - o3
+  - o4
+  - text-
+  - davinci
+  - babbage
+  - curie
+  - ada
+  tiktoken_prefixes:
+  - gpt
+  - o1
+  - o3
+  - o4
+  - text-
+  - davinci
+  - babbage
+  - curie
+  - ada
+- name: anthropic
+  api_base: https://api.anthropic.com/v1
+  # See the openai entry, with two differences. This provider measures the minimum
+  # over the BLOCK up to its last cache_control marker -- tools, then system, then any
+  # marked messages -- not over the whole prompt. And its minimum is model-dependent,
+  # so the by-model map below is the value that actually applies; the flat entry is
+  # only the fallback for a model no pattern matches.
+  # From provider docs, 2026-09 -- verify before any default flip.
+  min_cacheable_tokens: 1024
+  min_cacheable_tokens_by_model:
+    claude-opus: 1024
+    claude-sonnet: 1024
+    claude-3-haiku: 2048
+    claude-3-5-haiku: 2048
+    claude-haiku-4-5: 4096
+  models:                        # verified 2026-08-06
+  - claude-opus-5                # current Opus
+  - claude-sonnet-5
+  - claude-haiku-4-5
+  - claude-fable-5               # most capable; priced above Opus tier
+  - claude-opus-4-8
+  - claude-sonnet-4-6
+  - claude-opus-4                # legacy, deprecated by Anthropic
+  model_prefixes:
+  - claude
+# ── Additional first-class providers (each has a dedicated adapter) ─────────────────
+# These resolve to their adapter class; the litellm namespace is baked into the adapter,
+# so only model_prefixes are required. Set the matching LLM_KEY_<NAME> / llm-key-<name>.
+# models[] lead with each provider's cheapest model (verify exact IDs against the provider).
+- name: gemini
+  # Measured over the whole prompt prefix, like the openai entry, but model-dependent.
+  # From provider docs, 2026-09 -- verify before any default flip.
+  min_cacheable_tokens: 1024
+  min_cacheable_tokens_by_model:
+    gemini-3.6-flash: 1024
+    gemini-3.5-flash: 1024
+    gemini-flash: 1024
+    gemini-3.1-pro: 2048
+    gemini-pro: 2048
+  models:                      # verified 2026-08-06
+  - gemini-3.6-flash           # current stable flash
+  - gemini-3.5-flash
+  - gemini-3.5-flash-lite      # cheapest current Gemini
+  - gemini-3.1-pro-preview     # flagship reasoning (preview)
+  - gemini-flash-latest        # floating alias — stays available to new projects
+  - gemini-pro-latest          # floating alias — pinned 2.5 ids 404 for new projects
+  - gemini-2.5-flash-lite      # existing projects only; 2.5-flash retires 2026-10-16
+  - gemini-2.5-flash
+  model_prefixes:
+  - gemini
+- name: mistral
+  models:                      # verified 2026-08-06
+  - mistral-medium-3.5-latest  # current flagship
+  - mistral-large-3-latest
+  - mistral-small-4-latest
+  - ministral-3b-latest        # cheapest Mistral (edge family)
+  - mistral-small-latest
+  model_prefixes:
+  - mistral
+  - mixtral
+  - ministral
+  - magistral
+  - codestral
+  - pixtral
+- name: deepseek
+  models:                      # verified 2026-08-06
+  - deepseek-v4-flash          # low-latency production (thinking is now a request param)
+  - deepseek-v4-pro            # quality-focused reasoning
+  # deepseek-chat / deepseek-reasoner were the legacy aliases; discontinued 2026-07-24.
+  model_prefixes:
+  - deepseek
+- name: xai
+  models:                      # verified 2026-08-06
+  - grok-4.1-fast              # cheapest xAI
+  - grok-4.5                   # current flagship
+  - grok-4.3
+  model_prefixes:
+  - grok
+- name: cohere
+  models:                      # verified 2026-08-06
+  - command-r7b-12-2024        # cheapest Cohere
+  - command-a-plus-05-2026     # current flagship (MoE, vision)
+  - command-a-03-2025
+  - command-r
+  model_prefixes:
+  - command
+  - cohere/
+# Groq hosts many model families — route with an explicit "groq/" prefix to disambiguate.
+- name: groq
+  # Groq's roster churns fast and it has deprecated its older Llama chat ids — confirm
+  # against https://api.groq.com/openai/v1/models before relying on any entry here.
+  models:                                        # verified 2026-08-06
+  - groq/openai/gpt-oss-20b                      # cheapest Groq
+  - groq/openai/gpt-oss-120b
+  - groq/moonshotai/kimi-k2-instruct-0905
+  - groq/meta-llama/llama-4-scout-17b-16e-instruct
+  model_prefixes:
+  - groq/
+# Azure shares OpenAI model names — route with an explicit "azure/<deployment>" and set
+# api_base + api_version to your Azure resource. Key via LLM_KEY_AZURE.
+- name: azure
+  api_base: https://YOUR-RESOURCE.openai.azure.com
+  api_version: '2024-10-21'
+  # Azure model = your deployment name (azure/<deployment>); point it at a cheap deployment (e.g. gpt-4o-mini)
+  model_prefixes:
+  - azure/
+# Bedrock uses AWS SigV4 (no bearer key) — creds from the environment / instance profile.
+- name: bedrock
+  aws_region: us-east-1
+  models:                              # verified 2026-08-06
+  - bedrock/amazon.nova-micro-v1:0     # cheapest Bedrock (Amazon Nova Micro)
+  - bedrock/amazon.nova-2-lite-v1:0    # current generation (Nova 2)
+  - bedrock/amazon.nova-lite-v1:0
+  - bedrock/amazon.nova-pro-v1:0
+  - bedrock/anthropic.claude-opus-5    # Claude on Bedrock keeps the anthropic. prefix
+  - bedrock/anthropic.claude-sonnet-5
+  model_prefixes:
+  - bedrock/
+  - anthropic.
+  - amazon.
+  - meta.
+  - mistral.
+  - cohere.
+  - us.anthropic.
+# OpenRouter — aggregator exposing 200+ models behind one OpenAI-compatible API (config-only,
+# generic adapter). Send models as "openrouter/<vendor>/<model>",
+# e.g. openrouter/anthropic/claude-3.5-sonnet. Key via LLM_KEY_OPENROUTER.
+- name: openrouter
+  adapter: generic
+  litellm_prefix: openrouter
+  # Free models ($0). Verify the exact slug on each model's OpenRouter page (vendor/model:free).
+  models:
+  - openrouter/openai/gpt-oss-120b:free        # gpt-oss-120b (free)
+  - openrouter/google/gemma-4-31b:free         # Gemma 4 31B (free)
+  - openrouter/nvidia/nemotron-3-ultra:free    # Nemotron 3 Ultra (free)
+  model_prefixes:
+  - openrouter/
+# OpenCode Zen — curated OpenAI-compatible gateway (config-only, generic adapter). Send models
+# as "opencode/<model>" e.g. opencode/deepseek-v4-pro; the "opencode/" prefix is stripped before
+# the upstream call. Key via LLM_KEY_OPENCODE.
+- name: opencode
+  adapter: generic
+  openai_compatible: true
+  api_base: https://opencode.ai/zen/v1
+  route_prefix: opencode/
+  # Lead model = Kimi K2.7 Code; the free models below are $0. Verify slugs on the OpenCode Zen dashboard.
+  models:
+  - opencode/kimi-k2.7-code        # Kimi K2.7 Code (default)
+  - opencode/ling-3.0-flash-free   # Ling 3.0 Flash (free) — A/B benchmark's opencode model
+  - opencode/mimo-v2.5             # MiMo V2.5 (free)
+  - opencode/qwen3.6-plus          # Qwen3.6 Plus (free)
+  - opencode/minimax-m3            # MiniMax M3 (free)
+  model_prefixes:
+  - opencode/
+
+# ── Provider resilience (#1 failover) ───────────────────────────────────────────────
+# Circuit breaker + retry + per-tenant cooldown + failover on the live request paths.
+# Signals are scoped so tenants can't affect each other: 429s (rate limits — a property
+# of the tenant's key) set only THAT tenant's short cooldown; 5xx/timeouts (true provider
+# health) feed the global per-provider breaker. Gates FAIL OPEN: the last viable target
+# is always attempted, so a request is never rejected without a real provider attempt.
+# `enabled: false` (or omitting this block) restores the pre-feature behaviour exactly:
+# one attempt, provider error surfaced. NOTE this template opts in (retry-only, no
+# fallbacks) — deployments keeping their existing config.yaml are unaffected.
+# Per-provider overrides live under `providers[].resilience`. Per-tenant overrides are set
+# through the tenant's config (portal / tenant_configs), which deep-merges a top-level
+# `resilience:` block over this one. Breaker/cooldown state is per worker (in-process);
+# hot-reloaded values apply immediately (no worker restart needed).
+resilience:
+  enabled: true
+  num_retries: 1              # transient-error retries on the SAME model before failover
+  failure_threshold: 5        # consecutive 5xx/timeout failures that trip a provider's breaker
+  cooldown_seconds: 30        # breaker-open duration AND per-tenant 429-cooldown TTL
+  retry_base_delay: 0.2       # exponential backoff base between retries (seconds)
+  # How long a provider call waits for the provider to send anything (the whole answer,
+  # or for a stream each next chunk) before it counts as a timeout: retried, then failed
+  # over. Long reasoning answers can take minutes.
+  request_timeout_seconds: 300
+  # Per-model lockout (finer than the provider breaker): quarantine ONE degraded /
+  # deprecated model while the provider's OTHER models keep serving. Default off →
+  # provider-breaker-only behaviour is unchanged. When on, a model that racks up
+  # `model_failure_threshold` model-scoped 5xx/timeout failures is skipped on subsequent
+  # requests for `model_lockout_seconds` (then one probe re-tests). The threshold is
+  # deliberately lower than `failure_threshold` so a bad model is isolated before it can
+  # open the whole-provider breaker; a fallback model's success then resets the breaker.
+  model_lockout: false
+  model_failure_threshold: 3
+  # model_lockout_seconds: 30  # defaults to cooldown_seconds when unset
+  # Failover chains: routed model → ordered list of fallback models, resolved lazily
+  # (only when the primary actually fails — no per-request cost while healthy). A
+  # fallback whose provider is gated or whose key the tenant lacks is skipped; a
+  # fallback's own auth/config error moves on to the next. Empty = retry-only.
+  fallbacks: {}
+  # Example:
+  #   gpt-4o-mini:
+  #   - claude-haiku-4-5
+  #   - gemini-2.5-flash-lite
+
+pricing:
+  # Current-generation rows (USD per 1k tokens, verified 2026-08-06). Keys are
+  # substring-matched against the routed model name, longest key wins — so these sit
+  # alongside the legacy rows below without disturbing them.
+  gpt-5.6-sol:
+    input: 0.005
+    output: 0.03
+  gpt-5.6-terra:
+    input: 0.002
+    output: 0.012
+  gpt-5.6-luna:
+    input: 0.0002
+    output: 0.0012
+  gpt-5.1:
+    input: 0.00125
+    output: 0.01
+  claude-fable-5:
+    input: 0.01
+    output: 0.05
+  claude-opus-5:
+    input: 0.005
+    output: 0.025
+  claude-opus-4-8:
+    input: 0.005
+    output: 0.025
+  claude-sonnet-5:
+    input: 0.003
+    output: 0.015
+  claude-haiku-4-5:
+    input: 0.001
+    output: 0.005
+  gpt-4o-mini:
+    input: 0.00015
+    output: 0.0006
+  gpt-4o:
+    input: 0.005
+    output: 0.015
+  gpt-4-5:
+    input: 0.075
+    output: 0.15
+  o1:
+    input: 0.015
+    output: 0.06
+  # OpenAI list prices read from its pricing page on 2026-10-16 (USD per 1K tokens; $/1M in
+  # brackets). o3 was $0.01 / $0.04 here, five times list. o3-mini and o4-mini had no row, so
+  # o4-mini priced at `default` ($0.005 / $0.015) and o3-mini matched the stale `o3` row; G06's
+  # cost guards read these rows, and DS18 routed 8 of 20 o3-mini / o4-mini requests to gpt-4o,
+  # which costs more than either, while the guard judged each move neutral or cheaper.
+  o3:
+    input: 0.002      # $2.00
+    output: 0.008     # $8.00
+  o3-mini:
+    input: 0.0011     # $1.10
+    output: 0.0044    # $4.40
+  o4-mini:
+    input: 0.0011     # $1.10
+    output: 0.0044    # $4.40
+  claude-haiku:
+    input: 0.00025
+    output: 0.00125
+  claude-sonnet:
+    input: 0.003
+    output: 0.015
+  claude-opus:
+    input: 0.015
+    output: 0.075
+  # New providers (USD per 1k tokens — verify against current price sheets; reporting only,
+  # billing is per-request). Keys are substring-matched against the routed model name.
+  gemini-3.6-flash:
+    input: 0.0015
+    output: 0.0075
+  gemini-3.5-flash-lite:
+    input: 0.0003
+    output: 0.0025
+  gemini-3.1-pro:
+    input: 0.002
+    output: 0.012
+  mistral-medium-3.5:
+    input: 0.0015
+    output: 0.0075
+  mistral-large-3:
+    input: 0.0005
+    output: 0.0015
+  mistral-small-4:
+    input: 0.00015
+    output: 0.0006
+  ministral:
+    input: 0.0001
+    output: 0.0002
+  grok-4.5:
+    input: 0.002
+    output: 0.006
+  grok-4.3:
+    input: 0.00125
+    output: 0.0025
+  grok-4.1-fast:
+    input: 0.0002
+    output: 0.0005
+  command-r7b:
+    input: 0.0000375
+    output: 0.00015
+  gemini-flash-latest:
+    input: 0.0003
+    output: 0.0025
+  gemini-pro-latest:
+    input: 0.00125
+    output: 0.01
+  gemini-2.5-flash:
+    input: 0.0003
+    output: 0.0025
+  gemini-2.5-pro:
+    input: 0.00125
+    output: 0.01
+  mistral-large:
+    input: 0.002
+    output: 0.006
+  mistral-small:
+    input: 0.0002
+    output: 0.0006
+  deepseek-reasoner:
+    input: 0.00055
+    output: 0.00219
+  deepseek:
+    input: 0.00027
+    output: 0.0011
+  grok:
+    input: 0.003
+    output: 0.015
+  command-r-plus:
+    input: 0.0025
+    output: 0.01
+  command-r:
+    input: 0.00015
+    output: 0.0006
+  llama:
+    input: 0.00059
+    output: 0.00079
+  # Bedrock-hosted model fragments (substring-matched against the routed model name, e.g.
+  # "anthropic.claude-3-5-sonnet", "amazon.nova-pro"). Azure is per-deployment — add a row
+  # keyed by your deployment name; otherwise it falls back to `default` below.
+  claude-3-5-sonnet:
+    input: 0.003
+    output: 0.015
+  claude-3-5-haiku:
+    input: 0.0008
+    output: 0.004
+  claude-3-haiku:
+    input: 0.00025
+    output: 0.00125
+  claude-3-opus:
+    input: 0.015
+    output: 0.075
+  nova-pro:
+    input: 0.0008
+    output: 0.0032
+  nova-lite:
+    input: 0.00006
+    output: 0.00024
+  nova-micro:
+    input: 0.000035
+    output: 0.00014
+  # OpenCode Zen (per 1k tokens; keyed by full opencode/<model> so longest-match wins over the
+  # generic provider rows; free models = 0). Source: opencode.ai/zen — adjust as prices change.
+  opencode/deepseek-v4-pro:
+    input: 0.00174
+    output: 0.00348
+  opencode/glm-5.2:
+    input: 0.0014
+    output: 0.0044
+  opencode/kimi-k2.6:
+    input: 0.00095
+    output: 0.004
+  opencode/kimi-k2.7-code:        # estimate — mirrors kimi-k2.6; verify on opencode.ai/zen
+    input: 0.00095
+    output: 0.004
+  opencode/minimax-m2.7:
+    input: 0.0003
+    output: 0.0012
+  opencode/ling-3.0-flash-free:    # free model used by the A/B benchmark's opencode provider
+    input: 0.0
+    output: 0.0
+  # Free models = $0. OpenRouter free models all end in ":free" (one catch-all row); the
+  # OpenCode Zen free models are listed explicitly.
+  ':free':
+    input: 0.0
+    output: 0.0
+  opencode/mimo-v2.5:
+    input: 0.0
+    output: 0.0
+  opencode/qwen3.6-plus:
+    input: 0.0
+    output: 0.0
+  opencode/minimax-m3:
+    input: 0.0
+    output: 0.0
+  # TypeSafe Jev, G06's optional complexity classifier (classifier: jev): $0.042 per million
+  # input tokens, output free. Its calls are recorded as <key_provider>/<model>.
+  typesafe/jev:
+    input: 0.000042
+    output: 0.0
+  # The embedding RouteLLM's sw_ranking router makes per routed turn, with the tenant's own
+  # OpenAI key: $0.02 per million input tokens. Recorded as openai/<model>.
+  text-embedding-3-small:
+    input: 0.00002
+    output: 0.0
+  default:
+    input: 0.005
+    output: 0.015
+groups:
+  G1_compression:
+    enabled: true
+    min_tokens_to_compress: 200
+    # Default OFF. When true, G01, G08 and G19 stop shrinking the span your provider
+    # measures against its minimum cacheable size (providers.<name>.min_cacheable_tokens
+    # / min_cacheable_tokens_by_model) past that minimum. Below the minimum a provider
+    # silently stops caching the prefix -- no read, no write, no error -- so a prompt
+    # compressed under it can cost MORE than the uncompressed one on a workload whose
+    # prefix repeats (measured: 63% fewer tokens sent, 2.5x the input cost).
+    #
+    # This is NOT a blanket "stop compressing". It compares the two bills using your
+    # provider's own published cache rates and the reuse it actually observes, and holds
+    # tokens back only when that is cheaper. G01 aims the span just ABOVE the minimum
+    # rather than abandoning the compression, and content outside the span (which is
+    # never cached) stays fully compressed either way. On a workload whose prefix does
+    # NOT repeat, or on a provider whose cache discount is small, the arithmetic says
+    # compress and nothing is held back.
+    #
+    # Aiming the span AT the minimum needs a compression engine with a rate dial, which
+    # here is the LLMLingua sidecar (`sidecar_url` below). Without it -- sidecar not
+    # deployed, unreachable, or unable to land above the minimum -- there is nothing to
+    # aim, and the choice is between compressing the span anyway and PRESERVING IT WHOLE.
+    # The same arithmetic picks the cheaper: with a small cache discount, keeping the
+    # whole span costs more than compressing it. G08 and G19 can only trim or not, so
+    # they always make that comparison. Content outside the span stays compressed either
+    # way.
+    #
+    # Still opt-in: at the first sighting of a prefix there is no reuse to bank on, and
+    # a provider may evict a cached block before the reuse arrives.
+    preserve_cacheable_prefix: false
+    # Headroom above the minimum when aiming the span at it (0.05 = stop ~5% above).
+    # Token counts are estimates; undershooting forfeits the whole discount.
+    cacheable_prefix_margin: 0.05
+    # Reuse to assume before any has been observed. 1 = assume none, which makes the
+    # guard stand down until repeats are actually seen. Raising it on a deployment whose
+    # prefixes do not repeat costs money -- evidence, not optimism.
+    assumed_prefix_reuse: 1
+    # How long a prefix sighting counts toward the reuse total, as a FIXED window: the
+    # first sighting starts the clock and the count restarts when it runs out. Track your
+    # provider's prompt-cache TTL; too long over-counts reuse that has already expired.
+    prefix_reuse_window_seconds: 300
+    compression_ratio_target: 0.5
+    force_reserve_digit: true        # preserve digit tokens (dates/IDs/amounts) so compression can't corrupt a tool argument
+    sidecar_url: http://llmlingua-svc:8080/compress
+    min_chars_to_compress: 100
+    reduction_threshold: 0.95
+    compress_user_messages: false
+    compress_system_prompt: false
+    # Layered composition, opt-in per request: a system message that carries a
+    # `layer_context` object (e.g. {"domain": "billing", "task_description": "..."}) has
+    # its content REPLACED by these layers, filled from that object. Messages without it
+    # are never touched, and the field is removed before the provider call.
+    layered_composition_enabled: false
+    layers:
+      base: You are a helpful AI assistant.
+      role: You specialize in {domain}.
+      task: Your current task is to {task_description}.
+      dynamic: 'Additional context: {context}'
+    selective_context_enabled: false
+    selective_context_max_tokens: 4000
+    build_time_compression: true
+    # (kompress_enabled / kompress_model / kompress_max_new_tokens removed 2026-10-21: the
+    #  Kompress fallback never ran. A leftover kompress_* key in an existing config is ignored.)
+    # Deterministic regex prose fallback (zero-LLM, zero-latency; prose_compress).
+    # Engages ONLY when LLMLingua has not reduced a message — so a
+    # sidecar outage degrades to some savings instead of pass-through. Default off
+    # (keeps the reproducible baseline byte-identical). Protects code/paths/idents.
+    deterministic_fallback: false
+  G2_template_registry:
+    # Registry + budget OBSERVER. It looks a template up by the caller's `template_id`
+    # (or the X-Template-ID header), tracks per-version token history, blocks sunset
+    # templates, and WARNS when a request exceeds the template's `total_input_max`.
+    # It NEVER edits the request. The former `budget.truncate_*` knobs, which cut the
+    # tail off the caller's system prompt to make it fit, were removed on 2026-09-08:
+    # they changed answers on billed responses. Fix an over-budget template at build
+    # time (scripts/ci/validate-templates.sh); for runtime protection against a prompt
+    # that outgrows the model window, enable G26 (it never touches `system` messages).
+    enabled: true
+    deprecation_warn_days: 30
+    template_history_ttl_days: 90
+    max_history_per_version: 1000
+    budgets:
+      customer-support-classifier:
+        version: '2.1'
+        total_input_max: 800   # tokens; over this G02 logs a warning — nothing is trimmed
+        # BUILD-TIME budget, not a runtime knob: scripts/ci/validate-templates.sh and
+        # scripts/ci/pr-diff-token-check.py read it to block a template whose system prompt
+        # has grown past what was registered for it. The proxy never reads it. Deleting it
+        # does not raise the limit for either script: validate-templates.sh treats a missing
+        # value as "no budget" and SKIPS the check entirely, while pr-diff-token-check.py
+        # falls back to its own hard default of 500 — a different limit from the one
+        # registered here, and for this template a stricter one.
+        system_prompt_max: 400
+        author: platform-team
+        description: Classifies customer support tickets
+  G3_doc_pipeline:
+    enabled: true
+    chunk_size_tokens: 400
+    chunk_overlap_tokens: 50
+    sparse_model: Qdrant/bm25
+    dense_model: all-MiniLM-L6-v2
+    rag_fallback:
+      enabled: true
+      collection: rag_docs
+      top_k: 5
+      similarity_threshold: 0.85
+      strategies:
+      - strict_hybrid
+      - relaxed_hybrid
+      - dense_only
+      - sparse_only
+    fine_tuning:
+      enabled: true
+      min_docs: 100
+      stability_days: 30
+      auto_trigger: false
+    # (tika_sidecar.{enabled,url} removed 2026-10-01: nothing read them. The doc-pipeline
+    #  job reaches Tika through its own TIKA_SIDECAR_URL env var.)
+  G4_bypass:
+    enabled: true
+    database_first: true
+    db_cache_ttl_seconds: 60         # how long DB-resolved bypass rules are cached before re-fetch
+    default_confidence_threshold: 0.7
+    keyword_weight: 0.4
+    pattern_weight: 0.6
+    rules:
+    - name: order-status
+      rule_id: bypass-002
+      category: order
+      confidence_threshold: 0.75
+      keywords:
+      - order status
+      - track my order
+      - where is my order
+      patterns:
+      - order\s*#?\s*\d+
+      backend_url: ''
+  G5_cache:
+    enabled: true
+    # tenant (default) | tenant+model | tenant+system | tenant+model+system
+    #   tenant        — tenant-only isolation (keys byte-identical to pre-feature)
+    #   +model        — also key on the REQUESTED model, so a multi-provider tenant
+    #                   never gets one model's answer served for another
+    #   +system       — also key on a fingerprint of the SYSTEM PROMPT. The L2
+    #                   semantic key embeds user turns ONLY (a long system prompt
+    #                   would dominate/truncate the embedding window), so without
+    #                   this the key is blind to the system prompt: the same user
+    #                   question under a RESTRICTIVE prompt can be served an answer
+    #                   cached under a laxer one, bypassing the scope/persona/format
+    #                   constraint. Enable if one tenant runs several personas, apps,
+    #                   or agents through the same key. Costs some hit-rate.
+    cache_scope: tenant
+    l1_ttl_seconds: 3600
+    # 384-dim local model, pre-baked into the proxy image and pinned to an immutable
+    # HF revision in the Dockerfile (ARG L2_EMBEDDING_REVISION, currently
+    # 5c38ec7c405ec4b44b94cc5a9bb96e735b38267a). If you change this model name, bump
+    # that Dockerfile ARG to the matching revision and rebuild — the two must stay in
+    # sync, and a dimension change also requires migrating the cache_l2 pgvector table.
+    l2_embedding_model: BAAI/bge-small-en-v1.5
+    # Cosine similarity a stored question must reach to be served for a new one. 0.95 since
+    # 2026-10-16 (it was 0.9): questions differing only in an entity ("Gold"/"Silver" tier,
+    # "Windows"/"Linux") reached 0.9 in 6 of 30 test pairs and never reached 0.95, while
+    # genuine paraphrases reached 0.9 in only 2 of 20. An embedding cannot separate opposite
+    # meanings at any threshold ("available" / "not available" scored 0.97), so this narrows
+    # the risk and does not remove it; `x_cache_semantic: false` turns semantic reuse off per
+    # request. Lower = more cache hits, more wrong-answer risk.
+    l2_similarity_threshold: 0.95
+    l2_max_embed_chars: 2000
+    # A semantic (L2) match is served only when both questions carry the same numbers in
+    # the same order: an embedding barely tells "total of orders 50.0, 67.35" from
+    # "835.0, 670.0", so without this one batch's answer is served for another's.
+    # Questions without digits are unaffected. false = match on similarity alone.
+    l2_literal_guard: true
+    semantic_skip_multiturn: true
+    l2_ttl_seconds: 86400
+    # The semantic (L2) tier on/off. false = exact-match (L1) caching only: no embedding, no
+    # cache_l2 lookup or store, and no embedding-model warm-up at start. For deployments
+    # where serving a NEAR-match answer is never acceptable (agent pipelines, code
+    # generation). Per request, `x_cache_semantic: false` does the same.
+    l2_enabled: true
+    step_cache_enabled: true
+    step_cache_ttl_seconds: 86400
+    # (l3_enabled / l3_similarity_threshold removed 2026-09-07 — the L3 tier never
+    #  executed and its library has been dropped. L1 exact-match and L2 semantic are
+    #  the shipped cache tiers. A leftover l3_* key in an existing config is ignored.)
+    # Adaptive TTLs: over the last one to two hours of lookups, a hit rate above 80%
+    # stores new entries for 25% longer and one below 20% for 25% shorter, kept within
+    # min/max multiplier x the TTL above. false = the TTLs above, as configured.
+    auto_ttl_enabled: true
+    auto_ttl_min_multiplier: 0.25
+    auto_ttl_max_multiplier: 2.0
+  G6_routing:
+    enabled: true
+    classifier: cascade
+    cascade_execution: false
+    # Routing STRATEGY — picks WHICH model of a chosen tier's list to use (the classifier
+    # picks the tier; this picks within it). Default `priority` = the tier's first model,
+    # byte-identical to the historical behaviour (the 54.1%% savings baseline is unchanged
+    # until a tenant opts into a non-default strategy). Options:
+    #   priority       — always the first model of the tier (default)
+    #   round_robin    — rotate across the tier's models (per worker)
+    #   weighted       — deterministic split by `strategy_weights` (model → weight)
+    #   least_latency  — the tier model with the lowest observed served-latency EWMA
+    #                    (one whose call just failed is passed over for 5 minutes)
+    #   canary         — `canary_pct`%% of traffic to the SECOND model, rest to the first
+    strategy: priority
+    strategy_weights: {}       # e.g. {gpt-4o-mini: 9, gpt-4o: 1} for the `weighted` strategy
+    canary_pct: 0              # % to the canary (2nd model) when strategy: canary
+    least_latency_alpha: 0.3   # EWMA smoothing for `least_latency` (0-1; higher = reacts
+                               # faster to recent calls, lower = smoother/slower to react)
+    # When a routed tier model's provider has no usable credential (e.g. an OpenAI-free
+    # deployment left the default gpt-4o tiers): `fallback` (default) serves the caller's
+    # own requested model — cost-routing simply no-ops; `error` returns a clean 503.
+    on_unreachable_tier: fallback
+    # A model that matches no providers[].models / model_prefixes, on a path that does not
+    # route (G06 off, or no tiers): `substitute` (default) serves proxy.default_model and
+    # discloses it (x-tokenlean-model-substituted); `reject` answers 400
+    # (code model_not_configured) without calling any provider.
+    on_unconfigured_model: substitute
+    tiers:
+      simple:
+      - gpt-4o-mini
+      medium:
+      - gpt-4o
+      complex:
+      - gpt-4-5
+    # Per-provider routing ladders (ships enabled). When present, this TAKES PRECEDENCE
+    # over the flat `tiers` above and G06 routes each request WITHIN the requested model's
+    # own provider family — a Claude request cascades claude-haiku-4-5 → claude-sonnet-5, a
+    # Gemini request gemini-flash → gemini-pro, etc. — instead of the flat OpenAI-only tiers
+    # silently rerouting every non-OpenAI request to gpt-4o-mini. A provider you DELETE here
+    # (or never add) has no ladder, so its requests PASS THROUGH untouched — G06 never
+    # cross-provider misroutes. The `openai` ladder mirrors the flat `tiers` above, so OpenAI
+    # routing is byte-identical whether or not this block is present (the published savings
+    # baseline is unaffected). Keys are provider `name`s from the `providers:` list; a model
+    # is matched to its provider by that provider's `model_prefixes`. Trim/edit freely.
+    # Ladders reference each provider's own models[] declared above; a model is matched to
+    # its provider by that provider's model_prefixes. openai/anthropic/gemini/mistral/cohere
+    # declare a real cheap→strong cascade; the single-model providers (groq/bedrock/deepseek/
+    # xai, and azure whose deployment names are yours to set) route every tier to one model —
+    # still on-provider, no misroute — add a stronger id to simple/medium/complex to turn on a
+    # true cascade for them. A tier a TENANT set (portal model preferences, or
+    # tenants.<id>.groups.G6_routing.tiers) replaces that tier of the ladder for every
+    # request from that tenant, even one for another provider's model.
+    tiers_by_provider:
+      openai:
+        simple: [gpt-4o-mini]
+        medium: [gpt-4o]
+        complex: [gpt-4-5]
+      anthropic:
+        simple: [claude-haiku-4-5]
+        medium: [claude-sonnet-4-5]
+        complex: [claude-opus-4]
+      gemini:
+        simple: [gemini-flash-latest]
+        medium: [gemini-pro-latest]
+        complex: [gemini-pro-latest]
+      azure:
+        simple: [azure/gpt-4o-mini]
+        medium: [azure/gpt-4o]
+        complex: [azure/gpt-4o]
+      bedrock:
+        simple: [bedrock/amazon.nova-micro-v1:0]
+        medium: [bedrock/amazon.nova-micro-v1:0]
+        complex: [bedrock/amazon.nova-micro-v1:0]
+      mistral:
+        simple: [ministral-3b-latest]
+        medium: [mistral-small-latest]
+        complex: [mistral-small-latest]
+      groq:
+        simple: [groq/llama-3.1-8b-instant]
+        medium: [groq/llama-3.1-8b-instant]
+        complex: [groq/llama-3.1-8b-instant]
+      cohere:
+        simple: [command-r7b-12-2024]
+        medium: [command-r]
+        complex: [command-r]
+      deepseek:
+        simple: [deepseek-chat]
+        medium: [deepseek-chat]
+        complex: [deepseek-chat]
+      xai:
+        simple: [grok-3-mini]
+        medium: [grok-3-mini]
+        complex: [grok-3-mini]
+    # ── ALTERNATIVE: cross-provider cost cascade ────────────────────────────────
+    # The default above routes each request WITHIN its own provider's family. If you'd
+    # rather route by COMPLEXITY *across* providers (the cheapest capable model anywhere,
+    # ignoring which model the caller asked for), DELETE `tiers_by_provider` above and set
+    # the flat `tiers` to a mixed-provider ladder — e.g.:
+    #   tiers:
+    #     simple:  [gpt-4o-mini]        # openai  — cheap
+    #     medium:  [gemini-2.5-flash]   # gemini  — mid
+    #     complex: [claude-sonnet-4-5]  # anthropic — strong
+    # Needs a key for EVERY provider in the ladder (an unkeyed tier falls back per
+    # on_unreachable_tier). Down-routing (simple→cheaper) works as-is; routing UP to a
+    # provider costlier than the caller's requested model is blocked by the cost floor
+    # unless you also set allow_escalation_above_requested: true.
+    judge_model: ${G06_JUDGE_MODEL:-}
+    judge_timeout_ms: 2000
+    cascade_confidence_threshold: 0.7
+    # Max cost DELTA (input + expected output, vs the previous tier) a single cascade
+    # escalation may add. Small requests jumping into a pricey tier are blocked here.
+    max_escalation_cost_usd: 0.01
+    # Over-escalation guards. cap_to_classified_tier (execution cascade only): the
+    # cascade may climb at most to the tier the request itself classifies as, so a
+    # plain "medium" query is never pushed to the expensive complex tier (an
+    # x_complexity override bypasses the cascade entirely). allow_escalation_above_
+    # requested: when false (default), G06 never routes to a model costlier than the one
+    # the caller requested — enforced BOTH in the execution cascade AND on the label
+    # paths (heuristic / llm_judge / routellm / jev), where a mis-classified "medium"/"complex"
+    # tier that outprices the requested model reverts to the requested model. Routing
+    # only ever saves cost, never adds it. Explicit x_complexity user overrides are exempt.
+    cascade_cap_to_classified_tier: true
+    allow_escalation_above_requested: false
+    # No-judge response-adequacy scores (used when judge_model is empty), compared
+    # against cascade_confidence_threshold to decide whether to escalate. Scores the
+    # tier's actual answer: ok = clean stop, truncated = hit max_tokens, refusal =
+    # content-filter / "I can't help" opening, empty = blank content.
+    response_confidence:
+      ok: 0.85
+      truncated: 0.30
+      refusal: 0.40
+      empty: 0.0
+    # Output cap injected on the tier-1 probe ONLY when the caller sent no max_tokens
+    # (a caller-supplied max_tokens always wins). 0 = never inject; the provider's
+    # default applies. Bounds the cost of the cheap probe call.
+    cascade_tier1_max_tokens: 512
+    # If the cascade settles on the tier-1 probe as the FINAL answer but that answer
+    # was truncated by the injected cap above (finish_reason == "length"), retry the
+    # tier-1 model once without the cap before serving. A self-inflicted truncation
+    # must never be the customer's answer. No-op when the caller set max_tokens.
+    cascade_retry_uncapped_on_truncation: true
+    # Expected output tokens used ONLY for cost estimates (escalation guards +
+    # cost-floor) when the request carries no max_tokens.
+    expected_output_tokens_estimate: 512
+    routellm:
+      url: http://routellm-svc:8081
+      # bert: a local classifier with an Apache-2.0 checkpoint. sw_ranking embeds the prompt
+      # with the tenant's own OpenAI key (without one G06 uses bert), and causal_llm is a 16 GB
+      # Meta Llama 3 derivative. RouteLLM's mf router is not offered: its checkpoint was
+      # published with no licence (a config naming it gets bert, with a warning).
+      router: bert
+      # ~50% of requests to strong_model. Each router has its own scale (RouteLLM's
+      # calibration): bert 0.4066, sw_ranking 0.21647, causal_llm 0.0962.
+      threshold: 0.4066
+      timeout_ms: 500
+      warn_every_s: 3600       # a tenant whose sw_ranking runs as bert (no key) is warned this often
+      weak_model: gpt-4o-mini
+      strong_model: gpt-4o
+      model_map:
+        weak: simple
+        strong: complex
+    # Jev (TypeSafe's decision model; used when classifier: jev) rates each request on these
+    # levels, lowest first (2-10), and each level names the tier whose models answer it. G06
+    # takes the lowest level whose probability, with every level below it, reaches
+    # enough_probability: 0.5 is Jev's middle estimate; raise it to route up when Jev is
+    # unsure. Jev sees the request's own text, never the system prompt, newest
+    # max_state_chars kept. The key is each TENANT's own, stored in the portal under
+    # key_provider (a self-hosted proxy reads LLM_KEY_<KEY_PROVIDER>), which must not be an
+    # LLM provider's name. No key, an error, or an answer that fails the check: the request
+    # uses the default classifier (cascade) and routing_mode says "jev+fallback:<reason>".
+    # Set this block here or under tenants.<id>.groups.G6_routing, never in a params file:
+    # those merge one level deep, so they would drop the rest of G6_routing.
+    jev:
+      url: https://api.typesafe.ai/v1/systemone   # any TypeSafe-compatible endpoint
+      model: jev-1.13.0          # pinned: jev-latest moves without notice
+      key_provider: typesafe
+      timeout_ms: 1000
+      max_state_chars: 4000
+      enough_probability: 0.5
+      key_cache_s: 60            # a key lookup, found or missing, is reused this long
+      warn_every_s: 3600         # one warning per tenant and reason per this many seconds
+      instructions: "How hard is this request for an AI model to answer well?"
+      levels:
+        - {name: low,     tier: simple,  describe: "A quick fact, definition, greeting, or short rewrite"}
+        - {name: medium,  tier: medium,  describe: "Explaining, comparing or summarising, with some reasoning"}
+        - {name: high,    tier: complex, describe: "Multi-step analysis, writing or fixing code, careful reasoning"}
+        - {name: complex, tier: complex, describe: "Deep design, research, proofs, or long multi-part work"}
+    # ── Declarative routing rules (default off) ────────────────────────────────
+    # Deterministic, in-proxy per-tenant policy evaluated BELOW the caller's
+    # x_complexity override and ABOVE the classifier. First matching rule (by
+    # `priority` desc) wins. Empty/absent = no-op → the classifier decides as usual
+    # (byte-identical, protects the savings baseline). Per-tenant overrides REPLACE
+    # this list wholesale (they never append). Authorable from the [Enterprise]
+    # portal "Routing" tab; see docs/config-reference.md for the full schema.
+    rules: []
+    # Example (uncomment + adapt):
+    # rules:
+    #   - id: contracts-to-strong        # unique, ^[A-Za-z0-9._-]{1,64}$
+    #     description: "Legal review → the strong model"
+    #     enabled: true
+    #     priority: 100                  # higher evaluated first; ties keep list order
+    #     match:                         # every PRESENT key must pass (AND); any-of within a list
+    #       keywords: [contract, nda, "legal review"]   # case-insensitive substring
+    #       patterns: ['\bMSA-\d+\b']    # regex (IGNORECASE, <=512 chars each)
+    #       min_prompt_tokens: 0         # 0/absent = no floor
+    #       max_prompt_tokens: 0         # 0/absent = no cap
+    #       models: [gpt-4o-mini]        # match the REQUESTED model
+    #       has_tools: true              # match on presence of tools
+    #       params: {x_team: [legal]}    # X-Team header → x_team param; AND across keys
+    #       user_ids: [alice@acme.test]  # matches ctx.user_id (X-User-ID), NOT a param
+    #     action:                        # need >=1 of tier | model | overrides
+    #       tier: complex                # pin a tier (strategy layer then picks the model)
+    #       model: gpt-4-5               # OR pin an exact model (wins over tier)
+    #       allow_escalation: false      # true = opt this rule out of the cost-floor
+    #       overrides:                   # whitelisted knob overrides for matched traffic
+    #         strategy: canary
+    #         canary_pct: 10
+    #         max_escalation_cost_usd: 0.02
+    #         cascade_confidence_threshold: 0.7
+    #         expected_output_tokens_estimate: 512
+  G7_retrieval:
+    enabled: true
+    chunk_size_tokens: 256
+    top_k: 3
+    max_top_k: 50          # the most a caller's X-Rag-Top-K header may ask for
+    top_k_after_rerank: 1
+    similarity_threshold: 0.85
+    dense_model: all-MiniLM-L6-v2
+    sparse_model: Qdrant/bm25
+    reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2
+    rrf_k: 60
+    rrf_alpha: 0.5
+    max_age_days: null         # freshness soft-filter: drop retrieved chunks older than
+                               # N days (by source_date, else ingested_at). null/0 = off.
+                               # Chunks with no timestamp (pre-freshness corpora) are kept.
+    jit_retrieval_enabled: true
+    # When true, JIT retrieval only runs if the caller signalled RAG intent
+    # (rag_query param or X-Rag-Collection header) — non-RAG chat requests skip
+    # the embed + Qdrant hybrid search + cross-encoder rerank entirely. Default
+    # false preserves the current behaviour (auto-extract a query from the last
+    # user message on every request).
+    jit_require_rag_intent: false
+    use_pgvector_fallback: false
+    max_chunk_tokens: 1000
+    max_total_context_tokens: 4000
+  G8_tools:
+    enabled: true
+    # With CONFIG_GCS_BUCKET unset (local / non-GCP) this has no bucket, and the local
+    # TOOL_REGISTRY_PATH (default config/tool-registry.yaml) is read instead - no GCS lookup.
+    registry_path: gs://${CONFIG_GCS_BUCKET}/config/tool-registry.yaml
+    max_tools_per_agent: 20
+    # Compress tool/function DESCRIPTION prose (deterministic regex, zero-LLM via
+    # prose_compress). Tool manifests ride every agentic request and descriptions
+    # are otherwise verbatim; code/paths/identifiers are preserved byte-for-byte.
+    # OFF by default since 2026-10-15 (it was on from 2026-09-06). Intent pruning below
+    # only ever acts on tools listed in `registry_path`, so until you list your own tools
+    # G8 does nothing out of the box - and that is better than this lever. Measured on a
+    # batch dataset (temperature 0): dropping one article from a tool's description
+    # ("for a batch" -> "for batch", about one token) made the model call the tool in 14 of
+    # 20 requests instead of answering from the data in the prompt (0 of 20 before), 156k
+    # tokens against 9.9k. Turn it on only after measuring it on YOUR tools.
+    compress_descriptions: false
+    compress_description_fields: [description]
+    registry_cache_ttl_seconds: 300
+    mcp_manifest_cache_ttl_seconds: 300
+    mcp_http_timeout_seconds: 10.0
+    tool_usage_ttl_days: 90
+    mcp_servers: null
+    # A daily pass, per tenant, over the registry tools the model has stopped calling (offered
+    # for the whole window, not called in it). dry_run_first: true only reports them (log +
+    # token_opt_tool_pruning_candidates); false drops them from that tenant's requests.
+    pruning:
+      enabled: true
+      inactivity_threshold_days: 30
+      dry_run_first: true
+      schedule: 0 2 * * *              # daily, UTC ("M H * * *")
+  G9_context_schema:
+    enabled: false
+    use_instructor: true
+    instructor_model: gpt-4o-mini
+    instructor_timeout_ms: 3000
+    instructor_fallback_to_heuristic: true
+    prose_min_length_chars: 80
+    prose_indicators:
+    - customer
+    - user
+    - he
+    - she
+    - they
+    - called
+    - about
+    - regarding
+    - mentioned
+    - requested
+    - explained
+    - told
+    - said
+    - asked
+    schema_fields: null
+  G10_memory:
+    enabled: true
+    memory_query_max_chars: 400
+    sliding_window_turns: 6
+    summary_model: gpt-4o-mini
+    skills_enabled: false
+    skills_qdrant_enabled: true      # false → G7's hybrid search + reranker, not a vector search
+    skills_qdrant_collection: agent_skills
+    skills_top_k: 2
+    skills_similarity_threshold: 0.7
+    mem0_enabled: false              # needs MEM0_API_URL + MEM0_API_KEY; per authenticated user (see config-reference)
+  G11_output:
+    enabled: true
+    enforce_max_tokens: true
+    skip_max_tokens_for_reasoning: true
+    # Cap discovery is EVIDENCE-based: p95 of observed COMPLETED answer sizes ×
+    # tighten_multiplier, per (tenant, workflow_id, template_id) bucket. With no
+    # evidence yet, NO cap is applied — output length is not derivable from input
+    # length, and a guessed cap truncates long-form answers on fresh deploys.
+    #
+    # SHIPS OFF (2026-09-08). While it shipped on, the evidence bucket was shared by
+    # every workload a tenant runs (both ids default to "default" and ordinary traffic
+    # sets neither), so a long-form answer was capped from short-form ones: 4 of 54
+    # answers cut on the DS1 ablation, 6 of 27 probes cut on a live readiness sweep.
+    # It saved no input tokens. Turn it on only for traffic that sets workflow_id or
+    # template_id — requests that set neither are never capped, by design.
+    #
+    # Recording of completion sizes is gated on the SAME switch. With it off nothing reads the
+    # history, so nothing writes it: the ids are caller-supplied, and a client stamping a unique
+    # workflow id per request would otherwise create a 7-day Redis sorted set per request that no
+    # code path ever consults. Turning it on starts from an empty bucket, and G11 declines to cap
+    # until history_min_entries completed answers exist. Declining is the safe cold start.
+    #
+    # tighten_multiplier REDUCES truncation and, with the sticky floor, RECOVERS from it - it does
+    # not stop it. The measured worst-case same-prompt spread was 2.03x against a 2.0x multiplier,
+    # and history_max_entries 200 at tighten_quantile 0.95 leaves ~10 of 200 retained answers above
+    # the percentile by construction. The first occurrence in a bucket can still be cut.
+    #
+    # Streamed requests are never capped by this path: a streamed response skips the response
+    # pipeline, so a cap applied to it could never be recorded or corrected.
+    #
+    # An estimate below 64 tokens is treated as a degenerate sample and NOT applied. A genuinely
+    # short workload is therefore never capped - the highest-savings case is the one refused. That
+    # is deliberate: not capping costs money, capping wrongly costs the customer their answer.
+    # fallback_max_tokens is a HARD ceiling on every answer, applied whether or not
+    # max_tokens_auto_tighten is on. It is NOT a warm-up value: it does not lift once a cap
+    # has been learned, and it applies to requests carrying no workflow_id/template_id too -
+    # the ones the learned path refuses to cap at all. It has no escalation path either: a
+    # truncation it causes raises no sticky floor, so a request it cuts is cut identically
+    # forever. The proxy logs a WARNING naming this key when that happens. null = no cap, and
+    # null is the default. Set it above your longest expected answer, or leave it alone.
+    fallback_max_tokens: null
+    truncation_backoff_multiplier: 2.0  # an answer WE cut re-enters the evidence at cap×this AND raises a sticky floor the percentile can never undercut
+    force_json_for_all: false
+    provider_structured_output: true
+    max_tokens_feedback_loop: true
+    max_tokens_auto_tighten: false      # opt-in; see the note above. true = derive caps from this bucket's observed answer sizes
+    tighten_quantile: 0.95
+    tighten_multiplier: 2.0             # headroom over the quantile; 1.2 was below the model's own same-prompt spread (measured up to 2.03×) and truncated answers it had already produced
+    history_min_entries: 5              # completions required in a bucket before any cap is derived from it
+    history_max_entries: 200            # newest-N retained per bucket; the percentile is taken over all of them, not a sliding window
+    max_tokens_history_ttl_days: 7
+    default_model_max_tokens: 4096
+    model_max_tokens:
+      gpt-4o: 16384
+      gpt-4o-mini: 16384
+      gpt-4-turbo: 4096
+      gpt-4: 8192
+      gpt-3.5-turbo: 4096
+      claude-3-opus: 4096
+      claude-3-sonnet: 4096
+      claude-3-haiku: 4096
+      claude-3.5-sonnet: 8192
+      claude-3.5-haiku: 8192
+      claude-4-sonnet: 16384
+      gemini-2.5-flash: 8192
+      gemini-2.5-pro: 8192
+      mistral-large: 8192
+      mistral-small: 8192
+      deepseek-chat: 8192
+      deepseek-reasoner: 8192
+      grok: 8192
+      command-r: 4096
+      command-r-plus: 4096
+      llama: 8192
+    verbosity_steering:
+      enabled: false
+      # Bundled terse-output preset appended to the system prompt: lite | full | ultra
+      # (adapted from caveman-shrink, MIT — see docs/oss-licenses.md). Steers the model
+      # toward shorter answers (the biggest uncovered savings axis — output tokens cost
+      # far more/token than input). Safety carve-outs keep security/destructive-action
+      # text in normal prose. Folded into the G05 cache key so terse/verbose never mix.
+      # Default off → byte-identical. SAVINGS feature: prove with a pitch-test-plan
+      # quality-gate run before enabling by default (LLM judge may penalise terseness).
+      level: ''
+      default_suffix: ''      # non-empty explicit suffix overrides the preset
+      per_tenant_suffix: {}   # {tenant_id: suffix} — highest-priority per-tenant override
+    # Output JSON-schema validation (Task 4). Only acts when the request asked for
+    # structured output (response_format json_object/json_schema or a json_schema param).
+    validate_output: off        # off (default, no-op) | flag | repair | block
+    repair_fallback: flag       # when repair's single re-ask is still invalid: flag | block
+    repair_max_tokens: null      # cap on the corrective re-ask (null → reuse the request's max_tokens)
+    validate_block_message: 'The response did not conform to the required output schema and was withheld.'
+    output_holdout:
+      enabled: false
+      fraction: 0.05
+      sticky_key: workflow_id
+  G12_reasoning:
+    enabled: true
+    default_effort: medium
+    # For a request that names no reasoning, capped at the provider's own default (as G25
+    # caps its choice): Anthropic gets no thinking, the o-series stays at medium. Raise a
+    # provider's with providers[].default_reasoning_effort. A tenant's own value is used as is.
+    # Reasoning models bill their hidden thinking INSIDE the caller's output budget, so
+    # a budget sized for the answer alone is spent entirely on thinking and the caller
+    # is billed in full for an EMPTY reply (finish_reason "length", no content).
+    # Measured 2026-09-07: 18 of 54 o4-mini requests sent with the caller's own
+    # max_completion_tokens: 1024 came back empty -- 44.8% of that arm's spend for zero
+    # characters. When the proxy calls a reasoning model it now raises the output budget
+    # to answer_floor_tokens + allowance_tokens[effort], capped by max_output_tokens,
+    # and DISCLOSES the raise (_token_opt.output_budget_raised +
+    # x-tokenlean-output-budget-raised). This RAISES what a request can be billed for
+    # output; the alternative is paying nearly the same for nothing.
+    # Operator-only on purpose: setting an allowance to 0 re-creates the defect, so it
+    # is not a tenant-facing portal knob. Applies ONLY to reasoning-capable models and
+    # ONLY when the caller set a budget too small -- every other request is byte-identical.
+    reasoning_headroom:
+      enabled: true                 # false -> forward the caller's budget unchanged
+      answer_floor_tokens: 512      # room reserved for the ANSWER, after thinking
+      allowance_tokens:             # room reserved for hidden reasoning, per effort tier
+        # `off` is not zero here: this family reasons intrinsically and cannot be turned
+        # off (see G12's off_unsupported), so an `off` request still needs room -- just
+        # the smallest amount. Setting it to 0 re-creates the empty-answer defect for
+        # exactly the callers who asked for the cheapest possible request.
+        'off': 1024
+        low: 1024
+        medium: 4096
+        high: 16384
+      # Effort assumed when the caller sends none. The middle tier, not the cheapest:
+      # an absent reasoning_effort means the model uses its own default, and assuming
+      # `low` would under-provision exactly the unlabelled requests.
+      assumed_effort: medium
+      max_output_tokens: 32768      # never raise a budget above this
+      max_output_tokens_by_model: {}  # optional per-model ceiling, e.g. {o4-mini: 100000}
+    # NOTE: a `provider_params` block (model_fragment / param_key / budget_key /
+    # is_effort_key) used to live here. NO code ever read it -- the adapters read
+    # `effort_map` below and nothing else. Removed 2026-09-04 so an operator cannot
+    # spend time tuning a key that has never had any effect.
+    # Injected into the system prompt to bound how much the model NARRATES its
+    # reasoning. These bound VERBOSITY, never COMPLETENESS: measured on DS18
+    # (2026-09-07) the previous medium text ("One brief step max, then final answer")
+    # dropped the named subject of the question on 4 of 30 graded reasoning requests
+    # -- ds18-03 in all three repeats -- while saving 49% of reasoning tokens. A budget
+    # instruction that can cost a required fact is not a saving (quality wins). If you
+    # re-word these, keep "do not skip a step the correct answer requires".
+    reasoning_suppression_prompts:
+      low: '[BUDGET] Give the final answer directly, without narrating your reasoning. The answer itself must still be complete.'
+      medium: '[BUDGET] Reason concisely. Do not skip any step a correct answer requires; give the final answer once.'
+      high: null
+    effort_map:
+      # `off` = do not opt this request into optional reasoning. Realised per provider:
+      # Anthropic OMITS `thinking` (its own default -- genuinely off), Gemini sends an
+      # explicit thinking_budget: 0, OpenAI omits `reasoning_effort`. NOTE the o-series
+      # still reasons -- omitting the param selects the model's default, it does not
+      # disable anything, so `off` there is recorded as `off_unsupported` and no
+      # reasoning saving is claimed. There are no per-provider values to set: `off` is
+      # the ABSENCE of a budget, and this row exists so the tier is visible to operators.
+      # QUOTED deliberately: YAML 1.1 parses a bare `off` as the BOOLEAN False,
+      # so `off:` here would become the key False and never match the string tier.
+      'off': {}
+      low:
+        openai: low
+        anthropic_tokens: 1000
+        gemini_thinking_budget: 512
+      medium:
+        openai: medium
+        anthropic_tokens: 5000
+        gemini_thinking_budget: 4096
+      high:
+        openai: high
+        anthropic_tokens: 10000
+        gemini_thinking_budget: 16000
+  G13_batch:
+    enabled: true
+    max_batch_size: 50
+    flush_interval_ms: 500
+    default_model: gpt-4o-mini
+    redis_stream_prefix: tok_opt:batch
+    consumer_group: proxy-batch-consumers
+    # consumer_name: unset (recommended) gives each process its own. Instances sharing one
+    # name are a single consumer to Redis, which then cannot tell whose work an entry is.
+    max_pending_ack_ms: 30000  # a consumer holds what it is flushing; an entry nobody has
+                               # held this long (its process stopped) is retried by another
+    max_attempts: 3            # deliveries of one request before it is marked failed
+    batch_topics: []           # only these topics are batched; a request naming any other
+                               # topic is answered at once (nothing would read it)
+    max_backlog: 10000         # queued requests per tenant per topic before its new ones are answered at once
+    provider_native: false
+    completion_window: 24h
+    poll_interval_seconds: 30
+    toon_auto_detect: false
+    # Leave the data as JSON when the request offers tools. Rewritten as pipe rows, an
+    # inline array stopped reading as the data to the model: on a batch with a fetch tool
+    # on offer it called the tool in 10 of 20 requests (0 of 20 without the rewrite),
+    # roughly 11x the tokens. false = rewrite regardless.
+    toon_skip_when_tools: true
+    toon_min_rows: 2
+    toon_uniform_threshold: 1.0
+    toon_allow_nested: false
+    toon_require_net_savings: true
+    toon_max_block_chars: 20000
+  context_editing:
+    enabled: false
+    strategy: clear_tool_uses_20250919
+    clear_tool_inputs: false
+  G14_tool_output:
+    enabled: true
+    field_whitelist: {}
+    spreadsheet_compression: true
+    max_field_tokens: 200            # ⚠ truncate any single tool-result text field above this
+    max_result_tokens: 500           # ⚠ truncate/compact an entire tool result above this
+  G15_server_compute:
+    enabled: true
+    headroom_mcp_server: true
+    hooks: []
+  G16_agent_arch:
+    enabled: true
+    max_system_prompt_tokens: 4096
+    system_prompt_overflow: warn          # warn | compact — what to do when the system prompt exceeds the cap.
+                                          #   warn    = leave the customer's prompt byte-identical, record a warning (default)
+                                          #   compact = enforce the cap by dropping the MIDDLE, keeping the opening role and the
+                                          #             closing policy, with an explicit elision marker. Still lossy in the middle.
+    max_tools_per_agent: 20               # keep all tools at/below this count; prune only above it
+    tool_selection_strategy: relevance    # relevance | order — when over the cap, keep the tools most relevant to the request (relevance) vs the first N by list order (order)
+  G17_loop:
+    enabled: true
+    max_iterations: 10
+    # Budget per request that carries a workflow_id, measured against that conversation's
+    # own prompt (remaining = budget - prompt tokens), reported in x-token-opt-state.
+    starting_budget_tokens: 10000
+    # Opt-in: when remaining < compact_output_below_tokens, append "Keep your answer brief"
+    # to the end of the system prompt.
+    compact_output_enabled: false
+    compact_output_below_tokens: 500
+    confidence_stop_threshold: 0.95
+    wall_clock_timeout_seconds: 300
+  G18_observability:
+    enabled: true
+    # Langfuse trace emission is OFF by default (OSS). Prometheus + savings metrics
+    # run regardless — this flag gates only Langfuse traces. The commercial deploy
+    # sets it true; Langfuse keys are still required for traces to actually emit.
+    # Locally, true also starts Langfuse: the deploys add compose's `tracing` profile.
+    langfuse_enabled: false
+    # Not read by the proxy: the Langfuse endpoint is the LANGFUSE_HOST env var (local compose:
+    # http://langfuse:3000). Kept only so existing configs still parse the same.
+    langfuse_host: http://langfuse-svc
+    prometheus_enabled: true
+    # Raw prompt/response text in Langfuse traces. Off: every tenant's traces share one
+    # Langfuse project. A request whose PII G29/G31 found and left in place (flag/block) is
+    # traced without its text even when on; spans keep their counts either way.
+    capture_trace_content: false
+    turn_efficiency_enabled: true
+    tool_governance_enabled: true
+    # Needs the traceloop-sdk package, which the default image does not include.
+    openllmetry_enabled: false
+    openllmetry_endpoint: ''
+    turn_efficiency_baseline_multiplier: 2.0
+    tool_governance_days: 30
+    # Bound the `team`/`feature` Prometheus label values so a caller (or a misconfigured
+    # gateway) cannot grow label cardinality without limit — each distinct value is a new,
+    # never-evicted series. A list means only "default" + the listed values keep their own
+    # label, everything else is folded to "other"; "*" keeps every value as-is. Omitted,
+    # `feature` (any caller's X-Feature) keeps only "default", and `team`, already the
+    # TRUSTED team (a gateway key's X-Team, else "default"), keeps its value. Operator-only;
+    # per-tenant via the operator overlay.
+    label_values: {}
+    #  team: [checkout, search, billing]
+    #  feature: [ui-copy, ticket-classify]
+    jsonl_gcs_bucket: ''
+    jsonl_gcs_prefix: token-usage-logs
+    et_weights:
+      input: 1.0
+      cache_read: 0.1
+      output: 4.0
+    # B3 — discount-aware price book (reporting-only; refines the cost_actual estimate).
+    # reasoning_rate_multiplier > 1.0 models a reasoning-token surcharge (1.0 = none).
+    # batch_discount_multiplier applies ONLY to requests served via the native batch lane.
+    reasoning_rate_multiplier: 1.0
+    batch_discount_multiplier: 0.5
+  G19_headroom:
+    enabled: true
+    request_side_enabled: true
+    response_side_enabled: true
+    # Compress the model's ANSWER content on the response side (prose, code, logs and
+    # JSON alike). Default false: the answer is user-visible — rewriting it (deleting
+    # code comments, deduping sentences/log lines, dropping empty JSON fields) changes
+    # what the caller reads while saving nothing on that call, since the provider has
+    # already generated and billed those output tokens. Request-side compression is
+    # unaffected, and response-side tool RESULTS are compressed either way.
+    response_side_compress_answers: false
+    # Fraction of non-blank lines that must be code-shaped (or log-shaped) before a
+    # payload is treated as code/logs rather than prose. Guards against a single
+    # ``` fence or one quoted log line reclassifying a whole prose message; raise it
+    # for stricter detection, lower it if your payloads mix heavy prose with logs.
+    detect_dominance_ratio: 0.5
+    # Leave a JSON payload the USER pasted as written when the request offers tools.
+    # Rewritten into a schema+rows form, an inline array stopped reading as the data to the
+    # model: on a batch with a fetch tool on offer it called the tool in 9 of 20 requests
+    # (0 of 20 before), 6.5x the tokens. Tool results, logs, code and prose are still
+    # compressed. false = rewrite regardless.
+    skip_user_json_when_tools: true
+    min_length_to_compress: 50
+    compression_strategies:
+      json:
+        remove_empty: true
+        dedupe_keys: true
+      code:
+        strip_comments: true
+        strip_whitespace: true
+      logs:
+        dedupe_lines: true
+        truncate_long_lines: 200
+        # Lines matching one of these (whole-word, case-insensitive) are NEVER
+        # folded into the dedup count — every occurrence survives verbatim with
+        # its own timestamp. A recurring error is itself diagnostic signal (is
+        # this a one-off or is it flapping?), not noise; only low-severity
+        # boilerplate (INFO/DEBUG/WARN heartbeat lines) gets collapsed. Empty
+        # list = dedupe everything (the old, timestamp-blind behaviour).
+        always_keep_severities: [ERROR, FATAL, CRITICAL, PANIC]
+      text:
+        dedupe_sentences: true
+        max_sentence_len: 0
+  # Key is the lowercase `g20_prompt_optimizer` the middleware reads (fixed 2026-09-06 —
+  # backlog #6). It shipped as `G20_prompt_optimization`, a key nothing read, so the
+  # `enabled: true` there was a no-op and every template deploy ran with G20 OFF while
+  # readiness ticked it. `enabled: false` here is the behaviour deploys actually had;
+  # turning G20 on by default is a savings-affecting decision that needs a pitch-test-plan
+  # proof first, not a key rename.
+  g20_prompt_optimizer:
+    enabled: false
+    optimizer: builtin
+    model: gpt-4o-mini
+    eval_sample_size: 100
+    max_prompt_tokens: 4000
+    quality_threshold: 0.95
+    schedule: weekly
+  G21_cache_alignment:
+    enabled: true
+    # Prefix stabilisation (#33). Provider prompt caches match from token 0 and stop at
+    # the first differing byte, so ONE volatile value early in a system prompt (a
+    # timestamp, a session id) invalidates the whole cached prefix: every turn pays a full
+    # cache WRITE instead of a discounted read, at an identical token count.
+    # Matched spans are RELOCATED to a trailing system message, never deleted or rewritten
+    # - the model still sees them, the prefix stays byte-stable. Patterns are
+    # operator-supplied on purpose: the proxy must not guess which value is safe to move.
+    # Default off => byte-identical.
+    stabilise:
+      enabled: false
+      patterns: []
+      #   - '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z'   # ISO-8601 timestamps
+      #   - 'session[-_ ]?id[:=]\s*\S+'                # session identifiers
+      relocate_to: trailing_system   # the only supported target (see docs)
+      max_relocated_chars: 2000
+    # Shared prefix profile (#33, cross-artefact). Several internal apps that share a
+    # system prompt should land on ONE provider cache shard instead of each paying to
+    # build its own copy. Without this, convergence is accidental: the shard key is
+    # derived from system content, so prompts differing by a word never share a cache.
+    # Set per tenant, or per request via the X-Prefix-Profile header. Empty = today's
+    # content-derived behaviour.
+    prefix_profile: ""
+    providers:
+      openai:
+        auto: true
+        discount_pct: 50
+        prompt_cache_key: true
+        prompt_cache_key_len: 32
+        cache_read_multiplier: 0.5
+        # OpenAI does not surcharge cache writes - they bill at the normal input rate.
+        cache_write_multiplier: 1.0
+      anthropic:
+        # Placed only on a request carrying none of the caller's own cache_control markers:
+        # Anthropic accepts at most four, and the caller chose where its go.
+        marker: false
+        cache_type: ephemeral
+        discount_pct: 90
+        cache_read_multiplier: 0.1
+        # Anthropic bills cache CREATION at a premium: ~1.25x input on the 5-minute tier,
+        # ~2x on the 1-hour tier. Reporting these as 1.0 understated the cost of exactly
+        # the traffic that churns its prefix every turn.
+        cache_write_multiplier: 1.25
+        cache_write_multiplier_1h: 2.0
+      gemini:
+        cache_read_multiplier: 0.25
+        # Implicit caching is free to populate; explicit caching bills storage per
+        # token-hour, a different meter - so no per-write token surcharge.
+        cache_write_multiplier: 1.0
+      # New providers — cached-input discount for cost reporting (default 1.0 = none).
+      deepseek:
+        cache_read_multiplier: 0.1
+      bedrock:
+        cache_read_multiplier: 0.1
+      azure:
+        cache_read_multiplier: 0.5
+      mistral:
+        cache_read_multiplier: 1.0
+      groq:
+        cache_read_multiplier: 1.0
+      cohere:
+        cache_read_multiplier: 1.0
+      xai:
+        cache_read_multiplier: 1.0
+  g22_deduplication:
+    enabled: true
+    dedup_threshold: 0.92
+    embedding_model: BAAI/bge-small-en-v1.5
+    use_embeddings: false
+    tenant_thresholds: {}
+  G23_streaming_compression:
+    enabled: true
+    min_repeat: 3
+    ngram_size: 5
+  G28_ccr:
+    # Off by default: CCR replaces large content blocks with a [CCR:ref] token that
+    # the model resolves via the headroom_retrieve MCP tool. That only works for a
+    # client running an agent loop that calls the tool and re-sends the result; in a
+    # plain pass-through chat completion the model can't resolve the reference and
+    # answers from a gutted context. Enable only for cooperating agent clients.
+    enabled: false
+    min_tokens: 300                # replace string content blocks at/above this token count
+    ttl_seconds: 86400
+    # Advertised only to callers that ALREADY send tools: injecting tool definitions
+    # into every request would churn the cached prefix (tools are part of it) and could
+    # make a pass-through model emit tool_calls its client never asked for.
+    expose_mcp_tools: true
+    # The store is Redis-backed and CONTENT-ADDRESSED (key = sha256 of the content), so
+    # identical content from different apps in one tenant resolves to a single stored
+    # copy and concurrent writers are idempotent by construction.
+    # Send full content until a client has PROVEN it can resolve a reference; the proxy
+    # also refuses to substitute at all when the durable store is unreachable, because
+    # an unresolvable reference degrades the answer on a request that still bills 200.
+    require_proven_resolver: true
+    # How long a proof stays valid, in seconds. The record is kept in Redis, so it is
+    # shared by every uvicorn worker and every instance — a client that stops resolving
+    # is demoted to full content everywhere at once, not just on the worker that noticed.
+    # Operator-only (not a portal knob): it tunes how long trust persists, which a tenant
+    # can only misread. Lower it if clients change agent behaviour often.
+    resolver_proof_ttl_seconds: 3600
+    # Cap on model-supplied text accepted into the shared store.
+    max_store_chars: 200000
+    compress_system_prompt: false  # keep false — the system instruction must stay verbatim
+                                   # (the model can't resolve a CCR ref for it in pass-through)
+  # Reserved slot. No image/audio transform ships in this release: this proxy's token
+  # accounting does not measure image content (only text parts are counted, and nothing
+  # prices an image), so a byte-level image optimisation could not reduce a token we
+  # measure or bill, while re-encoding would silently alter your payload. Turning this
+  # on is harmless but changes nothing and records no savings. The `min_bytes`,
+  # `quality` and `provider` knobs were removed on 2026-09-07 with the library they tuned.
+  G27_multimodal:
+    enabled: false
+  G24_adaptive_bypass:
+    enabled: true
+    rules_file: config/adaptive_bypass_rules.yaml
+  G25_adaptive_reasoning:
+    enabled: true
+    # Lowest effort G25 may select. Defaults to 'off' so the G06 bridge below is
+    # not clamped away -- `off` is a rung BELOW `low`. Quoted: bare off is YAML false.
+    # Set to 'low' to guarantee every request gets at least minimal reasoning.
+    effort_floor: 'off'
+    # Highest effort G25 may select. `medium` IS the o-series provider default, so the
+    # shipped default makes G25 NON-INCREASING: it can lower reasoning effort but never
+    # raise it above what the caller would have been served anyway. Measured on DS18
+    # (2026-09-07): with a `high` ceiling the isolated G25 arm sent byte-identical
+    # prompts and spent 2.7x the reasoning tokens (+37.8% output tokens) while its own
+    # facts gate passed 30/30 -- the escalation bought no checked fact and the customer
+    # paid for it. Raise this to `high` deliberately if your workload benefits from
+    # escalation and you have measured that it does -- AND set
+    # `escalate_above_provider_default: true` below, or the provider ceiling still holds
+    # the request at the provider's own default (this knob raises the ceiling; it does
+    # not by itself license going above what the provider would have served).
+    # An unrecognised value here (a typo, a null, or a BARE `off` -- which YAML reads as
+    # the boolean false) falls back to the code default `medium` and logs a WARNING. It
+    # used to fall back to `high`, i.e. a malformed ceiling failed open to the most
+    # expensive setting the group can pick, silently, on billed traffic.
+    effort_ceiling: medium
+    # The ceiling above is not the only one: G25 also never selects an effort ABOVE the
+    # routed provider's OWN default, which each provider adapter answers for itself.
+    # `medium is the provider default` is true of the OpenAI o-series and false wherever
+    # reasoning is opt-in -- on Anthropic, extended thinking is OFF unless the request
+    # asks for it, so `effort_ceiling: medium` alone would turn thinking on and RAISE
+    # that bill under a knob documented as non-increasing. Set this true to let the
+    # config ceiling apply on its own (G25 may then escalate above the provider default);
+    # `effort_floor` above still wins either way, since that is an explicit instruction.
+    # A provider entry can also state its own default with `default_reasoning_effort`.
+    escalate_above_provider_default: false
+    extra_reasoning_prefixes: []
+    # Which message roles are scored for complexity. USER only by default: a system
+    # prompt is static across a workload, so scoring it pins every request under that
+    # prompt to the same tier -- the opposite of adaptive. Measured 2026-09-04: a
+    # one-line billing question inherited "medium" from the word 'explain' buried in an
+    # 8,150-character policy prompt, and reasoning tokens became 61% of the output bill
+    # while the answers got no longer. Add "system" back only if your system prompts
+    # genuinely vary per request.
+    scan_roles: ["user"]
+    # Effort used when NO keyword matches. This is a keyword classifier, so "no match" is
+    # the common case -- this value is the behaviour for most traffic, not an edge case.
+    # `low` cuts reasoning cost across the board but is a QUALITY trade, so the shipped
+    # default stays `medium`; change it with your own measurement.
+    default_effort: medium
+    # Reuse the complexity tier G06 ALREADY decided for routing, instead of running a
+    # second keyword classifier over the same text. The two disagree materially --
+    # 'explain'/'compare'/'analyse' are COMPLEX to G06 and MEDIUM here -- so one request
+    # got two answers to one question. When G06 classified `simple` we select `off`:
+    # nothing asked for reasoning and neither classifier thinks it is needed. Measured on
+    # DS8 (2026-09-04), reasoning was 61% of the output bill on FAQ lookup, for answers no
+    # longer than the non-reasoning arm's. Set false to restore keyword-only behaviour.
+    use_routing_complexity: true
+    # Which G06 routing tier maps to which reasoning effort. Only `simple` is mapped by
+    # default; `medium`/`complex` fall through to the keyword classifier untouched.
+    routing_complexity_map:
+      simple: 'off'
+  # ── G26 · Budget-aware context management (BACM-style) ───────────────────────
+  # Treats the model's context window as a budget assessed BEFORE the call: when the
+  # assembled prompt crosses compact_at_pct of the USABLE window (context window minus
+  # the output reservation), the older span of the conversation is compacted back down
+  # toward target_pct using the cheapest ladder rung that gets there. The most recent
+  # keep_recent_turns turns and every system message are never touched, and cuts snap to
+  # tool-safe boundaries so a tool_call_id is never orphaned (providers 400 otherwise).
+  # OFF by default — enabling it changes what long conversations send to the model.
+  # Complementary to (not a replacement for) `groups.context_editing`, which delegates
+  # the same job to Anthropic's native server-side context management for Claude traffic.
+  G26_context_budget:
+    enabled: false
+    compact_at_pct: 85             # fire when the prompt exceeds this % of the usable window
+    target_pct: 60                 # compact down toward this % (must be < compact_at_pct;
+                                   # the gap is hysteresis — it stops every later turn
+                                   # re-triggering compaction)
+    keep_recent_turns: 6           # newest EXCHANGES (user+assistant) kept verbatim — never
+                                   # compacted. Same meaning as G10's sliding window.
+    reserve_output_tokens: 1024    # output headroom when the caller sets no max_tokens
+    rungs:                         # cheapest first; each rung runs only if still over target
+      prune: true                  #   1 · drop byte-exact duplicate turns, truncate old tool results
+      compress: true               #   2 · deterministic prose compression (lossless-ish, idempotent)
+      summarize: true              #   3 · one cheap-model summary replaces the whole old span
+      drop: false                  #   4 · LOSSY last resort: drop oldest turns outright. Opt-in —
+                                   #       only reach for it when a hard fit matters more than recall
+    tool_result_max_chars: 4000    # rung 1: truncate old tool results longer than this
+    prune_min_chars: 200           # rung 1 only drops repeats at least this long — shorter
+                                   # repeats ("yes", "ok", "continue") are real conversation
+    summary_model: gpt-4o-mini     # rung 3 summariser (BYOK-resolved like any other model)
+    summary_ttl_seconds: 3600      # rung-3 summaries are cached per conversation prefix
+    summary_max_turns: 80          # how much of the old span the summariser actually reads —
+                                   # too low and the MIDDLE of a long thread never reaches it
+    summary_max_tokens: 400        # length cap on the summary it writes back
+    summary_max_input_tokens: 24000  # hard SIZE cap on what is sent to the summariser (a
+                                   # message count alone cannot stop an oversized span from
+                                   # exceeding the summariser model's own window)
+    summary_prefix_lookback: 12    # how far back to look for a cached summary of an earlier
+                                   # prefix; on a hit only the newer turns are summarised
+    metrics_enabled: true
+    default_context_window: 128000 # used when the model matches no entry below
+    model_context_window:          # TOTAL context window per model — exact key, else longest prefix
+      gpt-4o: 128000
+      gpt-4o-mini: 128000
+      gpt-4.1: 1047576
+      o4-mini: 200000
+      claude-: 200000
+      gemini-: 1048576
+  # ── Trust & Safety (G29 PII redaction, G30 injection guardrails) ─────────────
+  # Both run early and UNCONDITIONALLY — inserted after G24 and before the G04/G05
+  # gate, outside the skip_groups loops — so G24 adaptive-bypass can never disable
+  # them, bypass/cache traffic is still covered, and redaction precedes every
+  # content-persisting stage (G05 key/embedding, G07 RAG, G10 memory, G28 CCR).
+  # Defaults are NON-MUTATING (mode: flag) so the shipped config is safe and its
+  #
+  # NOTE ON `off`: YAML resolves an unquoted `off` (and `no`) to the boolean false.
+  # The proxy maps that back to the string "off" for the groups that have an `off`
+  # mode (G29, G32), so both `mode: off` and `mode: "off"` work. Quoting is still
+  # clearer, and is what every example below uses.
+  # token accounting is unchanged. Override per-tenant under
+  # tenants.<id>.groups.G29_pii_redaction / .G30_guardrails.
+  G30_guardrails:
+    enabled: true
+    mode: flag                 # allow | flag | block. flag = detect + record + pass
+                               # (default, non-mutating). block = refuse with a
+                               # content-filter 200. allow = passthrough (no scan).
+    threshold: 0.5             # minimum rule severity to fire (raise for higher confidence)
+    scan_roles: [user]         # only untrusted (user) content is scanned by default
+    metrics_enabled: true
+    extra_rules: []            # [[id, category, severity, regex], …] operator/managed additions
+    # block_message: "This request was blocked by the safety guardrails."
+    scan_response: false       # opt-in: also scan the MODEL'S OUTPUT for injection /
+                               # jailbreak content (a model echoing an attack payload or
+                               # emitting unsafe instructions). Default off = unchanged.
+    response_mode: flag        # flag | block (when scan_response). flag = detect + record;
+                               # block = withhold the unsafe answer with a content-filter 200.
+    # response_block_message: "The response was withheld by the safety guardrails."
+  G29_pii_redaction:
+    enabled: true
+    mode: flag                 # off | flag | mask | block. flag = detect + record only
+                               # (default, non-mutating). mask = replace in place;
+                               # block = refuse a request that contains PII.
+    reversible: true           # mask mode: the model sees numbered placeholders and the
+                               # non-streaming response restores them for the data owner.
+    scan_roles: [user, assistant, tool]   # roles scanned (system prompt left untouched)
+    entities: []               # empty = all built-in PII; or narrow, e.g. [EMAIL, CREDIT_CARD].
+                               # PHI is opt-in: add health entities explicitly
+                               # ([DEA, NPI, MRN, ICD10]) or the `phi` shortcut token.
+    phi: false                 # true = ALSO scan health identifiers (DEA/NPI/MRN/ICD-10,
+                               # precision-biased: DEA/NPI checksum-gated, MRN/ICD-10 need a
+                               # medical context cue). Default off — PII-only, unchanged.
+    use_presidio: false        # optional higher-recall backend (needs presidio-analyzer)
+    metrics_enabled: true
+    # block_message: "This request was blocked because it contained personal data."
+  # ── Context-Trust (G31 indirect prompt-injection defence) ────────────────────
+  # G30 scans the untrusted USER prompt; G31 scans content INJECTED by retrieval
+  # (G07) and memory (G10) into system/tool roles — the indirect / RAG injection
+  # path that G30 (running earlier) cannot see. Runs after the G07/G10 stages and
+  # is NON-BYPASSABLE (not gated by skip_groups). Default mode: flag (non-mutating).
+  G31_context_trust:
+    enabled: true
+    mode: flag                 # allow | flag | block | strip. flag = detect + record +
+                               # pass (default, non-mutating). block = content-filter 200.
+                               # strip = drop the poisoned injected message/part & continue.
+                               # allow = passthrough (no scan).
+    threshold: 0.5             # minimum rule severity to fire
+    scan_roles: [system, tool] # roles that retrieval/memory inject into (user is G30's job)
+    metrics_enabled: true
+    extra_rules: []            # [[id, category, severity, regex], …] your own additions
+    # Managed rules (the Enterprise feed writes them to managed_extra_rules): record = a
+    # match is counted and audited and the request is left alone; enforce = they act under
+    # `mode` like any other rule. A tenant can opt in (managed_rules_enforce: true) but
+    # cannot turn off an enforce set here.
+    managed_rules: record
+    # block_message: "Retrieved context contained a prompt-injection attempt."
+    # ── PII pass over retrieved context (opt-in; same engine as G29) ──
+    pii_mode: off              # off (default) | flag | mask | block. Scans the SAME
+                               # system/tool spans for PII (email/SSN/card/phone/IPv4 +
+                               # optional PHI). mask = irreversible [EMAIL] placeholders
+                               # (retrieved PII is never restored). block = content-filter 200.
+    # pii_entities: []         # subset of EMAIL/US_SSN/CREDIT_CARD/PHONE/IP_ADDRESS (+ phi);
+                               # empty/unset → the PII default set. A `phi` token expands to
+                               # the PHI set (DEA/NPI/MRN/ICD10).
+    # pii_phi: false           # convenience: also scan the PHI set
+    # pii_use_presidio: false  # augment regex with Presidio recognisers when installed
+    # pii_block_message: "Retrieved context contained personal data."
+
+  G32_tool_eligibility:
+    enabled: true
+    mode: flag                 # off | flag | block. flag = record ineligible tool calls
+                               # and serve the response unchanged (default, non-mutating).
+                               # block = STRIP the ineligible call before any group can
+                               # auto-execute it. off = passthrough (policy not evaluated).
+                               # NB `off` (not `allow`) because `allow` is already used
+                               # twice below — mode:allow would be ambiguous to read.
+                               # NON-STREAMING only: a streamed response bypasses the
+                               # whole response pipeline, so streamed tool calls are NOT
+                               # gated (same limitation as the G29/G30 response scans).
+    metrics_enabled: true
+    # Which tool calls the model may ask for. Evaluation order is deny → allow →
+    # default, so an explicit deny always wins. Patterns are fnmatch globs and are
+    # CASE-SENSITIVE. Empty lists + `default: allow` (the shipped state) can never deny
+    # anything, so G32 is a no-op until you write a policy here.
+    policy:
+      allow: []                # e.g. ["db_read_*", "search_docs"]
+      deny: []                 # e.g. ["*_delete", "shell_exec"] — wins over allow
+      default: allow           # allow | deny. `deny` turns this into an ALLOWLIST:
+                               # anything not matched by `allow` is ineligible.
+    # block_message: "A tool the model requested is not permitted by this workspace's
+    #                 tool policy, so it was not carried out."
+                               # Used as the assistant message when block mode strips
+                               # EVERY tool call from a response (a message with neither
+                               # content nor tool_calls is invalid for most clients).
+
+# ── Agentic Learning Loop (F1) — [Enterprise] managed, opt-in ──────────────────
+# A managed background job (wired only by the commercial app) that periodically mines
+# the OSS-core usage_events ledger and, for each (tenant, routed_model), finds
+# savings-optimisation groups that run but realise ≈no tokens — then writes per-tenant
+# adaptive-bypass rules into the SAME artifact G24 hot-reloads
+# (config/adaptive_bypass_rules.yaml + the GCS mirror on GCP). Within one G24 reload
+# (~60s) the proxy stops paying for that group for that cohort — zero engineer effort.
+# No-op in OSS (the miner module ships only in the commercial image). Default OFF.
+learning:
+  signal_miner:
+    enabled: false                     # master switch (managed/opt-in). false → total no-op.
+    interval_seconds: 900              # minutes between mining passes (min 60). Hot-reloadable.
+    window_hours: 168                  # lookback over usage_events (default 7 days)
+    min_samples: 200                   # ignore a cohort thinner than this (noise floor)
+    max_avg_saving_per_run: 5.0        # tokens/run at/below which a group is "unproductive"
+    rules_file: config/adaptive_bypass_rules.yaml   # MUST match groups.G24_adaptive_bypass.rules_file
+    # Groups the loop may auto-skip. Conservative default = prompt-shaping optimisations whose
+    # absence only forfeits savings (never correctness/safety). A hard denylist (cache G05,
+    # routing G06, rate-limit G00, observability G18, trust&safety G29/G30/G31) is enforced in
+    # code regardless of what is listed here.
+    skippable_groups: [G01, G20, G22]
+    # Per-tenant overrides (Gate 2): tenants.<ID>.learning.signal_miner.{min_samples,
+    # max_avg_saving_per_run, skippable_groups, ...} take precedence for that tenant's cohorts.
+
+# ── Intent-Based Multi-Agent Orchestration (F2) — engine OSS, console [Enterprise] ──
+# One proxy endpoint fans a request to the right DOWNSTREAM AGENT by semantic intent,
+# instead of always calling the same LLM. An agent is any OpenAI-compatible chat endpoint
+# (a service you run). When the last user turn matches an agent's `match` keywords, the
+# request is forwarded to that agent's URL and its answer is served (billing + response
+# groups still fire); no match → the normal LLM path runs. Default OFF / no-op (no agents).
+# The managed registry console + routing-decision audit + ML intent classifier are the
+# [Enterprise] layer — https://tokenlean.cbeyond.cloud/. Per-tenant override:
+# tenants.<ID>.orchestration.* (a tenant's `agents` list REPLACES the global one — never
+# merges — so agents never leak across tenants).
+orchestration:
+  enabled: false                     # master switch. false → no-op, byte-identical path.
+  confidence_threshold: 1            # min matched keywords to dispatch (else fall back to LLM)
+  agents: []                         # [] = disabled. Example entry:
+    # - id: billing
+    #   description: "Billing, invoices, refunds, charges"   # for the managed ML classifier
+    #   url: http://billing-agent:8000/v1                    # OpenAI-compatible endpoint. An agent
+    #                                  # defined in THIS file may name a host on your own network,
+    #                                  # as here; one saved from the portal must be a public host
+    #                                  # (no single-label or .internal/.local/.svc name, no address
+    #                                  # that is not public, checked again when it is called)
+    #   match: [refund, invoice, billing, charge, payment]   # heuristic intent keywords
+    #   model: gpt-4o-mini            # optional: model string sent to the agent (default: requested)
+    #   api_key_env: BILLING_AGENT_KEY # optional: env var holding the agent's API key. Honoured
+    #                                  # only for agents defined in THIS file (here or under a
+    #                                  # static tenants.<id>.orchestration); agents saved from the
+    #                                  # portal are called without a key.
+    #   max_tokens: 1024              # optional: per-agent output budget (governance)
+    #   timeout_seconds: 60           # optional: dispatch timeout before fallback
+
+# ── Observability — operator-only diagnostics ────────────────────────────────
+# OPERATOR-ONLY on purpose: these are NOT tenant-facing portal knobs. They govern what a
+# response is allowed to disclose about the proxy's own internals, which is a deployment
+# decision, not a per-tenant preference — so they are deliberately absent from the portal
+# group catalog.
+observability:
+  # Allow a caller to ask for the prompt the proxy ACTUALLY SENT to the provider, echoed
+  # back under `_token_opt.sent` as {model, messages, params}. Requires BOTH this flag and
+  # the per-request parameter `x_echo_prompt: true` — neither alone does anything, and the
+  # default below means no deployment discloses it until an operator decides to.
+  #
+  # Why it exists: every optimisation acts on the prompt, so the prompt is the only place
+  # its defects are visible, and it was the one thing nothing kept. A 2026-09-06 compaction
+  # defect replaced customer tool-result content with an unresolvable reference on billed
+  # 200s and no artefact could show what the model had received.
+  #
+  # Why it is off by default: the echoed prompt can contain content the CALLER never sent —
+  # retrieved document chunks (G07), conversation memories (G10), registry templates (G02),
+  # compression-resolved blocks (G28). Inside one tenant that is that tenant's own data,
+  # but on a shared deployment an end user is not necessarily entitled to everything the
+  # retriever pulled. The provider credential is never included: the echo is built from the
+  # outgoing parameter set, never from the adapter's connection kwargs.
+  #
+  # Not available on streamed responses (they return before response metadata is attached)
+  # and not on the native Anthropic/Gemini ingress routes (which drop `_token_opt`).
+  echo_sent_prompt: false
+  # Size ceiling for one echo, in characters of serialised JSON. Over it, message content is
+  # clipped and `truncated: true` is set — never silently shortened, because a quietly
+  # trimmed prompt reads as evidence of what the model saw while being something else.
+  max_echo_chars: 200000
+  # End a completed stream with its actual cost, as an SSE COMMENT frame just before the
+  # terminator:  `: x-tokenlean-cost {"request_id":"…","cost_usd":"0.000123","usage":"reported"}`
+  # (`usage` is `estimated` when the provider sent no usage chunk). A stream cannot carry the
+  # cost in a header — headers go out before the first chunk — and non-streamed responses
+  # already carry it as `x-tokenlean-cost-usd`. SSE parsers skip comment lines, so SDKs see
+  # the same events; a client reading the raw stream gets the cost. Applies to the OpenAI,
+  # Anthropic and Gemini streaming routes and to cached/short-circuited answers sent as a
+  # stream. A stream that fails or is cut off carries no frame. Off: byte-identical streams.
+  stream_cost_event: false

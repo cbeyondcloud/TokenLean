@@ -1,0 +1,229 @@
+# TokenLean LITE Helm chart: default values.
+#
+# LITE is TokenLean as a gateway only (deploy/lite/README.md). This chart runs the proxy with
+# the LITE profile on any Kubernetes. Postgres is always yours (a managed service or one you
+# run); Redis is yours too, except on a dev cluster, where the chart can run one
+# (redis.bundled). Environment files: ../../values/{dev,staging,prod,managed}.yaml.
+#
+# Secrets are never written here. Each block names a Kubernetes Secret (existingSecret) and the
+# key in it; create them from your secret store (External Secrets, Sealed Secrets, the CSI
+# driver) or, on a dev cluster, with deploy/lite/cloud/install.sh --create-secrets.
+#
+# Nested in an umbrella chart, these values sit under the umbrella's `tokenlean-lite:` key.
+
+# -- Names: objects are named <release>-tokenlean-lite (or the release name when it already
+# holds the chart name), or fullnameOverride.
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # The OSS proxy image, built from src/proxy/Dockerfile (or your registry's copy).
+  repository: ghcr.io/your-org/tokenlean-proxy
+  # An exact release, never latest. The render fails until it is set.
+  tag: "set-me"
+  pullPolicy: IfNotPresent
+imagePullSecrets: []        # e.g. [{name: my-registry}]
+
+# Proxy replicas when autoscaling is off. Every replica re-reads proxy keys and the routing
+# overlay from Postgres (key_store.refresh_seconds, 5 s).
+replicas: 2
+
+# A HorizontalPodAutoscaler on CPU (and memory); it needs the cluster's resource metrics API
+# (metrics-server or an equivalent).
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 0    # 0 = not a target
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1         # always lets a node drain, whatever the replica count
+
+resources:
+  requests: {cpu: 250m, memory: 512Mi}
+  limits: {memory: 1Gi}
+
+config:
+  # The LITE profile, applied first over the shipped config (CONFIG_OVERLAYS). The chart
+  # carries both (files/, byte copies kept equal by scripts/sync_lite_chart.py); this names
+  # the profile and must stay deploy/lite/config/agentic.yaml.
+  profile: deploy/lite/config/agentic.yaml
+  # Overlays the chart carries, applied after the profile in this order. Known today:
+  # deploy/lite/config/langfuse.yaml (send traces to Langfuse; set LANGFUSE_* with extraEnv
+  # and extraEnvFrom).
+  overlays: []
+  # Your own overlays (only the keys you change), applied last, in order. Each becomes a file
+  # in the ConfigMap. Never put a secret in one: use ${VAR} placeholders and extraEnvFrom.
+  #   - name: team-limits.yaml
+  #     content: |
+  #       rate_limit: {per_team: {...}}
+  extraOverlays: []
+
+postgres:
+  # Always external: a managed service (Cloud SQL, RDS, Azure Database for PostgreSQL, ...)
+  # or a Postgres 15+ you run. The proxy creates and updates its tables (usage_events,
+  # audit_events, proxy_keys, routing_overlay_versions) itself, and the migration hook below
+  # does it once before each install and upgrade.
+  host: postgres.example.internal
+  port: 5432
+  database: tokenlean
+  user: tokenlean
+  sslmode: require          # disable | require | verify-ca | verify-full
+  existingSecret: tokenlean-lite-postgres
+  passwordSecretKey: password
+  # The key of existingSecret holding the server's CA (PEM), for verify-ca / verify-full
+  # against a private or provider CA that the image does not trust. It is mounted as a file
+  # into the proxy and the migration hook, and PGSSLROOTCERT names it. "" = the system trust.
+  caCertSecretKey: ""
+  # DATABASE_URL = postgresql://<user>@<host>:<port>/<database>?sslmode=<sslmode>; the password
+  # reaches the proxy as PGPASSWORD (read by its Postgres driver), never inside the URL.
+
+redis:
+  # External by default: a managed service (Memorystore, ElastiCache, Azure Cache for Redis)
+  # or a Redis 7.2 you run.
+  host: redis.example.internal
+  port: 6380
+  db: 0
+  tls: true                 # REDIS_URL = rediss://<host>:<port>/<db> (redis:// when false)
+  existingSecret: tokenlean-lite-redis
+  passwordSecretKey: password
+  caCertSecretKey: ""       # the key holding a private CA (REDIS_CA_CERT); "" = system trust
+  # A Redis run by the chart, for a dev cluster only (one pod, no TLS, no replication). Its
+  # password is the same Secret key; host, port, db and tls above are then ignored.
+  bundled:
+    enabled: false
+    image:
+      repository: redis
+      tag: "7.2.16-alpine"  # the local stack's pin (BSD-3; 7.4+ is not)
+      pullPolicy: IfNotPresent
+    persistence:
+      enabled: false        # an emptyDir: counters and the cache reset with the pod
+      size: 1Gi
+      storageClass: ""
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits: {memory: 256Mi}
+
+proxyKeys:
+  backend: postgres         # the LITE profile's key_store: keys in the proxy_keys table
+  # local-keys.json (hashes only) with the bootstrap admin key; copied into an empty table
+  # once. After that, keys are issued, revoked and rotated through /admin/keys.
+  existingSecret: tokenlean-lite-bootstrap-keys
+  keysFileSecretKey: local-keys.json
+
+providerKeys:
+  # LLM_KEY_<PROVIDER> for each provider you use, as keys of this Secret (all its keys
+  # become environment variables). "" = none (the mock provider needs none).
+  existingSecret: tokenlean-lite-provider-keys
+
+metrics:
+  # METRICS_SCRAPE_TOKEN: /metrics answers only to this bearer token. "" = no Secret, and
+  # /metrics refuses every scrape.
+  existingSecret: tokenlean-lite-metrics
+  scrapeTokenSecretKey: scrape-token
+  # prometheus.io/* annotations on the proxy pods, for a Prometheus that discovers pods. Its
+  # scrape job must present the token (authorization: credentials_file).
+  podAnnotations: true
+  # A ServiceMonitor (Prometheus Operator) that presents the token from the Secret above.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  host: tokenlean.example.internal
+  tlsSecretName: tokenlean-lite-tls
+  # cert-manager issues the certificate into tlsSecretName when one of these is set; leave
+  # both empty to bring your own certificate in that Secret.
+  certManager:
+    clusterIssuer: ""
+    issuer: ""
+  # Controller-specific settings, e.g. to stream responses unbuffered (server-sent events)
+  # and allow long completions. Examples for an NGINX-based controller:
+  #   nginx.ingress.kubernetes.io/proxy-buffering: "off"
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+  annotations: {}
+
+# The migration hook: before each install and upgrade, a Job runs the proxy's own schema
+# steps (python -m schema_setup) once, so replicas never race to create tables. It can run
+# as the tables' owner while the proxy runs as a restricted role (docs/config-reference.md).
+migrations:
+  enabled: true
+  user: ""                  # "" = postgres.user
+  existingSecret: ""        # "" = postgres.existingSecret
+  passwordSecretKey: ""     # "" = postgres.passwordSecretKey
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 512Mi}
+
+# A local OpenAI-compatible stand-in (deploy/lite/local/mock), for keyless dev and smoke runs:
+# every model goes to it, nothing reaches a real provider. Dev only.
+mockProvider:
+  enabled: false
+  resources:
+    requests: {cpu: 20m, memory: 64Mi}
+    limits: {memory: 128Mi}
+
+proxy:
+  logLevel: INFO
+  # Serve only once billing, the audit log and the key store are wired (MANAGED_DEPLOY): a
+  # replica never answers unbilled, and a deploy during a database outage does not replace a
+  # working one.
+  managedDeploy: true
+  corsOrigins: ""           # only if a browser app calls the proxy directly
+  # More (non-secret) variables, and whole Secrets/ConfigMaps as variables (e.g. LANGFUSE_*).
+  extraEnv: []
+  extraEnvFrom: []
+  # More volumes and their mounts on the proxy (e.g. a corporate CA bundle from a ConfigMap).
+  # The proxy only: the migration hook reads postgres.caCertSecretKey, not these.
+  extraVolumes: []
+  extraVolumeMounts: []
+  startupProbe: {periodSeconds: 5, failureThreshold: 60, timeoutSeconds: 3}
+  readinessProbe: {periodSeconds: 10, failureThreshold: 3, timeoutSeconds: 3}
+  livenessProbe: {periodSeconds: 20, failureThreshold: 3, timeoutSeconds: 5}
+  terminationGracePeriodSeconds: 60
+  # Seconds a stopping pod keeps serving, so the load balancer stops sending it requests
+  # before it gets SIGTERM.
+  preStopSleepSeconds: 5
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+# The image's user (uid 1000, `app`). Every pod runs non-root, with a read-only root
+# filesystem and no added capabilities.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile: {type: RuntimeDefault}
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: {drop: [ALL]}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+dashboards:
+  # Not deployed by this chart. The LITE set: mount these provisioning files and
+  # dashboard/dashboards (without tenant-overview.json) into your Grafana, and set LITE_DB_* /
+  # LITE_PROMETHEUS_URL in its environment (deploy/lite/README.md, Dashboards).
+  provisioning: deploy/lite/grafana/provisioning

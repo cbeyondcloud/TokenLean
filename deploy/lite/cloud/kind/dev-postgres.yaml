@@ -1,0 +1,68 @@
+# A throwaway Postgres for a local kind cluster (e2e.sh): the chart never runs Postgres, so a
+# dev cluster brings its own. Data lives in an emptyDir and goes with the pod. Not for any
+# shared cluster. Its password is the chart's Postgres Secret (tokenlean-lite-postgres).
+apiVersion: v1
+kind: Service
+metadata:
+  name: tokenlean-lite-dev-postgres
+  labels:
+    app.kubernetes.io/name: tokenlean-lite-dev-postgres
+spec:
+  selector:
+    app.kubernetes.io/name: tokenlean-lite-dev-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tokenlean-lite-dev-postgres
+  labels:
+    app.kubernetes.io/name: tokenlean-lite-dev-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tokenlean-lite-dev-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tokenlean-lite-dev-postgres
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      automountServiceAccountToken: false
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:0.8.7-pg15   # the local stack's pin (PostgreSQL licence)
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          env:
+            - {name: POSTGRES_USER, value: tokenlean}
+            - {name: POSTGRES_DB, value: tokenlean}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: tokenlean-lite-postgres, key: password}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "tokenlean", "-d", "tokenlean"]}
+            periodSeconds: 3
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: run, mountPath: /var/run/postgresql}
+      volumes:
+        - {name: data, emptyDir: {}}
+        - {name: run, emptyDir: {}}

@@ -158,7 +158,13 @@ if [ "$(status_of "$TMP/h5")" = 201 ] && [ -n "$TEAM_KEY" ] && [ -n "$TEAM_KEY_I
       -d "{\"model\":\"$MODEL\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the word pong. ($NONCE team $1)\"}]}" \
       "$BASE/v1/chat/completions" || true
   }
-  team_call a
+  # A key issued through one worker or replica reaches the others within
+  # key_store.refresh_seconds (5 s): a 401 is retried for that long.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    team_call a
+    [ "$(status_of "$TMP/h6a")" = 401 ] || break
+    sleep 1
+  done
   TID=$(header "$TMP/h6a" x-tokenlean-request-id)
   if [ "$(status_of "$TMP/h6a")" = 200 ] && [ -n "$TID" ]; then
     ROW=""
@@ -187,16 +193,20 @@ if [ "$(status_of "$TMP/h5")" = 201 ] && [ -n "$TEAM_KEY" ] && [ -n "$TEAM_KEY_I
       "$BASE/admin/routing" || true
     if [ "$(status_of "$TMP/h9")" = 200 ]; then
       CAPPED=""
-      for i in 1 2 3 4 5; do   # the first call's cost reaches the team's counter just after it
+      LAST=""
+      # The first call's cost reaches the team's counter just after it, and the overlay reaches
+      # every worker within admin_api.routing.poll_seconds (5 s).
+      for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
         team_call "b$i"
-        if [ "$(status_of "$TMP/h6b$i")" = 429 ] && grep -q team_spend_cap_exceeded "$TMP/b6b$i"; then
+        LAST=$(status_of "$TMP/h6b$i")
+        if [ "$LAST" = 429 ] && grep -q team_spend_cap_exceeded "$TMP/b6b$i"; then
           CAPPED=1
           break
         fi
         sleep 1
       done
       if [ -n "$CAPPED" ]; then pass "team spend cap enforced (429 team_spend_cap_exceeded)"
-      else fail "team spend cap not enforced (last status $(status_of "$TMP/h6b5"))"; fi
+      else fail "team spend cap not enforced (last status $LAST)"; fi
       curl -sS -D "$TMP/h10" -o "$TMP/b10" -X POST -H @"$TMP/auth-admin" -H "Content-Type: application/json" \
         -d "{\"version\":$RVER,\"comment\":\"lite smoke: undo\"}" "$BASE/admin/routing/rollback" || true
       if [ "$(status_of "$TMP/h10")" != 200 ]; then
@@ -211,7 +221,13 @@ if [ "$(status_of "$TMP/h5")" = 201 ] && [ -n "$TEAM_KEY" ] && [ -n "$TEAM_KEY_I
 
   curl -sS -D "$TMP/h11" -o "$TMP/b11" -X DELETE -H @"$TMP/auth-admin" \
     "$BASE/admin/keys/$TEAM_KEY_ID" || true
-  team_call c
+  # Refused at once by the worker that revoked it, and by every other within
+  # key_store.refresh_seconds (5 s).
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    team_call c
+    [ "$(status_of "$TMP/h6c")" != 401 ] || break
+    sleep 1
+  done
   if [ "$(status_of "$TMP/h11")" = 200 ] && [ "$(status_of "$TMP/h6c")" = 401 ]; then
     pass "team key revoked and refused"
   else

@@ -1,0 +1,138 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# LITE profile — gateway on, behaviour-changing optimisations off
+# ─────────────────────────────────────────────────────────────────────────────
+# An OVERLAY on config/config.yaml.template, applied with
+#   CONFIG_OVERLAYS=config/profiles/agentic.yaml
+# (deep-merged: it states only what it changes). Used by deploy/lite/ for agent pipelines
+# (e.g. the agentic SDLC framework) that need the provider to receive exactly what they
+# sent, because their answer quality is measured on their own evaluation harness.
+#
+# What stays ON (the gateway): authentication, provider selection by model name, failover
+# (`resilience`), rate limits and spend caps (`rate_limit`), metering (`usage_events`,
+# Prometheus), the cost headers, provider prompt caching (G21's cache key only), exact-match
+# response caching (G05 L1), and the trust & safety groups G29–G32 in their shipped `flag`
+# mode (they record findings and never edit or block). No provider is assumed: whichever
+# LLM_KEY_* the deployment sets decides which providers are reachable. The only provider
+# names below switch OFF the per-provider G21 knobs that would edit a request.
+#
+# What goes OFF: every group that changes the prompt, the model, or the answer. Turn one
+# back on at a time, in a later overlay, after an A/B run on your own harness shows it
+# keeps answer quality.
+#
+# Teams (one tenant, teams under it): keys bound to a team and a user (/admin/keys), each
+# team's monthly spend cap enforced, and the X-Agentic-* usage tags recorded. The teams
+# themselves (caps, limits, routing) are the deployment's: set them through /admin/routing
+# or a later overlay. LITE needs Postgres (DATABASE_URL): the proxy keys live there.
+#
+# A test (tests/unit/test_agentic_profile.py) pins the set of groups this profile may leave
+# on, so a group the template later ships enabled fails it until someone decides about it.
+# Keep deploy/lite/config/agentic.yaml byte-identical to this file (also test-pinned).
+
+groups:
+  # ── Kept, narrowed ─────────────────────────────────────────────────────────────
+  G5_cache:
+    # L1 (exact request match) stays: a byte-identical request gets the stored answer.
+    # A caller that needs a fresh answer for an identical request sends x_no_cache: true.
+    l2_enabled: false           # no semantic near-match: it can answer another question
+    step_cache_enabled: false   # no X-Step-Name replays keyed on caller-supplied hashes
+
+  G21_cache_alignment:
+    # Provider prompt caching stays as the cache key only (OpenAI prompt_cache_key; the
+    # provider caches the prefix it already received). What would edit the request is off:
+    stabilise:
+      enabled: false            # relocates volatile prompt text
+    providers:
+      openai:
+        auto: false             # would move a mid-conversation system message to the front
+      anthropic:
+        marker: false           # would rebuild messages/tools with cache_control markers
+
+  # ── Off: they change the prompt, the model, or the answer ──────────────────────
+  G1_compression:
+    enabled: false              # prompt compression
+  G2_template_registry:
+    enabled: false              # template budgets/sunsetting; nothing to register here
+  G3_doc_pipeline:
+    enabled: false              # RAG fallback chain (only used by G07)
+  G4_bypass:
+    enabled: false              # canned answers instead of a model call
+  G6_routing:
+    enabled: false              # model routing/cascade: the caller's model is used as sent
+    # A model the config does not know is refused with a 400 (code model_not_configured)
+    # instead of being answered by proxy.default_model, which is the shipped behaviour.
+    on_unconfigured_model: reject
+  G7_retrieval:
+    enabled: false              # injects retrieved documents
+  G8_tools:
+    enabled: false              # prunes / compresses tool definitions
+  G9_context_schema:
+    enabled: false
+  G10_memory:
+    enabled: false              # injects conversation memory / trims history
+  G11_output:
+    enabled: false              # output format + max_tokens control
+  G12_reasoning:
+    enabled: false              # reasoning budget prompt / params
+    # Read even while G12 is off: for reasoning models the proxy raises a too-small output
+    # budget (disclosed as x-tokenlean-output-budget-raised) so hidden thinking cannot use it
+    # all up. LITE forwards the caller's budget unchanged; the caller owns its budget (and a
+    # budget ledger that reserved on that number), and an answer cut short comes back with
+    # finish_reason "length".
+    reasoning_headroom:
+      enabled: false
+  G13_batch:
+    enabled: false              # deferred batching + TOON re-encoding
+  G14_tool_output:
+    enabled: false              # minimises tool results
+  G15_server_compute:
+    enabled: false              # server-side tool execution
+  G16_agent_arch:
+    enabled: false              # tool pruning, system-prompt compaction
+  G17_loop:
+    enabled: false              # loop/budget enforcement keyed on X-Workflow-ID
+  G19_headroom:
+    enabled: false              # structural pruning of payloads
+  g20_prompt_optimizer:
+    enabled: false
+  g22_deduplication:
+    enabled: false              # drops near-duplicate turns
+  G23_streaming_compression:
+    enabled: false              # output compression
+  G25_adaptive_reasoning:
+    enabled: false              # changes reasoning effort
+  G26_context_budget:
+    enabled: false              # history compaction
+  G27_multimodal:
+    enabled: false
+  G28_ccr:
+    enabled: false              # replaces content with references
+
+  # ── Observability ──────────────────────────────────────────────────────────────
+  G18_observability:
+    langfuse_enabled: false     # deploy/lite/config/langfuse.yaml turns it on
+
+observability:
+  # Streams end with their actual cost (`: x-tokenlean-cost {...}`), so a caller can settle
+  # a budget for streamed calls as it does from x-tokenlean-cost-usd on the others.
+  stream_cost_event: true
+
+# ── Team level ──────────────────────────────────────────────────────────────────────
+rate_limit:
+  spend_cap:
+    # Enforce monthly spend caps: each team's teams.<team>.monthly_spend_cap_usd (429
+    # team_spend_cap_exceeded before any provider call). The tenant itself has no cap unless
+    # the deployment sets limits.monthly_spend_cap_usd; OSS ships no tier default.
+    enabled: true
+
+billing:
+  metering:
+    tags:
+      # Record the allow-listed X-Agentic-* headers (run, step, agent, ...) on usage_events.tags
+      # (the shipped default, stated so a later template change cannot drop it unnoticed).
+      enabled: true
+
+key_store:
+  # Proxy keys in the proxy_keys table, so /admin/keys can issue, revoke and rotate them and
+  # every replica sees the change within refresh_seconds. Needs DATABASE_URL; the keys of the
+  # local key file are copied in once, into an empty table.
+  backend: postgres
