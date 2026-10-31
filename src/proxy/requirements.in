@@ -33,5 +33,5 @@ instructor>=1.3.0                            # MIT
 jsonschema>=4.20.0                           # MIT — G11 output JSON-schema validation (validate_output); also a transitive litellm dep, pinned here as a direct dependency
 
 # Optional deps — imported via try/except; install only when the feature is enabled
-mem0ai>=2.0.7                                # Apache-2.0
+mem0ai>=2.0.18                                # Apache-2.0
 presidio-analyzer>=2.2                       # MIT — optional higher-recall PII backend for G29 (use_presidio: true); regex tier is the default and needs no dep
