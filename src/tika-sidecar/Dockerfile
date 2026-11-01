@@ -3,7 +3,7 @@
 # 3.2.2 or later: CVE-2025-54988 / CVE-2025-66516 (XXE in PDF parsing) cover 1.13 to 3.2.1, and
 # this server parses documents tenants upload. Pinned by digest; Dependabot proposes the tag's
 # new digest for review.
-FROM apache/tika:3.3.1.0@sha256:90b7fa1dc018434075fce9e1d9b88b1e3d0ea6979d0cf86e116c79a8073ae973
+FROM apache/tika:3.3.3.0@sha256:326b238b37904c94ff61fed87afe0af72e6a29fa715933b10af97b7d56f1d4cb
 
 EXPOSE 9998
 
