@@ -10,7 +10,7 @@
 # Unix socket mounted at /cloudsql/<conn> by --set-cloudsql-instances, so no private IP
 # address is ever needed and the SAME image works for both connectivity modes.
 # Pinned by digest; Dependabot proposes the tag's new digest for review.
-FROM postgres:15-alpine@sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81
+FROM postgres:15-alpine@sha256:54e0dd8e8cddcdbb9156c2486eed5a43eccb7214d7c6828097d41ce049fb3984
 
 WORKDIR /migrations
 
