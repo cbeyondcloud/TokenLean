@@ -35,6 +35,8 @@ groups:
     # A caller that needs a fresh answer for an identical request sends x_no_cache: true.
     l2_enabled: false           # no semantic near-match: it can answer another question
     step_cache_enabled: false   # no X-Step-Name replays keyed on caller-supplied hashes
+    cache_scope: tenant+model   # key by the requested model: an answer from one model
+                                # never serves a request to another (e.g. an eval judge)
 
   G21_cache_alignment:
     # Provider prompt caching stays as the cache key only (OpenAI prompt_cache_key; the
