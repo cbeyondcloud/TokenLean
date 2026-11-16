@@ -207,6 +207,10 @@ function New-CloudDevSecrets {
         $token = Join-Path $tmp 'scrape-token'
         Write-CloudFile $token (New-CloudHex 24)
         $null = New-CloudSecret 'tokenlean-lite-metrics' @("scrape-token=$token")
+        # The dashboards' read-only login (dashboards.reader), read only when that is enabled.
+        $reader = Join-Path $tmp 'grafana-reader-password'
+        Write-CloudFile $reader (New-CloudHex 24)
+        $null = New-CloudSecret 'tokenlean-lite-grafana-reader' @("password=$reader")
         $provider = @()
         foreach ($item in (Get-ChildItem env: | Where-Object { $_.Name -cmatch '^LLM_KEY_[A-Z0-9_]+$' -and $_.Value })) {
             $file = Join-Path $tmp $item.Name
