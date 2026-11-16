@@ -244,3 +244,77 @@ def test_the_team_picker_lists_the_tenant_s_teams_with_legacy_rows_as_default(ou
         [("default",), ("payments",), ("search",)]
         + [(t,) for t in HOSTILE_TEAMS + UNMATCHABLE_TEAMS], key=repr)
     assert team_var[TENANTS[1]] == [("default",), ("payments",)]
+
+
+# ── The Requests Explorer's typed and custom variables: any text, including a crafted link's
+#    ?var-row_limit=1;DELETE ..., stays data. Numbers are read out of their literal. ──
+
+
+_REQUESTS_TABLE = "Requests"
+_TEXT_VALUES = ("", "user-1", "x' OR true OR 'x", "1; DELETE FROM lite_probe; --",
+                "%' OR true --", 'q"uote', "back\' OR true --")
+
+
+def _requests_table_sql():
+    d = json.loads((_DASHBOARDS / "requests.json").read_text(encoding="utf-8"))
+    for panel in _panels(d):
+        for target in panel.get("targets", []) or []:
+            if "${row_limit" in (target.get("rawSql") or ""):
+                return target["rawSql"]
+    raise AssertionError("no row-limited panel in requests.json")
+
+
+async def _explore(cases):
+    import asyncpg
+    from billing.models import USAGE_EVENTS_DDL
+    from tests.grafana_template import ALL
+    rows = _seed_rows()
+    cols = list(rows[0])
+    insert = (f"INSERT INTO usage_events ({', '.join(cols)}) VALUES "
+              f"({', '.join(f'${i + 1}' for i in range(len(cols)))})")
+    sql = _requests_table_sql()
+    d = json.loads((_DASHBOARDS / "requests.json").read_text(encoding="utf-8"))
+    defaults = {v["name"]: str((v.get("current") or {}).get("value", ""))
+                for v in d["templating"]["list"]}
+    conn = await asyncpg.connect(os.environ["TEST_PG_DSN"])
+    try:
+        await conn.execute("DROP SCHEMA IF EXISTS lite_dash_requests CASCADE")
+        await conn.execute("CREATE SCHEMA lite_dash_requests")
+        await conn.execute("SET search_path TO lite_dash_requests")
+        await conn.execute(USAGE_EVENTS_DDL)
+        for r in rows:
+            await conn.execute(insert, *[r[c] for c in cols])
+        await conn.execute("CREATE TABLE lite_probe (n int)")
+        await conn.execute(f"INSERT INTO lite_probe SELECT generate_series(1, {PROBE_ROWS})")
+        out = {}
+        for name, value in cases:
+            values = {**defaults, "tenant": ALL, "team": ALL, name: value}
+            out[(name, value)] = await _fetch(conn, "lite_dash_requests",
+                                              render(sql, values, "requests.json"))
+        probe = await conn.fetchval("SELECT count(*) FROM lite_dash_requests.lite_probe")
+        return out, len([r for r in rows if r["billable"]]), probe
+    finally:
+        await conn.execute("DROP SCHEMA IF EXISTS lite_dash_requests CASCADE")
+        await conn.close()
+
+
+def test_the_requests_explorer_takes_any_text_as_data():
+    names = ("user_search", "request_search", "cache", "tier_complexity", "bypassed",
+             "min_savings_pct", "min_tokens_saved", "row_limit")
+    cases = [(n, v) for n in names for v in _TEXT_VALUES]
+    cases += [("row_limit", v) for v in ("1", "3", "1;DELETE FROM lite_probe", "0", "-5",
+                                         "99999999999", "abc")]
+    cases += [("min_tokens_saved", v) for v in ("99999999999", "5x")]
+    out, billable, probe = asyncio.run(_explore(cases))
+    assert probe == PROBE_ROWS                                    # nothing ran
+    broken = {k: v for k, v in out.items() if v and v[0] == "error"}
+    assert not broken, broken
+    assert len(out[("row_limit", "1")]) == 1
+    assert len(out[("row_limit", "3")]) == 3
+    assert len(out[("row_limit", "1;DELETE FROM lite_probe")]) == 1    # the number before it
+    assert len(out[("row_limit", "0")]) == 1                          # at least one row
+    for not_a_number in ("abc", "-5", ""):                              # the default
+        assert len(out[("row_limit", not_a_number)]) == min(billable, 200), not_a_number
+    assert len(out[("row_limit", "99999999999")]) == min(billable, 1000)   # at most the top option
+    assert len(out[("user_search", "x' OR true OR 'x")]) == 0          # a search, not SQL
+    assert len(out[("user_search", "user-1")]) > 0
