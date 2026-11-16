@@ -520,6 +520,9 @@ def test_the_migration_hook_creates_the_dashboards_read_only_login():
     args = container["args"]
     assert args[args.index("--role") + 1] == "tokenlean_grafana"
     assert args[args.index("--grant") + 1] == "tokenlean:usage_events"
+    assert args[args.index("--statement-timeout") + 1] == "60s"
+    assert args[args.index("--connection-limit") + 1] == "20"
+    assert args[args.index("--lock-large-objects") + 1] == "tokenlean"
     secret = _env(container)["READONLY_ROLE_PASSWORD"]["valueFrom"]["secretKeyRef"]
     assert secret == {"name": "tokenlean-lite-grafana-reader", "key": "password"}
     assert _env(container)["PGPASSWORD"]["valueFrom"]["secretKeyRef"]["name"] ==         "tokenlean-lite-postgres"

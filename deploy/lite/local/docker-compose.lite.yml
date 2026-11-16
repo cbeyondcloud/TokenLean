@@ -212,13 +212,16 @@ services:
   # image), created or re-aligned at every up before Grafana starts. It reads usage_events in
   # the gateway's database and, with --langfuse, the two Langfuse tables Per Call reads; it
   # writes nothing, creates nothing and is no superuser, so a dashboard query (or a crafted
-  # one) cannot change data. The owner's password never reaches Grafana. A table not created
-  # yet (the proxy and Langfuse create theirs at startup) is waited for.
+  # one) cannot change data; without --langfuse, an earlier Langfuse grant is taken back. Its
+  # queries time out after 60 s, it has at most 20 connections, and the large-object write
+  # functions are revoked from PUBLIC in the gateway's database (TokenLean uses none). The
+  # owner's password never reaches Grafana. A database or table not created yet (the proxy
+  # and Langfuse create theirs at startup) is waited for.
   grafana-db-reader:
     image: ${TOKENLEAN_IMAGE:-tokenlean-lite-proxy:local}
     pull_policy: never
     profiles: ["grafana"]
-    command: ["sh", "-c", "python -m readonly_role --grant tokenlean:usage_events && if [ \"$$LITE_GRAFANA_LANGFUSE\" = on ]; then exec python -m readonly_role --grant langfuse:observations,scores; fi"]
+    command: ["sh", "-c", "set -- --grant tokenlean:usage_events --lock-large-objects tokenlean; if [ \"$$LITE_GRAFANA_LANGFUSE\" = on ]; then set -- \"$$@\" --grant langfuse:observations,scores; else set -- \"$$@\" --revoke langfuse; fi; exec python -m readonly_role \"$$@\""]
     environment:
       DATABASE_URL: postgresql://tokenlean:${DB_PASSWORD}@postgres:5432/tokenlean
       READONLY_ROLE: ${LITE_GRAFANA_DB_USER:-tokenlean_grafana}

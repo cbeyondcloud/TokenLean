@@ -33,6 +33,10 @@ step. The Helm chart's migration hook does the same with `dashboards.reader.enab
 dashboard variable now reaches SQL as a quoted literal (`${var:sqlstring}`); the Requests
 Explorer's row limit and minimums are read out of theirs as bounded numbers, so a crafted link
 (`?var-row_limit=1;DELETE ...`) cannot add a statement. A test fails on any unquoted variable.
+The job refuses, before changing anything, an existing role of that name with more rights (superuser,
+CREATEDB/CREATEROLE, an owner of anything, rights outside the schema); the login has a 60 s
+statement timeout and a 20-connection limit; Langfuse's grant is taken back when `--langfuse` is
+off; and the two Requests Explorer searches match `%`, `_` and `\` literally.
 
 ## 2026-10-29
 

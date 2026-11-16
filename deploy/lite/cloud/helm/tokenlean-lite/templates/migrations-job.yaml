@@ -47,6 +47,14 @@ spec:
             - {{ required "dashboards.reader.user is required" $r.user | quote }}
             - --grant
             - {{ printf "%s:%s" .Values.postgres.database (join "," (required "dashboards.reader.tables is required" $r.tables)) | quote }}
+            - --statement-timeout
+            - {{ $r.statementTimeout | default "60s" | quote }}
+            - --connection-limit
+            - {{ $r.connectionLimit | default 20 | quote }}
+            {{- if $r.lockLargeObjects }}
+            - --lock-large-objects
+            - {{ .Values.postgres.database | quote }}
+            {{- end }}
             - --wait-seconds
             - "60"
           {{- else }}

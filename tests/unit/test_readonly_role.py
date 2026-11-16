@@ -37,6 +37,16 @@ def test_a_malformed_grant_is_refused(bad):
      ["--role", "Bad-Role", "--grant", "d:t"]),
     ({"DATABASE_URL": "postgresql://o@h/d", "READONLY_ROLE_PASSWORD": "pw"},
      ["--role", "r", "--grant", "d:t", "--schema", "x;y"]),
+    ({"DATABASE_URL": "postgresql://o@h/d", "READONLY_ROLE_PASSWORD": "pw"},
+     ["--role", "r", "--grant", "d:t", "--statement-timeout", "1s; DROP"]),
+    ({"DATABASE_URL": "postgresql://o@h/d", "READONLY_ROLE_PASSWORD": "pw"},
+     ["--role", "r", "--grant", "d:t", "--connection-limit", "0"]),
+    ({"DATABASE_URL": "postgresql://o@h/d", "READONLY_ROLE_PASSWORD": "pw"},
+     ["--role", "r", "--grant", "d:t", "--revoke", "d"]),                        # both
+    ({"DATABASE_URL": "postgresql://o@h/d", "READONLY_ROLE_PASSWORD": "pw"},
+     ["--role", "r", "--grant", "d:t", "--lock-large-objects", "other"]),        # not granted
+    ({"DATABASE_URL": "postgresql://o@h/d", "READONLY_ROLE_PASSWORD": "pw"},
+     ["--role", "r", "--grant", "d:t", "--revoke", "x y"]),
 ])
 def test_missing_or_invalid_settings_exit_2_before_connecting(monkeypatch, capsys, env, args):
     for key in ("DATABASE_URL", "READONLY_ROLE_PASSWORD", "READONLY_ROLE"):
@@ -54,13 +64,27 @@ def test_the_role_name_may_come_from_the_environment(monkeypatch):
     monkeypatch.setenv("READONLY_ROLE", "tokenlean_grafana")
     seen = {}
 
-    async def fake_run(dsn, role, password, grants, schema, wait):
-        seen.update(role=role, grants=grants, schema=schema)
+    async def fake_run(dsn, role, password, grants, schema, wait, revokes, timeout, limit,
+                       lock):
+        seen.update(role=role, grants=grants, schema=schema, revokes=revokes,
+                    timeout=timeout, limit=limit, lock=lock)
         return {"d": []}
     monkeypatch.setattr(readonly_role, "run", fake_run)
     assert readonly_role.main(["--grant", "d:t1,t2"]) == 0
     assert seen == {"role": "tokenlean_grafana", "grants": [("d", ("t1", "t2"))],
-                    "schema": "public"}
+                    "schema": "public", "revokes": [], "timeout": "60s", "limit": 20,
+                    "lock": []}
+
+
+def test_a_refusal_says_nothing_was_changed(monkeypatch, capsys):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://o@h/d")
+    monkeypatch.setenv("READONLY_ROLE_PASSWORD", "pw")
+
+    async def fake_run(*a, **k):
+        raise readonly_role.Refused("role r is a superuser")
+    monkeypatch.setattr(readonly_role, "run", fake_run)
+    assert readonly_role.main(["--role", "r", "--grant", "d:t"]) == 1
+    assert "refused, nothing was changed: role r is a superuser" in capsys.readouterr().err
 
 
 def test_a_check_that_does_not_hold_exits_1(monkeypatch, capsys):
@@ -102,14 +126,42 @@ def test_grafana_logs_in_as_the_read_only_role_never_the_owner():
     assert reader["profiles"] == ["grafana"] and reader["restart"] == "no"
 
 
-def test_the_reader_grants_what_the_datasources_read():
-    reader = _compose()["grafana-db-reader"]
-    command = " ".join(reader["command"])
+def _reader_args(langfuse, tmp_path):
+    """The arguments the grafana-db-reader service passes to python -m readonly_role, run
+    through its own shell script with a stub python."""
+    import shutil
+    import subprocess
+    import sys
+    bash = (r"C:\Program Files\Git\bin\bash.exe" if sys.platform == "win32" else
+            shutil.which("bash"))
+    if not bash or not os.path.exists(bash):
+        pytest.skip("bash not available")
+    stub = tmp_path / "python"
+    stub.write_bytes(b'#!/usr/bin/env bash\nprintf \'%s\\n\' "$@"\n')
+    stub.chmod(0o755)
+    command = _compose()["grafana-db-reader"]["command"]
+    assert command[:2] == ["sh", "-c"]
+    script = command[2].replace("$$", "$")              # compose's own escaping
+    env = dict(os.environ, LITE_GRAFANA_LANGFUSE=langfuse,
+               PATH=str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
+    out = subprocess.run([bash, "-c", script], env=env, capture_output=True, text=True,
+                         timeout=60)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.split()
+
+
+def test_the_reader_grants_what_the_datasources_read(tmp_path):
     grafana_env = _compose()["grafana"]["environment"]
-    assert f"--grant {grafana_env['LITE_DB_NAME']}:usage_events " in command
-    # Per Call's Langfuse panels (observations, scores), only when Langfuse runs.
-    assert f"--grant {grafana_env['LITE_LANGFUSE_DB_NAME']}:observations,scores" in command
-    assert '"$$LITE_GRAFANA_LANGFUSE" = on' in command
+    db, langfuse = grafana_env["LITE_DB_NAME"], grafana_env["LITE_LANGFUSE_DB_NAME"]
+    off = _reader_args("off", tmp_path)
+    assert off == ["-m", "readonly_role", "--grant", f"{db}:usage_events",
+                   "--lock-large-objects", db, "--revoke", langfuse]
+    # Per Call's Langfuse panels (observations, scores), only when Langfuse runs; with it
+    # off, an earlier run's Langfuse grant is taken back.
+    on = _reader_args("on", tmp_path)
+    assert on == ["-m", "readonly_role", "--grant", f"{db}:usage_events",
+                  "--lock-large-objects", db, "--grant", f"{langfuse}:observations,scores"]
+    reader = _compose()["grafana-db-reader"]
     assert reader["environment"]["LITE_GRAFANA_LANGFUSE"] == "${LITE_GRAFANA_LANGFUSE:-off}"
 
 
