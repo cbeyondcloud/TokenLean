@@ -320,3 +320,22 @@ def test_prometheus_scrapes_the_proxy_with_the_scrape_token_file():
     target = dict((t, s) for s, t in _mounts("prometheus"))
     secrets_dir = next(t for t in target if target[t] == "./.state/prometheus")
     assert auth["credentials_file"].startswith(secrets_dir + "/")
+
+
+_LIKE_ESCAPE = (r"replace(replace(replace(${%s:sqlstring}, '\', '\\'), '%%', '\%%'), "
+                r"'_', '\_')")
+
+
+@pytest.mark.parametrize("fname", _EVERY_DASHBOARD)
+def test_a_variable_in_a_like_pattern_matches_literally(fname):
+    r"""A search box is text, not a LIKE pattern: % _ and \ in it are escaped (LIKE's default
+    escape is \), so "user_1" never matches "user-1". Every variable on the pattern side of a
+    LIKE / ILIKE goes through the escape, and none sits inside a pattern literal."""
+    import re
+    for where, sql in _sql_texts(load(fname)):
+        for m in re.finditer(r"\bI?LIKE\s+(.*?)(?=\)\s*(?:AND|OR|ORDER|GROUP|LIMIT|$))", sql):
+            pattern = m.group(1)
+            assert not re.match(r"'[^']*\$", pattern), f"{fname} {where}: {pattern[:60]}"
+            for name, _fmt, _ in _variable_refs(pattern):
+                assert pattern.count(_LIKE_ESCAPE % name) == pattern.count("${" + name), (
+                    f"{fname} {where}: ${name} in a LIKE pattern unescaped")

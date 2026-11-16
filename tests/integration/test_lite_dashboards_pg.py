@@ -318,3 +318,22 @@ def test_the_requests_explorer_takes_any_text_as_data():
     assert len(out[("row_limit", "99999999999")]) == min(billable, 1000)   # at most the top option
     assert len(out[("user_search", "x' OR true OR 'x")]) == 0          # a search, not SQL
     assert len(out[("user_search", "user-1")]) > 0
+
+
+BACKSLASH_PREFIX = "req-LITE-LOC-01-back\\"
+
+
+def test_the_searches_match_percent_underscore_and_backslash_literally():
+    """user_search ("User contains") and request_search ("Request ID prefix") are text, not
+    LIKE patterns: % _ and \ in them match only themselves."""
+    cases = [("user_search", v) for v in ("user-", "user_0", "%", "_", "\\")]
+    cases += [("request_search", v) for v in ("req-", "req_", "%", "r_q", BACKSLASH_PREFIX)]
+    out, _billable, probe = asyncio.run(_explore(cases))
+    assert probe == PROBE_ROWS
+    assert len(out[("user_search", "user-")]) > 0
+    assert len(out[("request_search", "req-")]) > 0
+    # a backslash matches itself: the seeded team "back' OR true --" has one in its ids
+    assert len(out[("request_search", BACKSLASH_PREFIX)]) > 0
+    for case in [("user_search", v) for v in ("user_0", "%", "_", "\\")] + \
+            [("request_search", v) for v in ("req_", "%", "r_q")]:
+        assert out[case] == [], case
