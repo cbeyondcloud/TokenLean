@@ -71,4 +71,6 @@ dashboards:
   # The LITE set: mount these provisioning files and dashboard/dashboards (without
   # tenant-overview.json) into your Grafana, and set LITE_DB_* / LITE_PROMETHEUS_URL in its
   # environment. Per Call and its datasource only with Langfuse (langfuse-on.yaml files).
+  # LITE_DB_USER should be a SELECT-only login, never the owner: dashboards.reader (values.yaml)
+  # has the migration hook create it.
   provisioning: deploy/lite/grafana/provisioning

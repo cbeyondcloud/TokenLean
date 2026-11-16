@@ -24,8 +24,10 @@ if (Test-Path $LiteEnvFile) {
     $env:REDIS_PASSWORD = 'unused'
     $envFile = Join-Path $LiteDir '.env.lite.template'
 }
-# An .env.lite from before the grafana profile has no Grafana password; stopping needs none.
+# An .env.lite from before the grafana profile (or its read-only login) has no Grafana
+# passwords; stopping needs none.
 if (-not $env:GRAFANA_ADMIN_PASSWORD) { $env:GRAFANA_ADMIN_PASSWORD = 'unused' }
+if (-not $env:GRAFANA_DB_PASSWORD) { $env:GRAFANA_DB_PASSWORD = 'unused' }
 
 $downArgs = @('down', '--remove-orphans')
 if ($Purge) { $downArgs += '--volumes' }

@@ -6,8 +6,8 @@
 #   docker compose --env-file .env.lite up -d --build
 # Optional services are compose profiles: `qdrant`, `langfuse`, `mock` (a local
 # OpenAI-compatible stand-in, so smoke runs with no provider key) and `grafana` (the LITE
-# dashboards and the Prometheus they read). Podman works through `podman compose` (set
-# CONTAINER_ENGINE=podman for the scripts).
+# dashboards, the Prometheus they read, and Grafana's read-only database login). Podman
+# works through `podman compose` (set CONTAINER_ENGINE=podman for the scripts).
 #
 # Only the proxy (and Langfuse's and Grafana's UIs when their profiles are on) publishes a port, bound to
 # LITE_BIND (127.0.0.1 unless set). Postgres, Redis and Qdrant are reachable only on the
@@ -208,6 +208,27 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # Grafana's database login: a SELECT-only role (python -m readonly_role, on the proxy's
+  # image), created or re-aligned at every up before Grafana starts. It reads usage_events in
+  # the gateway's database and, with --langfuse, the two Langfuse tables Per Call reads; it
+  # writes nothing, creates nothing and is no superuser, so a dashboard query (or a crafted
+  # one) cannot change data. The owner's password never reaches Grafana. A table not created
+  # yet (the proxy and Langfuse create theirs at startup) is waited for.
+  grafana-db-reader:
+    image: ${TOKENLEAN_IMAGE:-tokenlean-lite-proxy:local}
+    pull_policy: never
+    profiles: ["grafana"]
+    command: ["sh", "-c", "python -m readonly_role --grant tokenlean:usage_events && if [ \"$$LITE_GRAFANA_LANGFUSE\" = on ]; then exec python -m readonly_role --grant langfuse:observations,scores; fi"]
+    environment:
+      DATABASE_URL: postgresql://tokenlean:${DB_PASSWORD}@postgres:5432/tokenlean
+      READONLY_ROLE: ${LITE_GRAFANA_DB_USER:-tokenlean_grafana}
+      READONLY_ROLE_PASSWORD: ${GRAFANA_DB_PASSWORD:?GRAFANA_DB_PASSWORD is empty - run up.sh or up.ps1, which generates it}
+      LITE_GRAFANA_LANGFUSE: ${LITE_GRAFANA_LANGFUSE:-off}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   grafana:
     image: grafana/grafana-oss:10.4.0
     profiles: ["grafana"]
@@ -225,8 +246,9 @@ services:
       LITE_DB_HOST: postgres:5432
       LITE_DB_NAME: tokenlean
       LITE_LANGFUSE_DB_NAME: langfuse
-      LITE_DB_USER: tokenlean
-      LITE_DB_PASSWORD: ${DB_PASSWORD}
+      # The read-only login above, never the owner (tokenlean).
+      LITE_DB_USER: ${LITE_GRAFANA_DB_USER:-tokenlean_grafana}
+      LITE_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:?GRAFANA_DB_PASSWORD is empty - run up.sh or up.ps1, which generates it}
       LITE_DB_SSLMODE: disable
       LITE_PROMETHEUS_URL: http://prometheus:9090
     volumes:
@@ -249,6 +271,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      grafana-db-reader:
+        condition: service_completed_successfully
       prometheus:
         condition: service_started
     healthcheck:

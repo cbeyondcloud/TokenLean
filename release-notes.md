@@ -21,6 +21,19 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-11-16
+
+### LITE: Grafana reads through a read-only login; dashboard SQL variables guarded — Bug fix
+Grafana's datasources logged in as the database owner (a superuser on the local stack), so a
+dashboard query could change or drop data. `up --grafana` now creates or re-aligns
+`tokenlean_grafana` before Grafana starts (`python -m readonly_role`): SELECT on `usage_events`
+and, with `--langfuse`, on the two Langfuse tables Per Call reads; no write, no CREATE, read-only
+transactions. `GRAFANA_DB_PASSWORD` is generated into `.env.lite`; an existing stack needs no
+step. The Helm chart's migration hook does the same with `dashboards.reader.enabled`. Every
+dashboard variable now reaches SQL as a quoted literal (`${var:sqlstring}`); the Requests
+Explorer's row limit and minimums are read out of theirs as bounded numbers, so a crafted link
+(`?var-row_limit=1;DELETE ...`) cannot add a statement. A test fails on any unquoted variable.
+
 ## 2026-10-29
 
 ### LITE on any Kubernetes: a Helm chart and install / upgrade / uninstall / smoke scripts (ST-8) — Enhancement (OSS)

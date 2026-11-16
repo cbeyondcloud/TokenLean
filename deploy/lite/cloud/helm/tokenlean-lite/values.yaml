@@ -227,3 +227,15 @@ dashboards:
   # dashboard/dashboards (without tenant-overview.json) into your Grafana, and set LITE_DB_* /
   # LITE_PROMETHEUS_URL in its environment (deploy/lite/README.md, Dashboards).
   provisioning: deploy/lite/grafana/provisioning
+  # A SELECT-only login for that Grafana (its LITE_DB_USER / LITE_DB_PASSWORD), so it never
+  # logs in as the tables' owner. When enabled, the migration hook (migrations.enabled) runs
+  # python -m readonly_role after the schema steps: it creates or re-aligns `user` so that it
+  # reads exactly `tables` and nothing else, with read-only transactions by default. The
+  # migration role must be allowed to create roles (CREATEROLE; a managed service's admin
+  # user is). The password is the key of existingSecret, which you create.
+  reader:
+    enabled: false
+    user: tokenlean_grafana
+    existingSecret: tokenlean-lite-grafana-reader
+    passwordSecretKey: password
+    tables: [usage_events]

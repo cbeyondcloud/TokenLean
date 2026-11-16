@@ -127,7 +127,9 @@ curl -s -X PUT -H "$ADMIN" -H 'Content-Type: application/json' \
 
 `up --grafana` starts Grafana with the LITE set of TokenLean's dashboards in the folder *TokenLean LITE*: Live Calls, Requests Explorer, Billing, Latency Breakup, SLA, Trust & Safety, Trends and Quarterly, plus Per Call when Langfuse runs too (`--langfuse`). Tenant Overview is left out (one tenant). Every dashboard that reads `usage_events` has a **Team** picker that filters all of those panels (rows from before teams existed count as `default`); the Prometheus panels are not filtered by team. The dashboards are read-only copies of `dashboard/dashboards/`; copy one to change it.
 
-To show the set in a Grafana you already run, mount `grafana/provisioning/datasources/lite.yaml`, `grafana/provisioning/dashboards/lite.yaml` and the eight JSON files (see the `grafana` service in `local/docker-compose.lite.yml`), and set `LITE_DB_HOST`, `LITE_DB_NAME`, `LITE_DB_USER`, `LITE_DB_PASSWORD`, `LITE_DB_SSLMODE` and `LITE_PROMETHEUS_URL` in its environment.
+Grafana reads the database as `tokenlean_grafana` (`LITE_GRAFANA_DB_USER` to name another), a SELECT-only login, never the owner: it reads `usage_events` and, with `--langfuse`, the two Langfuse tables Per Call queries (`observations`, `scores`); it writes nothing, creates nothing and defaults to read-only transactions. Every `up --grafana` creates or re-aligns it before Grafana starts (the `grafana-db-reader` service, `python -m readonly_role`), with `GRAFANA_DB_PASSWORD`, which `up` generates into `.env.lite`. An existing stack needs no step: the next `up --grafana` adds the password, creates the role and restarts Grafana with it. Every dashboard variable reaches SQL as a quoted literal (`${var:sqlstring}`), and a number (row limit, minimum savings) is read out of that literal, so neither a typed value nor a crafted link (`?var-row_limit=...`) can add SQL.
+
+To show the set in a Grafana you already run, mount `grafana/provisioning/datasources/lite.yaml`, `grafana/provisioning/dashboards/lite.yaml` and the eight JSON files (see the `grafana` service in `local/docker-compose.lite.yml`), and set `LITE_DB_HOST`, `LITE_DB_NAME`, `LITE_DB_USER`, `LITE_DB_PASSWORD`, `LITE_DB_SSLMODE` and `LITE_PROMETHEUS_URL` in its environment. Give it a SELECT-only login, not the owner: as the owner, with `DATABASE_URL` the owner and the password in `READONLY_ROLE_PASSWORD`, run `python -m readonly_role --role tokenlean_grafana --grant tokenlean:usage_events` from `src/proxy` (or the proxy image), or set `dashboards.reader.enabled=true` on the Helm chart.
 
 ## Cloud: any Kubernetes (Helm)
 
@@ -157,6 +159,7 @@ Values files name Secrets; they never hold secret values. Create these in the re
 | `tokenlean-lite-bootstrap-keys` | `local-keys.json` | the bootstrap proxy keys, hashes only (`scripts/generate_proxy_key.py`); copied into an empty `proxy_keys` table once |
 | `tokenlean-lite-provider-keys` | `LLM_KEY_<PROVIDER>` | one key per provider you use; every key becomes an environment variable |
 | `tokenlean-lite-metrics` | `scrape-token` | the bearer token `/metrics` answers to |
+| `tokenlean-lite-grafana-reader` | `password` | only with `dashboards.reader.enabled`: the password of your Grafana's SELECT-only login (`dashboards.reader.user`) |
 
 On a dev cluster, `install.sh dev --create-secrets` creates the missing ones except Postgres's: random passwords, fresh bootstrap keys (the raw keys go to an owner-only, git-ignored file under `cloud/.state/` for smoke), and the `LLM_KEY_*` variables set in your shell. Values reach `kubectl` in files, never on a command line.
 
@@ -199,6 +202,7 @@ The ConfigMap carries `files/config.yaml.template` and `files/agentic.yaml`, byt
 - **Ingress:** set `ingress.host`, `ingress.tlsSecretName` and `ingress.certManager.clusterIssuer` (or `issuer`); leave the issuer empty to bring your own certificate in that Secret. Streamed answers need an unbuffered proxy path and long read timeouts: set your controller's annotations in `ingress.annotations` (examples in `values.yaml`).
 - **Metrics:** the pods carry `prometheus.io/scrape|path|port`. `/metrics` answers only to the scrape token, so the scrape job must present it (`authorization.credentials_file`), or set `metrics.serviceMonitor.enabled=true` with the Prometheus Operator: its ServiceMonitor reads the token from the metrics Secret.
 - **Migrations:** the hook runs as `postgres.user` by default. To run the proxy as a restricted role (`python -m audit.enforcement`), give the hook the tables' owner: `migrations.user` and `migrations.existingSecret`. `migrations.enabled=false` leaves the schema steps to the proxy's startup, as the local stack does.
+- **Dashboards:** the chart deploys no Grafana. With `dashboards.reader.enabled=true` (and its Secret), the hook also creates or re-aligns your Grafana's SELECT-only login (`python -m readonly_role`): `dashboards.reader.user` reads exactly `dashboards.reader.tables` (`usage_events`). The hook's role must be allowed to create roles. Then set your Grafana's `LITE_DB_USER` / `LITE_DB_PASSWORD` to that login, the one step an existing install needs.
 
 ### In an umbrella chart
 

@@ -65,6 +65,7 @@ Set-IfEmpty 'LANGFUSE_NEXTAUTH_SECRET' (New-LiteHex 32)
 Set-IfEmpty 'LANGFUSE_SALT' (New-LiteHex 32)
 Set-IfEmpty 'LANGFUSE_INIT_USER_PASSWORD' (New-LiteHex 16)
 Set-IfEmpty 'GRAFANA_ADMIN_PASSWORD' (New-LiteHex 16)
+Set-IfEmpty 'GRAFANA_DB_PASSWORD' (New-LiteHex 24)
 Write-LiteFile $LiteEnvFile (($lines -join "`n") + "`n")
 Import-LiteEnv
 

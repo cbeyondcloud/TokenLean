@@ -286,6 +286,13 @@ def test_kubeconform_accepts_a_postgres_ca_and_extra_volumes(tmp_path):
                  "--set", "proxy.extraVolumeMounts[0].mountPath=/etc/corp-ca")
 
 
+def test_kubeconform_and_lint_accept_the_dashboards_reader(tmp_path):
+    _kubeconform(tmp_path, "prod", "--set", "dashboards.reader.enabled=true")
+    out = _run_in(HELM_IMAGE, ["lint", "--strict", "helm/tokenlean-lite", "-f", "values/prod.yaml",
+                               *_IMAGE_SET, "--set", "dashboards.reader.enabled=true"])
+    assert out.returncode == 0, out.stdout + out.stderr
+
+
 def _kubeconform(tmp_path, env, *extra):
     code, stdout, stderr = _render_text(env, "--set", "metrics.serviceMonitor.enabled=false",
                                         *extra)
@@ -492,6 +499,36 @@ def test_the_migration_hook_can_use_an_owner_role():
     assert env_vars["DATABASE_URL"]["value"].startswith("postgresql://tokenlean_owner@")
     assert env_vars["PGPASSWORD"]["valueFrom"]["secretKeyRef"]["name"] == \
         "tokenlean-lite-postgres-owner"
+
+
+@pytest.mark.parametrize("env", ["staging", "prod", "managed"])
+def test_the_dashboards_reader_is_off_unless_asked(env):
+    container = _one(_render(env), "Job")["spec"]["template"]["spec"]["containers"][0]
+    assert "readonly_role" not in " ".join(container["command"] + container.get("args", []))
+    assert "READONLY_ROLE_PASSWORD" not in _env(container)
+
+
+def test_the_migration_hook_creates_the_dashboards_read_only_login():
+    """dashboards.reader: after the schema steps, the hook runs python -m readonly_role for
+    your Grafana's login; its name and tables are arguments (never shell text) and its
+    password comes from its own Secret."""
+    job = _one(_render("managed", "--set", "dashboards.reader.enabled=true"), "Job")
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    script = container["command"][2]
+    assert script.index("schema_setup") < script.index("readonly_role")
+    assert script.endswith('exec python -m readonly_role "$@"')
+    args = container["args"]
+    assert args[args.index("--role") + 1] == "tokenlean_grafana"
+    assert args[args.index("--grant") + 1] == "tokenlean:usage_events"
+    secret = _env(container)["READONLY_ROLE_PASSWORD"]["valueFrom"]["secretKeyRef"]
+    assert secret == {"name": "tokenlean-lite-grafana-reader", "key": "password"}
+    assert _env(container)["PGPASSWORD"]["valueFrom"]["secretKeyRef"]["name"] ==         "tokenlean-lite-postgres"
+
+
+def test_the_dashboards_reader_needs_its_secret():
+    code, _stdout, stderr = _render_text("managed", "--set", "dashboards.reader.enabled=true",
+                                         "--set", "dashboards.reader.existingSecret=")
+    assert code != 0 and "dashboards.reader.existingSecret" in stderr, stderr
 
 
 _PG_CA_FILE = "/etc/tokenlean-lite/postgres-ca/ca.crt"
