@@ -33,8 +33,10 @@ else
   export DB_PASSWORD=unused REDIS_PASSWORD=unused
   LITE_ENV_FILE="$LITE_DIR/.env.lite.template"
 fi
-# An .env.lite from before the grafana profile has no Grafana password; stopping needs none.
+# An .env.lite from before the grafana profile (or its read-only login) has no Grafana
+# passwords; stopping needs none.
 export GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-unused}"
+export GRAFANA_DB_PASSWORD="${GRAFANA_DB_PASSWORD:-unused}"
 
 ARGS=(down --remove-orphans)
 if [ "$PURGE" = 1 ]; then ARGS+=(--volumes); fi
