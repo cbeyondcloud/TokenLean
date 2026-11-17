@@ -3,6 +3,8 @@
 # Grafana container's environment, so another Grafana (an org's own, or the agentic framework's)
 # can mount this file unchanged and set:
 #   LITE_DB_HOST (host:port), LITE_DB_NAME, LITE_DB_USER, LITE_DB_PASSWORD, LITE_PROMETHEUS_URL
+# LITE_DB_USER is a SELECT-only login (python -m readonly_role; the local stack's
+# grafana-db-reader service creates tokenlean_grafana), never the owner of the tables.
 apiVersion: 1
 
 datasources:
