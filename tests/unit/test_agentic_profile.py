@@ -78,6 +78,7 @@ def test_profile_effective_config(monkeypatch):
     assert g5["enabled"] is True
     assert g5["step_cache_enabled"] is False       # X-Step-Name would replay answers
     assert g5["l2_enabled"] is False               # near-match answers
+    assert g5["cache_scope"] == "tenant+model"     # one model's answer never serves another
     assert groups["G6_routing"]["on_unconfigured_model"] == "reject"
     assert groups["G12_reasoning"]["reasoning_headroom"]["enabled"] is False
     g21 = groups["G21_cache_alignment"]
