@@ -1,6 +1,6 @@
 # Fine-tuning Pipeline — Cloud Run Job for domain-specific fine-tuning
 # Pinned by digest; Dependabot proposes the tag's new digest for review.
-FROM python:3.11-slim@sha256:94c50be2dc994b873b55bc123e95e6dbade08095b3dfd790f51c34de3f08cbb7
+FROM python:3.11-slim@sha256:673719e071ecf27434fd2635bbd8d00f49f4fdd81f243143438a42ced8bedf60
 
 WORKDIR /app
 
