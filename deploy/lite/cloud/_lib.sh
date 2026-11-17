@@ -256,6 +256,9 @@ cloud_create_dev_secrets() {
   cloud_make_secret tokenlean-lite-redis "password=redis-password" || true
   cloud_rand_hex 24 >"$tmp/scrape-token"
   cloud_make_secret tokenlean-lite-metrics "scrape-token=scrape-token" || true
+  # The dashboards' read-only login (dashboards.reader), read only when that is enabled.
+  cloud_rand_hex 24 >"$tmp/grafana-reader-password"
+  cloud_make_secret tokenlean-lite-grafana-reader "password=grafana-reader-password" || true
   local provider=()
   for var in $(env | sed -n 's/^\(LLM_KEY_[A-Z0-9_]*\)=.\{1,\}$/\1/p'); do
     printf '%s' "${!var}" >"$tmp/$var"

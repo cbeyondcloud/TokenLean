@@ -1,5 +1,7 @@
 # Mounted as langfuse.yaml when the stack runs with Langfuse (up --grafana --langfuse): Per Call's
-# trace panels read Langfuse's own database. Same server and login as the gateway's database.
+# trace panels read Langfuse's own database. Same server and login as the gateway's database:
+# the stack's SELECT-only login, which reads only the tables Per Call queries (observations,
+# scores) there.
 apiVersion: 1
 
 datasources:
