@@ -471,6 +471,26 @@ owner's tables, so its startup schema steps skip them: after an upgrade, start t
 once with the owner's `DATABASE_URL` (its schema steps then run), re-run the command so
 the grants cover any new table, and switch back.
 
+**A read-only login for dashboards.** Grafana (or any reporting tool) should not log in as the
+tables' owner. `python -m readonly_role --role tokenlean_grafana --grant tokenlean:usage_events`
+from `src/proxy`, as the owner (`DATABASE_URL`) with `READONLY_ROLE_PASSWORD` set, creates or
+re-aligns a LOGIN role that reads exactly the tables named (`--grant DATABASE:TABLE,...`,
+repeatable) and nothing else: no write, no CREATE, no superuser or role-creation rights, no
+role membership, and read-only transactions by default, with a `statement_timeout`
+(`--statement-timeout`, 60s) and a connection limit (`--connection-limit`, 20).
+`--revoke DATABASE` takes back what it held in a database it should no longer read, and
+`--lock-large-objects DATABASE` revokes the large-object write functions from PUBLIC there
+(it needs their owner, a superuser; TokenLean uses no large objects). It is idempotent and
+waits up to `--wait-seconds` (300) for a database or table that does not exist yet; a wrong
+owner password fails at once. Before changing anything it refuses an existing role of that
+name with more rights (superuser, CREATEDB, CREATEROLE, REPLICATION, BYPASSRLS, an owner of
+any object, CREATE on the database, tables in another schema, a grant option). It means no
+table writes, not protection against resource abuse: PUBLIC's defaults (TEMP on the
+database; on PostgreSQL 14 and earlier CREATE on schema `public`, which it reports) still
+apply. On PostgreSQL 16+ a CREATEROLE owner can only alter roles it administers. The LITE
+local stack runs it at every `up --grafana`; the LITE chart's migration hook runs it with
+`dashboards.reader.enabled`.
+
 ### ip_allowlist
 
 App-level source-IP allowlist (CIDR) for the proxy request path, enforced in core `_authenticate` for the `/v1/*` routes (`net/ip_allowlist.py`). The global list is **off by default** — OSS/self-host is open — and no deploy script turns it on. A tenant's own list is enforced either way.

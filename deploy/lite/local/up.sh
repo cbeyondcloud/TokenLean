@@ -68,6 +68,7 @@ fill LANGFUSE_NEXTAUTH_SECRET "$(rand_hex 32)"
 fill LANGFUSE_SALT "$(rand_hex 32)"
 fill LANGFUSE_INIT_USER_PASSWORD "$(rand_hex 16)"
 fill GRAFANA_ADMIN_PASSWORD "$(rand_hex 16)"
+fill GRAFANA_DB_PASSWORD "$(rand_hex 24)"
 chmod 600 "$LITE_ENV_FILE" 2>/dev/null || true
 lite_load_env
 
