@@ -1,6 +1,7 @@
 {{- if .Values.migrations.enabled }}
 {{- $m := .Values.migrations }}
 {{- $user := $m.user | default .Values.postgres.user }}
+{{- $r := .Values.dashboards.reader }}
 # The migration hook: the proxy's own schema steps, once, before the new pods start. A hook
 # runs before the release's other objects exist, so it reads only the Postgres Secret, and
 # runs under the namespace's default service account (with no API token mounted).
@@ -37,7 +38,28 @@ spec:
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           # The image keeps metrics in PROMETHEUS_MULTIPROC_DIR, under /tmp (an emptyDir).
+          {{- if $r.enabled }}
+          # Then the dashboards' SELECT-only login (dashboards.reader); its settings are
+          # arguments, never shell text.
+          command: ["sh", "-c", 'mkdir -p "$PROMETHEUS_MULTIPROC_DIR" && python -m schema_setup && exec python -m readonly_role "$@"', "readonly_role"]
+          args:
+            - --role
+            - {{ required "dashboards.reader.user is required" $r.user | quote }}
+            - --grant
+            - {{ printf "%s:%s" .Values.postgres.database (join "," (required "dashboards.reader.tables is required" $r.tables)) | quote }}
+            - --statement-timeout
+            - {{ $r.statementTimeout | default "60s" | quote }}
+            - --connection-limit
+            - {{ $r.connectionLimit | default 20 | quote }}
+            {{- if $r.lockLargeObjects }}
+            - --lock-large-objects
+            - {{ .Values.postgres.database | quote }}
+            {{- end }}
+            - --wait-seconds
+            - "60"
+          {{- else }}
           command: ["sh", "-c", 'mkdir -p "$PROMETHEUS_MULTIPROC_DIR" && exec python -m schema_setup']
+          {{- end }}
           env:
             - name: DATABASE_URL
               value: {{ include "tokenlean-lite.databaseUrl" (dict "root" . "user" $user) | quote }}
@@ -46,6 +68,13 @@ spec:
                 secretKeyRef:
                   name: {{ $m.existingSecret | default .Values.postgres.existingSecret }}
                   key: {{ $m.passwordSecretKey | default .Values.postgres.passwordSecretKey }}
+            {{- if $r.enabled }}
+            - name: READONLY_ROLE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "dashboards.reader.existingSecret is required" $r.existingSecret }}
+                  key: {{ $r.passwordSecretKey | default "password" }}
+            {{- end }}
             {{- include "tokenlean-lite.postgresCaEnv" . | nindent 12 }}
             - name: LOG_LEVEL
               value: {{ .Values.proxy.logLevel | quote }}

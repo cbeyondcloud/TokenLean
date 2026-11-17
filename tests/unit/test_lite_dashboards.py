@@ -119,13 +119,16 @@ def test_the_full_stack_dashboards_keep_working_without_a_team_choice():
                 assert var["current"]["value"] == "$__all"
 
 
-# ── A list variable's value stays a string literal (the team picker lists usage_events.team,
-#    which a gateway's X-Team sets to any text; user_id and model are the caller's too) ──
+# ── Every variable's value stays a string literal. The team picker lists usage_events.team,
+#    which a gateway's X-Team sets to any text; user_id and model are the caller's too. A
+#    textbox is typed text, and Grafana keeps a URL's ?var-x= value even when it is not one of
+#    a custom variable's options, so a crafted link can set any variable to any text. ──
 
 
 _EVERY_DASHBOARD = tuple(sorted(p.name for p in DASHBOARD_DIR.glob("*.json")))
 _HOSTILE = ("t' OR true OR 't", ") GROUP BY 1; DELETE FROM usage_events; --",
-            "x\\' OR true --", 'q"uote', "IS NULL OR true OR")
+            "x\\' OR true --", 'q"uote', "IS NULL OR true OR",
+            "1; DELETE FROM usage_events", "1 UNION SELECT 1", "-5", "99999999999")
 _SAFE_FORMATS = {"sqlstring", "percentencode"}
 
 
@@ -147,19 +150,27 @@ def _defaults(dashboard: dict) -> dict:
     return out
 
 
+def _variable_refs(sql: str):
+    """(name, format, character before) of every template variable in ``sql``; Grafana's own
+    macros ($__timeFilter and the like) are not variables."""
+    import re
+    for m in re.finditer(r"(.?)\$\{(\w+)(?::(\w+))?\}|(.?)\$(\w+)\b", sql, re.S):
+        name = m.group(2) or m.group(5)
+        if not name.startswith("__"):
+            yield name, m.group(3), m.group(1) or m.group(4) or ""
+
+
 @pytest.mark.parametrize("fname", _EVERY_DASHBOARD)
-def test_a_list_variable_reaches_sql_only_in_a_format_that_quotes_it(fname):
+def test_every_variable_reaches_sql_only_in_a_format_that_quotes_it(fname):
     """Without a format Grafana's SQL datasource wraps an includeAll value in quotes itself, so
     '${v}' renders ''value'': every chosen value is a syntax error and its quote-free text is
-    SQL. ${v:sqlstring} is a whole literal; '${v:percentencode}' can hold no quote."""
-    import re
-    lists = {v["name"] for v in variables(load(fname)) if v.get("includeAll")}
+    SQL. Any other variable goes in bare: LIMIT ${n} with n = "1; DELETE ..." is a second
+    statement. ${v:sqlstring} is a whole literal; '${v:percentencode}' can hold no quote. A
+    number is read out of the literal (a numeric guard), never pasted in as SQL."""
+    names = {v["name"] for v in variables(load(fname))}
     for where, sql in _sql_texts(load(fname)):
-        for m in re.finditer(r"(.?)\$\{(\w+)(?::(\w+))?\}|(.?)\$(\w+)\b", sql):
-            name = m.group(2) or m.group(5)
-            if name not in lists:
-                continue
-            fmt, before = m.group(3), m.group(1) or ""
+        for name, fmt, before in _variable_refs(sql):
+            assert name in names, f"{fname} {where}: ${name} is not a variable of the dashboard"
             assert fmt in _SAFE_FORMATS, f"{fname} {where}: ${name} without a quoting format"
             if fmt == "sqlstring":
                 assert before != "'", f"{fname} {where}: ${{{name}:sqlstring}} quoted twice"
@@ -168,22 +179,38 @@ def test_a_list_variable_reaches_sql_only_in_a_format_that_quotes_it(fname):
 
 
 @pytest.mark.parametrize("fname", _EVERY_DASHBOARD)
-def test_any_value_of_a_list_variable_stays_inside_a_string_literal(fname):
-    """Rendered the way Grafana 10.4 renders it, a chosen value, All, and hostile values give
-    the same SQL once string literals are set aside: the value can never become SQL."""
+def test_any_value_of_any_variable_stays_inside_a_string_literal(fname):
+    """Rendered the way Grafana 10.4 renders it, a chosen value, All (for a list), and hostile
+    values give the same SQL once string literals are set aside: the value can never become
+    SQL."""
     from tests.grafana_template import ALL, render, skeleton
     d = load(fname)
-    lists = [v["name"] for v in variables(d) if v.get("includeAll")]
     for where, sql in _sql_texts(d):
-        used = [n for n in lists if "$" + n in sql or "${" + n in sql]
-        for name in used:
+        for name in sorted({n for n, _, _ in _variable_refs(sql)}):
+            var = next(v for v in variables(d) if v["name"] == name)
             shapes = {}
-            for value in (ALL, "payments") + _HOSTILE:
+            for value in ((ALL,) if var.get("includeAll") else ()) + ("payments",) + _HOSTILE:
                 rendered = render(sql, variables(d), {**_defaults(d), name: value}, "a", "b")
                 shapes[value] = skeleton(rendered)
+            first = next(iter(shapes.values()))
             assert len(set(shapes.values())) == 1, (
                 f"{fname} {where}: ${name} changes the SQL: "
-                f"{[v for v in shapes if shapes[v] != shapes[ALL]]}")
+                f"{[v for v in shapes if shapes[v] != first]}")
+
+
+def test_the_requests_explorer_row_limit_is_a_bounded_integer():
+    """The row limit is an integer read from its literal: the default when the text holds no
+    digits, and never more rows than the largest option (a crafted link cannot ask for more)."""
+    import re
+    d = load("requests.json")
+    var = next(v for v in variables(d) if v["name"] == "row_limit")
+    options = [int(o["value"]) for o in var["options"]]
+    limits = [s for _, s in _sql_texts(d) if "${row_limit" in s]
+    assert len(limits) == 1
+    m = re.search(r"LIMIT LEAST\(GREATEST\(COALESCE\(substring\(btrim\(\$\{row_limit:sqlstring\}\) "
+                  r"from '\^\[0-9\]\{1,9\}'\)::int, (\d+)\), 1\), (\d+)\)$", limits[0])
+    assert m, limits[0][-200:]
+    assert int(m.group(1)) == int(var["current"]["value"]) and int(m.group(2)) == max(options)
 
 
 # ── Provisioning: deploy/lite's optional Grafana (`up --grafana`) loads exactly the set ──
@@ -293,3 +320,22 @@ def test_prometheus_scrapes_the_proxy_with_the_scrape_token_file():
     target = dict((t, s) for s, t in _mounts("prometheus"))
     secrets_dir = next(t for t in target if target[t] == "./.state/prometheus")
     assert auth["credentials_file"].startswith(secrets_dir + "/")
+
+
+_LIKE_ESCAPE = (r"replace(replace(replace(${%s:sqlstring}, '\', '\\'), '%%', '\%%'), "
+                r"'_', '\_')")
+
+
+@pytest.mark.parametrize("fname", _EVERY_DASHBOARD)
+def test_a_variable_in_a_like_pattern_matches_literally(fname):
+    r"""A search box is text, not a LIKE pattern: % _ and \ in it are escaped (LIKE's default
+    escape is \), so "user_1" never matches "user-1". Every variable on the pattern side of a
+    LIKE / ILIKE goes through the escape, and none sits inside a pattern literal."""
+    import re
+    for where, sql in _sql_texts(load(fname)):
+        for m in re.finditer(r"\bI?LIKE\s+(.*?)(?=\)\s*(?:AND|OR|ORDER|GROUP|LIMIT|$))", sql):
+            pattern = m.group(1)
+            assert not re.match(r"'[^']*\$", pattern), f"{fname} {where}: {pattern[:60]}"
+            for name, _fmt, _ in _variable_refs(pattern):
+                assert pattern.count(_LIKE_ESCAPE % name) == pattern.count("${" + name), (
+                    f"{fname} {where}: ${name} in a LIKE pattern unescaped")

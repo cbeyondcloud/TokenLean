@@ -533,7 +533,7 @@ class TestSavingsDashboardsReadUsageEvents:
         assert queries, f"{fname}: no AppDB panel"
         for name, sql, _ in queries:
             assert TENANT_FILTER in sql, f"{fname}: {name!r} ignores the tenant"
-            if "request_id = '${request_id}'" not in sql:        # per-call reads one row, any
+            if "request_id = ${request_id:sqlstring}" not in sql:        # per-call reads one row, any
                 assert "COALESCE(billable, true)" in sql, f"{fname}: {name!r} counts non-billable rows"
 
     @pytest.mark.parametrize("fname", SAVINGS_DASHBOARDS)

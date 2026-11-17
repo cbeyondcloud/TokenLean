@@ -134,7 +134,8 @@ def test_create_secrets_uses_the_names_dev_yaml_gives():
     dev = yaml.safe_load(_read(os.path.join(_CLOUD, "values", "dev.yaml")))
     chart = yaml.safe_load(_read(os.path.join(_CLOUD, "helm", "tokenlean-lite", "values.yaml")))
     names = {dev["redis"]["existingSecret"], chart["proxyKeys"]["existingSecret"],
-             chart["metrics"]["existingSecret"], chart["providerKeys"]["existingSecret"]}
+             chart["metrics"]["existingSecret"], chart["providerKeys"]["existingSecret"],
+             chart["dashboards"]["reader"]["existingSecret"]}
     for script in ("_lib.sh", "_lib.ps1"):
         text = _read(os.path.join(_CLOUD, script))
         for name in names:
@@ -311,7 +312,8 @@ def test_install_create_secrets_makes_the_dev_secrets_from_files(stubs):
     created = [c for c in kubectl if "create secret generic" in c]
     names = {re.search(r"create secret generic (\S+)", c).group(1) for c in created}
     assert names == {"tokenlean-lite-bootstrap-keys", "tokenlean-lite-redis",
-                     "tokenlean-lite-metrics", "tokenlean-lite-provider-keys"}
+                     "tokenlean-lite-metrics", "tokenlean-lite-provider-keys",
+                     "tokenlean-lite-grafana-reader"}
     assert not [c for c in created if "--from-literal" in c]
     # Relative file names: Git Bash rewrites no path after `--from-file=key=`, so an absolute
     # /tmp path would not reach a Windows kubectl.exe.
