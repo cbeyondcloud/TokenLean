@@ -21,6 +21,18 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-11-17
+
+### Dependency security refresh: Pillow, filelock, pyasn1, litellm, mem0ai, nltk, OpenTelemetry — Bug fix
+Closes the open Dependabot advisories across the proxy, the sidecars and the pipelines by
+re-pinning through `scripts/compile-requirements.sh` (Dependabot's own PRs re-pin the CUDA runtime).
+Proxy: Pillow 12.3 → 13.0 (critical), filelock 4.2.11, pyasn1 0.6.5, litellm 1.95.1 → 1.103.7,
+mem0ai 2.2.1, OpenTelemetry 1.44 → 1.45.2, fastembed 0.9.1; doc-pipeline: unstructured 0.27.37,
+Pillow 13, filelock 4.2.11; nltk 3.10.4 in llmlingua. Two upstream caps had been holding fixes back
+or pulling them backwards (fastembed 0.8 capped Pillow <13; litellm ≥1.104 and unstructured 0.27.10
+capped filelock <4, so a plain upgrade *downgraded* filelock), so the `requirements.in` files now carry
+explicit security floors that the resolver can no longer satisfy with a vulnerable release.
+
 ## 2026-11-16
 
 ### LITE: Grafana reads through a read-only login; dashboard SQL variables guarded — Bug fix
