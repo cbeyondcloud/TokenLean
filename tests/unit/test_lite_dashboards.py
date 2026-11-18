@@ -24,6 +24,9 @@ LITE_SET = ("live.json", "requests.json", "billing.json", "latency-breakup.json"
             "trust-safety.json", "trends.json", "quarterly.json")
 LANGFUSE_ONLY = ("per-call.json",)
 NOT_IN_LITE = ("tenant-overview.json",)
+# Gitignored, never shipped: renders only for the pitch harness's synthetic users. Present on
+# a working checkout, absent from a clean one. Still held to the SQL-quoting checks below.
+INTERNAL = ("pitch-comparison.json",)
 ALL_LITE = LITE_SET + LANGFUSE_ONLY
 # Only Prometheus panels: a team picker there would filter nothing, so they have none.
 PROMETHEUS_ONLY = ("latency-breakup.json", "trust-safety.json")
@@ -73,7 +76,7 @@ def variables(dashboard: dict) -> list:
 
 
 def test_the_set_names_existing_dashboards_and_leaves_tenant_overview_out():
-    on_disk = {p.name for p in DASHBOARD_DIR.glob("*.json")}
+    on_disk = {p.name for p in DASHBOARD_DIR.glob("*.json")} - set(INTERNAL)
     assert set(ALL_LITE) <= on_disk
     assert not set(NOT_IN_LITE) & set(ALL_LITE)
     assert on_disk - set(ALL_LITE) == set(NOT_IN_LITE)   # a new dashboard needs a decision
