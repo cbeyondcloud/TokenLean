@@ -50,17 +50,17 @@ pygments==2.20.0
     # via
     #   -c ../src/proxy/requirements.txt
     #   pytest
-pytest==9.1.1
+pytest==9.2.0
     # via
     #   -r requirements-test.in
     #   pytest-asyncio
     #   pytest-cov
     #   pytest-mock
-pytest-asyncio==1.4.0
+pytest-asyncio==1.5.0
     # via -r requirements-test.in
 pytest-cov==7.1.0
     # via -r requirements-test.in
-pytest-mock==3.16.0
+pytest-mock==3.17.0
     # via -r requirements-test.in
 pyyaml==6.0.3
     # via

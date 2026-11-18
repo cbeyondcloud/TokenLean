@@ -8,7 +8,7 @@ All **Python package dependencies** used by the Token Optimisation proxy. Every 
 
 | Package | Version | SPDX License | Notes |
 |---|---|---|---|
-| litellm | >=1.95.1,<2.0.0 | MIT | LLM provider abstraction |
+| litellm | >=1.100.4,<2.0.0 | MIT | LLM provider abstraction |
 | boto3 | >=1.34.0 | Apache-2.0 | AWS Bedrock provider lane (litellm `bedrock/`) |
 | fastapi | >=0.111.0 | MIT | HTTP framework |
 | uvicorn[standard] | >=0.30.0 | BSD-3-Clause | ASGI server |
@@ -30,6 +30,10 @@ All **Python package dependencies** used by the Token Optimisation proxy. Every 
 | prometheus-client | >=0.20.0 | Apache-2.0 AND BSD-2-Clause | Metrics exposition |
 | instructor | >=1.3.0 | MIT | Structured LLM output |
 | jsonschema | >=4.20.0 | MIT | G11 output JSON-schema validation |
+| filelock | >=4.2.1 | MIT | Security floor on a transitive dependency (not imported) |
+| pillow | >=13.0.0 | MIT-CMU | Security floor on a transitive dependency (not imported) |
+| pyasn1 | >=0.6.5 | BSD-2-Clause | Security floor on a transitive dependency (not imported) |
+| opentelemetry-api | >=1.45.2 | Apache-2.0 | Security floor on a transitive dependency (not imported) |
 
 ## Optional Dependencies
 
@@ -37,7 +41,7 @@ Imported via `try/except`, so the proxy starts without them, and used only when 
 
 | Package | Version | SPDX License | Used By | Feature |
 |---|---|---|---|---|
-| mem0ai | >=2.0.7 | Apache-2.0 | G10 | Long-term conversation memory |
+| mem0ai | >=2.0.18 | Apache-2.0 | G10 | Long-term conversation memory |
 | presidio-analyzer | >=2.2 | MIT | G29 | Higher-recall PII backend (`use_presidio: true`); the default regex tier needs no dependency |
 
 ## License Verification Sources

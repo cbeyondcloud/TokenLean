@@ -9,7 +9,7 @@
 # are resolved against; a pin would drag the ~2.5 GB CUDA wheel back in), its CUDA
 # runtime (nvidia-*, cuda-*, triton), and uvloop (Linux-only; pulled on Linux via
 # uvicorn[standard]'s own environment marker).
-litellm>=1.95.1,<2.0.0                       # MIT — floor 1.95.1: the fix for GHSA-3cv6-jpf6-8222 (request-body routing parameters); cap pre-2.0 to avoid breaking changes
+litellm>=1.100.4,<2.0.0                      # MIT — floor 1.100.4: the latest advisory fix (earlier floor 1.95.1 fixed GHSA-3cv6-jpf6-8222, request-body routing parameters); cap pre-2.0 to avoid breaking changes
 boto3>=1.34.0                                # Apache-2.0 — AWS Bedrock provider lane (litellm `bedrock/`); pulls in botocore
 fastapi>=0.111.0                             # MIT
 uvicorn[standard]>=0.30.0                    # BSD-3-Clause
@@ -32,6 +32,15 @@ prometheus-client>=0.20.0                    # Apache-2.0 AND BSD-2-Clause
 instructor>=1.3.0                            # MIT
 jsonschema>=4.20.0                           # MIT — G11 output JSON-schema validation (validate_output); also a transitive litellm dep, pinned here as a direct dependency
 
+# Security floors on TRANSITIVE packages. Not imported by us: listed so the resolver can
+# never satisfy an upstream cap by downgrading to a vulnerable release. On 2026-11-17 a
+# plain upgrade moved filelock 4.2.4 -> 3.32.7 (litellm >=1.104 capped it <4) and left
+# pillow on 12.3 (fastembed 0.8 capped it <13), both with open advisories.
+filelock>=4.2.1                              # MIT — Dependabot filelock advisories, patched in 4.2.1
+pillow>=13.0.0                               # MIT-CMU — Dependabot pillow advisories (incl. critical), patched in 13.0.0
+pyasn1>=0.6.5                                # BSD-2-Clause — GHSA-2qm8-x737-gmw5 et al., patched in 0.6.5
+opentelemetry-api>=1.45.2                    # Apache-2.0 — GHSA-mf5v-w3w3-f6cg, patched in 1.45.2
+
 # Optional deps — imported via try/except; install only when the feature is enabled
-mem0ai>=2.0.7                                # Apache-2.0
+mem0ai>=2.0.18                               # Apache-2.0 — floor 2.0.18: advisory GHSA-5324-3w58-qpp2
 presidio-analyzer>=2.2                       # MIT — optional higher-recall PII backend for G29 (use_presidio: true); regex tier is the default and needs no dep

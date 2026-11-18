@@ -35,7 +35,7 @@ defusedxml==0.7.1
     # via nltk
 fastapi==0.142.2
     # via -r requirements.in
-filelock==4.2.4
+filelock==4.2.11
     # via
     #   huggingface-hub
     #   torch
@@ -81,14 +81,14 @@ mpmath==1.3.0
     # via sympy
 networkx==3.6.1
     # via torch
-nltk==3.10.3
+nltk==3.10.4
     # via llmlingua
 numpy==2.4.6
     # via
     #   accelerate
     #   llmlingua
     #   transformers
-opentelemetry-api==1.45.1
+opentelemetry-api==1.45.2
     # via fastapi
 packaging==26.3
     # via

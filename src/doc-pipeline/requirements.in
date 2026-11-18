@@ -8,3 +8,9 @@ qdrant-client>=1.12,<1.13
 langchain-text-splitters>=0.2.0
 fastembed>=0.3.0
 tiktoken>=0.13.0
+# Security floors on transitive packages (not imported): stop the resolver satisfying an
+# upstream cap with a vulnerable release (unstructured 0.27.10 capped filelock <4,
+# fastembed 0.8 capped pillow <13).
+filelock>=4.2.1
+pillow>=13.0.0
+pyasn1>=0.6.5
