@@ -21,8 +21,17 @@ COPY requirements.txt .
 # resolves to it instead of the full CUDA build (~2.5 GB) from PyPI. requirements.txt
 # leaves it (and its CUDA companions) out, so it is pinned here: at the version
 # requirements.in names, which the pins are resolved against.
-RUN pip install --no-cache-dir torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
-RUN pip install --no-cache-dir -r requirements.txt
+# pip's download cache is a BuildKit cache mount, not a layer: the image holds no cache, but
+# every package downloaded stays on the build host, across builds and failed attempts. A build
+# that dies on a stalled download (a slow PyPI CDN) keeps every file it finished, so the next
+# attempt fetches only what is missing, and a pin bump downloads only the changed packages.
+# The longer timeout and extra retries ride out a slow link instead of failing at pip's 15 s.
+# Needs BuildKit (the default builder since Docker 23 and in Docker Desktop and Compose v2;
+# set DOCKER_BUILDKIT=1 for an older one) or Podman/Buildah.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --timeout 60 --retries 10 torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --timeout 60 --retries 10 -r requirements.txt
 
 # Pre-bake the G05 L2 semantic-cache embedding model (bge-small) into the image so
 # there is NO runtime download. Essential for stateless GCP Cloud Run (no persistent

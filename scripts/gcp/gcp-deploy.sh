@@ -441,7 +441,8 @@ build_and_push() {
     local name="$1" ctx="$2"
     local image="${REGISTRY_URL}/${name}:latest"
     info "Building ${name} locally (docker build --platform=linux/amd64)..."
-    docker build --platform=linux/amd64 -t "${image}" "${ctx}" \
+    # BuildKit (the default since Docker 23): the proxy Dockerfile's RUN --mount needs it.
+    DOCKER_BUILDKIT=1 docker build --platform=linux/amd64 -t "${image}" "${ctx}" \
       || error "docker build failed for ${name}"
     info "Pushing ${name} to Artifact Registry..."
     docker push "${image}" \
