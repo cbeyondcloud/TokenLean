@@ -190,6 +190,18 @@ def test_each_image_installs_pinned_versions(image):
     assert not [name for name in pinned if name.startswith(FORBIDDEN_PIN_PREFIXES)]
 
 
+# A pip install step, as one logical RUN line: optionally on pip's BuildKit cache mount, then
+# either --no-cache-dir (the sidecars) or the cache-mount step's timeout and retries (the proxy).
+PIP_INSTALL = (r"^RUN (?:--mount=type=cache,target=/root/\.cache/pip )?pip install "
+               r"(?:--no-cache-dir |--timeout \d+ --retries \d+ )")
+
+
+def _dockerfile_runs(image: str) -> str:
+    """The image's Dockerfile with backslash-continued lines joined, so each RUN is one line."""
+    text = (REPO_ROOT / image / "Dockerfile").read_text(encoding="utf-8")
+    return re.sub(r"[ \t]*\\\n[ \t]*", " ", text)
+
+
 @pytest.mark.parametrize("image", ["src/proxy", *SIDECARS])
 def test_an_image_whose_pins_need_torch_installs_the_cpu_torch_they_were_resolved_against(image):
     # torch is left out of requirements.txt (a PyPI pin would pull the CUDA build), so an image
@@ -197,8 +209,8 @@ def test_an_image_whose_pins_need_torch_installs_the_cpu_torch_they_were_resolve
     # names the same torch, so the compile resolves the pins against the torch the image runs:
     # resolved against a newer one, they could need it, and pip would fetch it from PyPI, CUDA
     # build and all.
-    dockerfile = (REPO_ROOT / image / "Dockerfile").read_text(encoding="utf-8")
-    installs = re.findall(r"^RUN pip install --no-cache-dir torch(\S*) --index-url "
+    dockerfile = _dockerfile_runs(image)
+    installs = re.findall(PIP_INSTALL + r"torch(\S*) --index-url "
                           r"https://download\.pytorch\.org/whl/cpu$", dockerfile, re.M)
     named = [line[len("torch"):] for line in _requirement_lines(f"{image}/requirements.in")
              if _name_of(line) == "torch"]
@@ -207,5 +219,24 @@ def test_an_image_whose_pins_need_torch_installs_the_cpu_torch_they_were_resolve
         return
     assert len(installs) == 1 and re.fullmatch(r"==\d+\.\d+\.\d+", installs[0]), installs
     assert named == installs, (named, installs)
-    assert (dockerfile.index("RUN pip install --no-cache-dir torch")
-            < dockerfile.index("RUN pip install --no-cache-dir -r requirements.txt"))
+    torch_at = re.search(PIP_INSTALL + r"torch==", dockerfile, re.M).start()
+    pins_at = re.search(PIP_INSTALL + r"-r requirements\.txt$", dockerfile, re.M).start()
+    assert torch_at < pins_at
+
+
+def test_the_proxy_image_keeps_its_pip_downloads_in_a_build_cache():
+    # The proxy's ~1.2 GB of packages are downloaded through pip's BuildKit cache mount, never
+    # with --no-cache-dir: with no cache, one stalled read from a slow PyPI CDN failed the whole
+    # layer and threw away every download, so each retry started from zero (2026-11-20: three
+    # LITE builds lost after 10, 1 and 85 minutes). The mount is outside the image, so the
+    # image is unchanged; the timeout and retries ride out a slow link.
+    dockerfile = _dockerfile_runs("src/proxy")
+    steps = re.findall(r"^RUN .*\bpip install\b.*$", dockerfile, re.M)
+    assert len(steps) == 2, steps                                  # CPU torch, then the pins
+    for step in steps:
+        assert step.startswith("RUN --mount=type=cache,target=/root/.cache/pip pip install "), step
+        assert "--no-cache-dir" not in step, step
+        knobs = re.search(r" --timeout (\d+) --retries (\d+) ", step)
+        assert knobs and int(knobs[1]) >= 60 and int(knobs[2]) >= 10, step
+    # pip runs as root, so its cache is /root/.cache/pip; the model bake runs after it, as uid 1000.
+    assert dockerfile.index(steps[-1]) < dockerfile.index("USER 1000")

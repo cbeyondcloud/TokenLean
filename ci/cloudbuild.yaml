@@ -72,6 +72,9 @@ steps:
   # Step 5: Build proxy Docker image (wait for tests to pass first)
   - name: 'gcr.io/cloud-builders/docker'
     id: build-proxy
+    # BuildKit: src/proxy/Dockerfile keeps pip's downloads in a RUN --mount cache, which the
+    # legacy builder rejects.
+    env: ['DOCKER_BUILDKIT=1']
     args:
       - build
       - '--platform=linux/amd64'

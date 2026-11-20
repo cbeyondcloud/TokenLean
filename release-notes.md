@@ -21,6 +21,17 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-11-20
+
+### Proxy image build keeps its package downloads across failed attempts — Bug fix
+`src/proxy/Dockerfile` installed its ~1.2 GB of Python packages with `--no-cache-dir` and pip's 15 s
+read timeout, so one stalled read from a slow PyPI CDN failed the whole layer and every retry
+started from zero (three LITE builds lost after 10, 1 and 85 minutes on 2026-11-20). Both pip
+steps now use a BuildKit cache mount (outside the image, which is unchanged) with a 60 s timeout
+and 10 retries: a retry fetches only the packages still missing, a pin bump only the changed ones.
+Cloud Build's proxy step and `gcp-deploy.sh` set `DOCKER_BUILDKIT=1`; the LITE README shows how
+to build the image ahead of a run and start with `up.sh --no-build`.
+
 ## 2026-11-17
 
 ### Dependency security refresh: Pillow, filelock, pyasn1, litellm, mem0ai, nltk, OpenTelemetry — Bug fix

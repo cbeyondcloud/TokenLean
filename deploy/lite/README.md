@@ -91,6 +91,15 @@ powershell -ExecutionPolicy Bypass -File .\down.ps1
 | `--grafana` | `-Grafana` | also run Grafana with the LITE dashboards and the Prometheus they read (UI: `http://127.0.0.1:3120`, user `admin`, `GRAFANA_ADMIN_PASSWORD` in `.env.lite`) |
 | `--no-build` | `-NoBuild` | reuse the existing proxy image |
 
+**Building the proxy image ahead of a run.** The image's Python packages (about 1.2 GB) download through pip's BuildKit cache, which stays on your machine across builds: a build that fails on a slow or stalling package mirror keeps every package it finished, so running it again fetches only what is missing, and a dependency bump fetches only the changed packages. To keep that wait out of `up`, build first, from the repository root, until it succeeds, then start without a rebuild:
+
+```
+docker build -t tokenlean-lite-proxy:local src/proxy
+deploy/lite/local/up.sh --no-build
+```
+
+`tokenlean-lite-proxy:local` is the name `up` builds and runs when `TOKENLEAN_IMAGE` is unset. The build needs BuildKit, Docker's default builder since Docker 23 and in Docker Desktop (set `DOCKER_BUILDKIT=1` on an older Docker), or Podman. `--no-cache` also skips the download cache, so leave it off a retry.
+
 `down --purge` / `down.ps1 -Purge` also deletes the Postgres, Redis, Qdrant, Prometheus and Grafana volumes, and with Postgres the keys issued through `/admin/keys`. `.env.lite` is kept, so the next `up` reuses the same keys and copies them into the fresh key store.
 
 ## Using it
