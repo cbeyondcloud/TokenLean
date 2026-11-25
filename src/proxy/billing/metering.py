@@ -71,10 +71,10 @@ class UsageMeter:
                 amt = int(getattr(s, "absolute_saving", 0) or 0)
                 if amt > 0:
                     group_savings[s.group] = group_savings.get(s.group, 0) + amt
-        trace_id = ""
-        if ctx.otel_span:
-            from tracing.otel import get_trace_id
-            trace_id = get_trace_id(ctx.otel_span)
+        # The exported trace's id, else the one the caller sent in traceparent: the row can
+        # be joined to the caller's trace without a collector.
+        from tracing.otel import request_trace_id
+        trace_id = request_trace_id(ctx)
         # C2: cache-hit / bypass rows skip G18, so cost_saving_usd is 0 even though the
         # whole LLM call was avoided. Show the avoided input cost (an estimate) so the
         # confidence story holds on cached traffic. (Token savings already reflect it.)

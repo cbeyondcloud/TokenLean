@@ -21,6 +21,21 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-11-24
+
+### Langfuse traces and usage rows carry the caller's run identity and trace id — Enhancement (OSS)
+A request's usage tags (the allow-listed headers of `billing.metering.tags`: run, step, agent, ...)
+were stored only on `usage_events.tags`, and its trace id only while spans were exported, so a
+Langfuse trace could not be found by run or joined to the caller's own trace without a collector.
+Now the trace id of a valid W3C `traceparent` is kept with export off and recorded as
+`usage_events.otel_trace_id`; a Langfuse trace's metadata gains `usage_tags` and `otel_trace_id`
+(`G18_observability.langfuse_usage_tags`, default on); `langfuse_tag_keys` and `langfuse_session_tag`
+(default none; the LITE profile sets run, step, agent, pipeline and one session per run) turn tags
+into Langfuse tags and the session, which is `<tenant>::<value>` unless
+`langfuse_session_tenant_scope` is off (LITE: off). Tenant-only tag keys (`user`) never reach a
+trace. Both controls are operator-only: a tenant's override is ignored. Existing metadata keys
+and `X-Trace-ID` are unchanged.
+
 ## 2026-11-20
 
 ### Proxy image build keeps its package downloads across failed attempts — Bug fix

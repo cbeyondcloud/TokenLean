@@ -89,6 +89,13 @@ def test_profile_effective_config(monkeypatch):
     assert g21["providers"]["anthropic"]["marker"] is False
     assert groups["G18_observability"]["enabled"] is True
     assert groups["G18_observability"]["langfuse_enabled"] is False   # optional, own overlay
+    # With the Langfuse overlay on, a trace is found by the run that made the call.
+    assert groups["G18_observability"]["langfuse_usage_tags"] is True
+    assert groups["G18_observability"]["langfuse_tag_keys"] == [
+        "run_id", "step", "agent", "pipeline"]
+    assert groups["G18_observability"]["langfuse_session_tag"] == "run_id"
+    # One organisation behind the gateway: the session id is the run id itself (linkable).
+    assert groups["G18_observability"]["langfuse_session_tenant_scope"] is False
     for key in ("G29_pii_redaction", "G30_guardrails", "G31_context_trust",
                 "G32_tool_eligibility"):
         assert groups[key]["enabled"] is True
@@ -114,6 +121,11 @@ def test_profile_turns_the_team_level_on(monkeypatch):
         key: f"v-{key}" for key in DEFAULT_TAG_HEADERS.values()}
     assert key_store_settings(cfg)["backend"] == "postgres"
     assert "teams" not in cfg              # teams are the deployment's, via /admin/routing
+    # The Langfuse tag and session keys name tags the allow-list records.
+    g18 = cfg["groups"]["G18_observability"]
+    recorded = set(DEFAULT_TAG_HEADERS.values())
+    assert set(g18["langfuse_tag_keys"]) <= recorded
+    assert g18["langfuse_session_tag"] in recorded
 
 
 def test_only_approved_groups_enabled(monkeypatch):
