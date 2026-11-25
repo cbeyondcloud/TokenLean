@@ -158,6 +158,43 @@ class TestUsageMeterBuildsEvent:
         assert event.cost_saved_usd > 0    # estimated avoided input cost, not 0
 
 
+class TestUsageMeterTraceId:
+    """usage_events.otel_trace_id names the request's trace: the exported span's, else the
+    id the caller sent in a W3C traceparent (kept even when no span is exported)."""
+
+    _TRACE = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+    def test_without_export_the_callers_trace_id_is_recorded(self):
+        ctx = _make_ctx()
+        ctx.caller_trace_id = self._TRACE          # main.py, from the traceparent header
+        assert ctx.otel_span is None
+        event = UsageMeter()._build_event(ctx, {})
+        assert event.otel_trace_id == self._TRACE
+
+    def test_a_no_op_span_does_not_hide_the_callers_id(self):
+        from tracing.otel import _NoOpSpan
+        ctx = _make_ctx()
+        ctx.caller_trace_id = self._TRACE
+        ctx.otel_span = ctx.otel_request_span = _NoOpSpan()
+        event = UsageMeter()._build_event(ctx, {})
+        assert event.otel_trace_id == self._TRACE
+
+    def test_no_trace_at_all_stays_empty(self):
+        ctx = _make_ctx()
+        assert ctx.caller_trace_id == ""
+        event = UsageMeter()._build_event(ctx, {})
+        assert event.otel_trace_id == ""
+
+    def test_an_exported_span_wins(self):
+        span = MagicMock()
+        span.get_span_context.return_value.trace_id = int("ab" * 16, 16)
+        ctx = _make_ctx()
+        ctx.caller_trace_id = self._TRACE
+        ctx.otel_span = span
+        event = UsageMeter()._build_event(ctx, {})
+        assert event.otel_trace_id == "ab" * 16
+
+
 class TestUsageMeterC1GroupSavings:
     """C1 — per-G-group realised savings JSONB blob."""
 

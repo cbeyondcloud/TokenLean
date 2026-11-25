@@ -21,12 +21,17 @@ span (``ctx.otel_span``) sits under it, each stage span under that, and
 (``propagate_trace_id_header``, on by default). ``forward_traceparent`` (off by default) sends
 the request span's context to the provider on every call.
 
+The caller's trace id is kept even when no span is exported: ``caller_trace_id`` reads it
+from the ``traceparent`` header (``ctx.caller_trace_id``), and ``request_trace_id`` (what a
+usage row and a Langfuse trace record) is the exported trace's id, else the caller's.
+
 OSS stack: opentelemetry-sdk (Apache-2), opentelemetry-exporter-otlp (Apache-2).
 Gracefully no-ops when opentelemetry is not installed so unit tests run without
 the SDK dependency.
 """
 import logging
 import os
+import re
 from typing import Any, Dict, List, Mapping, Optional
 
 logger = logging.getLogger(__name__)
@@ -51,6 +56,12 @@ TRACE_ID_HEADER = b"x-trace-id"
 # W3C trace context (https://www.w3.org/TR/trace-context/): the headers read from a request
 # and, with forward_traceparent on, written on the provider call.
 _TRACE_CONTEXT_HEADERS = ("traceparent", "tracestate")
+# A traceparent as the OpenTelemetry W3C propagator reads it (caller_trace_id must accept
+# exactly what it accepts): version, trace id, parent (span) id, flags, lower-case hex only,
+# then whatever a later version adds. Longer than the limit, it is not read at all.
+_TRACEPARENT = re.compile(
+    r"^[ \t]*([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(-.*)?[ \t]*$")
+_TRACEPARENT_MAX_CHARS = 512
 
 # OpenTelemetry GenAI semantic-convention attributes set on the request span. A backend's
 # dashboards key on these names, so they are pinned by a test. gen_ai.provider.name is the
@@ -239,6 +250,34 @@ def _trace_context_carrier(headers: Any) -> Dict[str, str]:
     return carrier
 
 
+def caller_trace_id(headers: Any) -> str:
+    """The trace id the caller named: the 32 lower-case hex digits of the request's W3C
+    ``traceparent``, read from the header itself so it is known when no span is exported
+    (and when the OpenTelemetry packages are absent). It accepts exactly what the
+    OpenTelemetry W3C propagator accepts, so the id recorded with export off is the one an
+    exported span would carry: a single header of at most 512 characters, any version but
+    ``ff`` (a later version is read by its first four fields; version ``00`` has only
+    those), a non-zero trace id and span id, spaces or tabs around it ignored. A malformed
+    or repeated header gives "", as it starts a new trace when spans are exported. Never
+    raises."""
+    try:
+        value = _trace_context_carrier(headers).get("traceparent", "")
+        if len(value) > _TRACEPARENT_MAX_CHARS:
+            return ""
+        match = _TRACEPARENT.search(value)
+    except Exception as exc:
+        logger.debug("traceparent ignored: %s", exc)
+        return ""
+    if match is None:
+        return ""
+    version, trace_id, span_id = match.group(1), match.group(2), match.group(3)
+    if version == "ff" or (version == "00" and match.group(5)):
+        return ""
+    if trace_id == "0" * 32 or span_id == "0" * 16:
+        return ""
+    return trace_id
+
+
 def parent_context(headers: Any) -> Any:
     """The caller's span, from the request's ``traceparent`` (and ``tracestate``), as the
     OTel context a span starts under; None when there is none or it is malformed (the W3C
@@ -364,6 +403,22 @@ def response_trace_id(ctx: Any) -> str:
         return ""
     return (get_trace_id(getattr(ctx, "otel_span", None))
             or get_trace_id(getattr(ctx, "otel_request_span", None)))
+
+
+def request_trace_id(ctx: Any) -> str:
+    """The trace id a request is recorded under (``usage_events.otel_trace_id``, a Langfuse
+    trace's metadata): its exported trace (the pipeline span, else the request span), else
+    the id the caller sent in ``traceparent`` (``ctx.caller_trace_id``), so a caller can
+    join its own trace to the records without a collector. "" when neither is known. Not
+    the X-Trace-ID response header: ``response_trace_id`` names an exported trace only."""
+    if ctx is None:
+        return ""
+    exported = (get_trace_id(getattr(ctx, "otel_span", None))
+                or get_trace_id(getattr(ctx, "otel_request_span", None)))
+    if exported:
+        return exported
+    caller = getattr(ctx, "caller_trace_id", "")
+    return caller if isinstance(caller, str) else ""
 
 
 class TraceIdHeaderMiddleware:

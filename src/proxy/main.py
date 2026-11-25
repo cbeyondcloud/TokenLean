@@ -40,7 +40,9 @@ from auth.api_key_manager import (
 )
 from net.client_ip import ClientIPMiddleware, request_client_ip
 from net.ip_allowlist import ip_allowed
-from tracing.otel import TraceIdHeaderMiddleware, finish_request_span, start_request_span
+from tracing.otel import (
+    TraceIdHeaderMiddleware, caller_trace_id, finish_request_span, start_request_span,
+)
 from config_loader import get_config, get_fallback_request_model, load_config, start_hot_reload
 from tenancy.resolver import resolve_tenant
 from providers import get_adapter, get_provider_entry
@@ -2358,6 +2360,9 @@ async def _serve_request_core(
     # The raw request headers: a repeated traceparent is malformed (W3C) on every route,
     # which a dict view (one value per name) cannot show.
     ctx.otel_request_span = start_request_span(ctx, request.headers)
+    # The caller's trace id, kept even when no span is exported: usage rows and Langfuse
+    # traces record it (tracing.otel.request_trace_id).
+    ctx.caller_trace_id = caller_trace_id(request.headers)
     # Read when the response starts (TraceIdHeaderMiddleware): its X-Trace-ID, on every path.
     state = getattr(request, "state", None)
     if state is not None:

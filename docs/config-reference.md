@@ -554,6 +554,13 @@ is the root of a new trace. `X-Trace-ID` names the caller's trace when the reque
 Because an authenticated caller's sampled flag wins over `sample_rate`, callers that sample
 everything raise the proxy's export volume accordingly.
 
+**Without a collector.** The trace id of a `traceparent` the propagator would accept is kept even when spans are not
+exported (`enabled` off): `usage_events.otel_trace_id` and, with
+`G18_observability.langfuse_usage_tags`, the Langfuse trace's `otel_trace_id` metadata record it,
+so a caller can join its own trace to its usage rows and Langfuse traces. With export on they
+record the exported trace's id (the same id when the request joined the caller's trace).
+`X-Trace-ID` is unchanged: it is sent only while spans are exported.
+
 **Attributes.** The request span carries the OpenTelemetry GenAI semantic-convention attributes:
 
 | Attribute | Value |
@@ -1315,6 +1322,10 @@ Agent-architecture enforcement — bounds system-prompt size and tool count.
 | `langfuse_host` | `http://langfuse-svc` | **Not read by the proxy.** The Langfuse endpoint comes from the `LANGFUSE_HOST` environment variable (the local compose stack sets `http://langfuse:3000`); keys from `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`. Setting this key changes nothing |
 | `prometheus_enabled` | `true` | Expose `/metrics` Prometheus counters |
 | `capture_trace_content` | `false` | Store the raw prompt and response in Langfuse traces (all tenants share one Langfuse project). A tenant's override wins. Even when on, a request whose PII G29 or G31 found and left in place (`flag`, or a `block`) is traced without its text, and with it off spans keep only their counts |
+| `langfuse_usage_tags` | `true` | Put the request's usage tags (`billing.metering.tags`, under [savings](#savings)) and its trace id on its Langfuse trace. The trace metadata gains `usage_tags` (the object of `usage_events.tags`: allow-listed headers only, credential-shaped values already dropped; the tenant-only tag keys of `billing.metering.tags.tenant_only_keys`, default `user`, are left out of the trace; that list is operator-only here too, so a tenant's override of it is ignored) and `otel_trace_id` (the exported trace's id, else the id of the caller's W3C `traceparent`, kept even when no span is exported; the same value as `usage_events.otel_trace_id`). A request with neither is traced exactly as before, and every existing metadata key is unchanged. A tenant's override wins |
+| `langfuse_tag_keys` | `[]` | Usage-tag keys that also become a Langfuse tag `<key>:<value>`, in this order, after `token-optimisation`; only keys the request sent, each cut to Langfuse's 200 characters. Makes traces filterable by, say, run or step in the Langfuse UI. A tenant-only tag key never becomes a tag, even when listed. Needs `langfuse_usage_tags`. The LITE profile sets `[run_id, step, agent, pipeline]` |
+| `langfuse_session_tag` | `''` | The usage-tag key whose value becomes the trace's Langfuse session when the request names no workflow or session id (`X-Workflow-ID` / `X-Session-ID` still win), so one run is one session. A tenant-only tag key is never the session. Needs `langfuse_usage_tags`. The LITE profile sets `run_id` |
+| `langfuse_session_tenant_scope` | `true` | Make the session id taken from `langfuse_session_tag` `<tenant>::<value>` (cut to 200 characters as a whole). Every tenant shares one Langfuse project and the tag value is the caller's to choose, so unscoped one tenant could add its traces to another tenant's session. `false` uses the value itself: for a single-organisation gateway whose dashboards link to the session by run id (the LITE profile sets `false`). A workflow or session id the request names itself is used as sent either way. **Operator-only**: read from the global config, so a tenant's override is ignored (a tenant may still choose its own `langfuse_session_tag`; the session stays under its tenant id) |
 | `label_values.team` / `label_values.feature` | *(unset)* | Allowlist for the `team` / `feature` metric label values. A list bounds cardinality: only `default` and the listed values keep their own label; anything else is folded to `other`. `"*"` keeps every value as-is. Unset, `feature` (any caller's `X-Feature`) keeps only `default`, and `team`, already the authenticated team (the key's team binding or a gateway's `X-Team`), keeps its value. |
 | `openllmetry_enabled` | `false` | Enable OTLP auto-instrumentation (set OTLP endpoint first). Needs the `traceloop-sdk` package, which the default image does not include — install it in your image, or the proxy logs a warning and leaves the feature off. Separate from Langfuse tracing (`langfuse_enabled`) |
 | `et_weights.input` | `1.0` | ET metric input weight |

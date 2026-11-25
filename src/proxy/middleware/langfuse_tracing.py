@@ -7,7 +7,9 @@ without importing the Langfuse SDK directly.
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+from config_loader import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,97 @@ def _should_capture_content(ctx: "RequestContext") -> bool:
         return False
 
 
+# The tag every trace of this proxy carries; usage-tag tags come after it.
+_BASE_TAGS = ("token-optimisation",)
+# Langfuse's own limit on a tag and on a session id: it drops a longer one, so a value taken
+# from a usage tag (up to billing.metering.tags.max_value_chars) is cut to it.
+_MAX_TAG_CHARS = 200
+
+
+def _g18_setting(ctx: "RequestContext", key: str, default: Any) -> Any:
+    """A G18_observability setting as this request sees it: the tenant's own value under
+    ``tenants.<id>.groups.G18_observability`` when it sets one, else the base value (read the
+    same way as ``capture_trace_content``)."""
+    base = ctx.config.get("groups", {}).get("G18_observability", {})
+    tenant_cfg = (
+        ctx.config.get("tenants", {})
+        .get(getattr(ctx, "tenant_id", "default"), {})
+        .get("groups", {})
+        .get("G18_observability", {})
+    )
+    return tenant_cfg.get(key, base.get(key, default))
+
+
+def _operator_g18_setting(key: str, default: Any) -> Any:
+    """A G18_observability setting from the operator's global config (``get_config``, what
+    the pipeline reads usage tags with), never from ``ctx.config``: that one has the
+    tenant's own overrides merged in, and a control that keeps tenants apart must not be the
+    tenant's to change. Unreadable: the default."""
+    config = get_config()
+    groups = config.get("groups") if isinstance(config, dict) else None
+    g18 = groups.get("G18_observability") if isinstance(groups, dict) else None
+    return g18.get(key, default) if isinstance(g18, dict) else default
+
+
+def _usage_tag_fields(ctx: "RequestContext") -> Tuple[Dict[str, Any], List[str], Optional[str]]:
+    """What a request's usage tags and trace id add to its Langfuse trace: the metadata keys,
+    the Langfuse tags after the base one, and a session id to use when the request names none.
+
+    With ``langfuse_usage_tags`` on (the default): ``otel_trace_id`` (the exported trace's id,
+    else the caller's ``traceparent`` id) when one is known, and ``usage_tags`` (a copy of
+    ``ctx.usage_tags``: allow-listed headers, credential-shaped values already dropped by
+    ``billing.tags``) when the request carried any. The tenant-only tag keys
+    (``billing.metering.tags.tenant_only_keys``, default ``user``) are left out first: they
+    reach neither the metadata nor a tag nor the session, whatever the settings below list.
+    ``langfuse_tag_keys`` lists the tag keys that also become a ``<key>:<value>`` Langfuse
+    tag, in that order; ``langfuse_session_tag`` names the one whose value is the session.
+    That session id is ``<tenant>::<value>`` while ``langfuse_session_tenant_scope`` is on
+    (the default): every tenant shares one Langfuse project, and the value is the caller's
+    to choose, so unscoped one tenant could add traces to another's session. The scope and
+    the tenant-only keys are the operator's (the global config): a tenant's override of
+    either is ignored, while the other three settings shape only its own traces. A request
+    without usage tags adds neither tags nor a session, so its trace is what it was. Never
+    raises: nothing is added instead."""
+    try:
+        if not _g18_setting(ctx, "langfuse_usage_tags", True):
+            return {}, [], None
+        metadata: Dict[str, Any] = {}
+        from tracing.otel import request_trace_id
+        trace_id = request_trace_id(ctx)
+        if trace_id:
+            metadata["otel_trace_id"] = trace_id
+        usage_tags = getattr(ctx, "usage_tags", None)
+        if not isinstance(usage_tags, dict) or not usage_tags:
+            return metadata, [], None
+        from billing.tags import tenant_only_keys, without_tenant_only
+        # The operator's list, as the usage export reads it: not the tenant's to shorten.
+        usage_tags = without_tenant_only(usage_tags, tenant_only_keys(get_config()))
+        if not usage_tags:
+            return metadata, [], None
+        metadata["usage_tags"] = dict(usage_tags)
+        tags: List[str] = []
+        keys = _g18_setting(ctx, "langfuse_tag_keys", [])
+        for key in keys if isinstance(keys, (list, tuple)) else ():
+            if isinstance(key, str) and key in usage_tags:
+                tag = f"{key}:{usage_tags[key]}"[:_MAX_TAG_CHARS]
+                if tag not in tags:
+                    tags.append(tag)
+        session_id = None
+        session_key = _g18_setting(ctx, "langfuse_session_tag", "")
+        if isinstance(session_key, str) and session_key:
+            value = usage_tags.get(session_key)
+            if isinstance(value, str) and value:
+                tenant_id = getattr(ctx, "tenant_id", "")
+                if (_operator_g18_setting("langfuse_session_tenant_scope", True)
+                        and isinstance(tenant_id, str) and tenant_id):
+                    value = f"{tenant_id}::{value}"
+                session_id = value[:_MAX_TAG_CHARS]
+        return metadata, tags, session_id
+    except Exception as exc:
+        logger.debug("Langfuse usage tags skipped: %s", exc)
+        return {}, [], None
+
+
 def start_trace(ctx: "RequestContext") -> Optional[Any]:
     """Create a Langfuse trace at the beginning of a request and store it on ctx."""
     cfg = ctx.config.get("groups", {}).get("G18_observability", {})
@@ -117,6 +210,10 @@ def start_trace(ctx: "RequestContext") -> Optional[Any]:
             or ctx.params.get("session_id")
             or ctx.params.get("x_session_id")
         )
+        # The caller's usage tags and trace id (langfuse_usage_tags): found by run, joined
+        # to usage_events. A workflow or session id the request names still decides.
+        tag_metadata, usage_tag_tags, tag_session_id = _usage_tag_fields(ctx)
+        session_id = session_id or tag_session_id
         trace = client.trace(
             id=ctx.request_id,
             name="llm-proxy-call",
@@ -126,8 +223,9 @@ def start_trace(ctx: "RequestContext") -> Optional[Any]:
                 "baseline_tokens": ctx.savings.baseline_tokens,
                 "user_id": ctx.user_id,
                 "tenant_id": ctx.tenant_id,
+                **tag_metadata,
             },
-            tags=["token-optimisation"],
+            tags=[*_BASE_TAGS, *usage_tag_tags],
             session_id=session_id,
         )
         ctx.langfuse_trace = trace
@@ -252,6 +350,9 @@ def finish_trace(ctx: "RequestContext", response: Optional[Dict[str, Any]] = Non
             **metadata,
             "user_id": ctx.user_id,
             "tenant_id": ctx.tenant_id,
+            # The usage tags and trace id start_trace recorded, re-affirmed with the identity
+            # fields so the final metadata carries them (langfuse_usage_tags).
+            **_usage_tag_fields(ctx)[0],
         }
         # Record the RAG collection (set from the X-Rag-Collection header) so
         # dashboards can classify RAG / Doc-Q&A requests. Without this the

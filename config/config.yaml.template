@@ -1399,6 +1399,29 @@ groups:
     # Langfuse project. A request whose PII G29/G31 found and left in place (flag/block) is
     # traced without its text even when on; spans keep their counts either way.
     capture_trace_content: false
+    # A request's usage tags (billing.metering.tags: the allow-listed headers a caller sends
+    # to say which run, step or agent made the call) and its trace id on its Langfuse trace.
+    # On: the trace metadata gains `usage_tags` (usage_events.tags without the tenant-only
+    # keys of billing.metering.tags.tenant_only_keys, which never reach a trace) and
+    # `otel_trace_id` (the exported trace's id, else the id of the caller's W3C traceparent,
+    # which is kept without a collector; it is usage_events.otel_trace_id too). A request
+    # with neither is traced exactly as before. A tenant's override wins.
+    langfuse_usage_tags: true
+    # Usage-tag keys that also become a Langfuse tag "<key>:<value>" (filterable in its UI),
+    # in this order, after "token-optimisation". Only keys the request sent; cut to Langfuse's
+    # 200 characters. Empty: no extra tag. Each distinct value is a tag in the project's filter.
+    langfuse_tag_keys: []
+    #  - run_id
+    #  - step
+    # The usage-tag key whose value is the trace's Langfuse session when the request names no
+    # workflow or session id (X-Workflow-ID / X-Session-ID win): one session per run. '' = none.
+    langfuse_session_tag: ''
+    # That session id is "<tenant>::<value>": every tenant shares one Langfuse project and the
+    # value is the caller's to choose, so unscoped one tenant could add traces to another's
+    # session. false = the value itself (a single-organisation gateway that links to it).
+    # A session the request names itself is used as sent either way. Operator-only, like
+    # billing.metering.tags.tenant_only_keys: a tenant's override of either is ignored.
+    langfuse_session_tenant_scope: true
     turn_efficiency_enabled: true
     tool_governance_enabled: true
     # Needs the traceloop-sdk package, which the default image does not include.

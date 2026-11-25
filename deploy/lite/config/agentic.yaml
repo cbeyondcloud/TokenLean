@@ -112,6 +112,12 @@ groups:
   # ── Observability ──────────────────────────────────────────────────────────────
   G18_observability:
     langfuse_enabled: false     # deploy/lite/config/langfuse.yaml turns it on
+    # When it is on, a trace is found by the run that made the call: these usage tags (the
+    # X-Agentic-* headers recorded below) become Langfuse tags, and a run is one session.
+    langfuse_tag_keys: [run_id, step, agent, pipeline]
+    langfuse_session_tag: run_id
+    # A single-organisation gateway: the session id is the run id itself, so a dashboard can link to it.
+    langfuse_session_tenant_scope: false
 
 observability:
   # Streams end with their actual cost (`: x-tokenlean-cost {...}`), so a caller can settle

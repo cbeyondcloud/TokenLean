@@ -88,6 +88,10 @@ class RequestContext:
     # with the outcome (finish_request_span sets otel_request_span_ended).
     otel_request_span: Optional[Any] = None
     otel_request_span_ended: bool = False
+    # The trace id of the caller's W3C traceparent (tracing.otel.caller_trace_id): 32 hex
+    # digits, "" for none or a malformed one. Known without span export, so usage rows and
+    # Langfuse traces can name the caller's trace (tracing.otel.request_trace_id).
+    caller_trace_id: str = ""
     # Provider adapter — set by OptimisationPipeline early in process_request.
     # Type is Any to avoid importing providers here; callers cast as needed.
     provider_adapter: Optional[Any] = None
