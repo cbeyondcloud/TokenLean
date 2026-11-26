@@ -21,6 +21,32 @@ Add a new `###` item under today's date header; only start a new `## YYYY-MM-DD`
 date changes.
 -->
 
+## 2026-11-26
+
+### Set up webhooks from the portal, and email trial warnings — Enhancement [Enterprise]
+**[Enterprise]** A new **Webhooks** tab lets a tenant add signed HTTPS endpoints, choose events,
+send a test, disable or delete, without calling the API. The test now says whether the endpoint
+accepted the delivery (it reported success either way), and enabling or disabling is audited. The
+operator can also email a tenant's owners when a free trial nears its end or ends (configurable,
+off by default; sent only while the tenant is still calling). <https://tokenlean.cbeyond.cloud/>
+
+### A team-restricted key could reach beyond its team — Bug fix
+Only the usage export and the key and routing admin APIs honoured a key's team binding. A
+team-restricted **admin** key could use `X-Tenant-ID` on traffic, the cross-tenant admin routes and
+any batch result; it now gets none of these. On Enterprise, a team-restricted key could also read
+the whole tenant's data through the portal, billing and data-rights routes, and an admin one could
+use the operator console; all now answer 403. Keys with no team binding are unchanged. A script
+that used a team-restricted key on those routes needs a key with no team binding.
+
+### Cost by team: a team rollup, and user and cost in the usage export — Enhancement (OSS + Enterprise)
+The team was stored on every usage row, but cost could not be grouped by it, and the usage export
+showed what a call saved without who made it or what it cost. Rows with no team recorded show as
+`(unattributed)`; a request with no team shows as `default`. Cost figures are config-priced
+estimates, never the bill. A team-restricted key's export still carries no user identity.
+- **OSS:** `/admin/usage-export` records now include `user_id` and `cost_actual_usd`.
+- **[Enterprise]:** group usage by team in the portal and operator console; the chargeback
+  CSV is now broken down by team, user and day — <https://tokenlean.cbeyond.cloud/>
+
 ## 2026-11-24
 
 ### Langfuse traces and usage rows carry the caller's run identity and trace id — Enhancement (OSS)

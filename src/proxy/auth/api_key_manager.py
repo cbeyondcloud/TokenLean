@@ -334,8 +334,8 @@ def validate_proxy_key(api_key: str) -> Tuple[bool, Optional[str], Optional[dict
 
 
 def is_admin_key(metadata: Optional[dict]) -> bool:
-    """Return True when a validated key's metadata grants the admin/impersonation
-    scope.
+    """Return True when a validated key carries the admin flag. For anything that
+    reaches beyond one team use ``is_platform_admin``.
 
     Admin keys may (a) assume another tenant via the ``X-Tenant-ID`` header
     (cross-tenant impersonation), (b) name an arbitrary RAG collection via
@@ -343,6 +343,14 @@ def is_admin_key(metadata: Optional[dict]) -> bool:
     Legacy string-format keys (metadata is None) are never admin.
     """
     return bool(isinstance(metadata, dict) and metadata.get("admin"))
+
+
+def is_platform_admin(metadata: Optional[dict]) -> bool:
+    """Return True for an admin key with NO team binding: the only keys that may act
+    across teams and tenants. A team-bound admin key manages its own team of its own
+    tenant (``admin_api.common.admin_scope``) and nothing wider.
+    """
+    return is_admin_key(metadata) and key_team(metadata) is None
 
 
 def is_gateway_key(metadata: Optional[dict]) -> bool:
