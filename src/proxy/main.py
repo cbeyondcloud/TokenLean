@@ -36,7 +36,7 @@ litellm.drop_params = True
 from auth.api_key_manager import (
     validate_proxy_key, is_admin_key, is_gateway_key, is_suspended,
     is_contract_inactive, get_ip_allowlist, key_cached_and_fresh, key_store_backend_installed,
-    key_team, key_user, key_store_stale,
+    key_team, key_user, key_store_stale, is_platform_admin,
 )
 from net.client_ip import ClientIPMiddleware, request_client_ip
 from net.ip_allowlist import ip_allowed
@@ -495,7 +495,7 @@ async def metrics(request: Request):
 async def tool_governance(request: Request):
     """Return tools with no calls in the last N days (configurable)."""
     user_id, _api_key, tenant_metadata = await _authenticate(request)
-    _require_admin(tenant_metadata, "cross-tenant tool governance")
+    _require_platform_admin(tenant_metadata, "cross-tenant tool governance")
     cfg = get_config().get("groups", {}).get("G18_observability", {})
     days = cfg.get("tool_governance_days", 30)
 
@@ -557,7 +557,7 @@ async def alert_webhook(request: Request):
         user_id = "alertmanager"
     else:
         user_id, _api_key, tenant_metadata = await _authenticate(request)
-        _require_admin(tenant_metadata, "alert webhook ingestion")
+        _require_platform_admin(tenant_metadata, "alert webhook ingestion")
     try:
         payload = await request.json()
         from cache.redis_pool import get_redis
@@ -646,7 +646,7 @@ async def usage_export(request: Request):
             "SELECT tenant_id, request_id, timestamp, baseline_tokens, optimised_tokens, "
             "proxy_optimised_tokens, provider_prompt_tokens, "
             "tokens_saved, cost_saved_usd, groups_applied, pricing_tier, model, routed_model, "
-            "team, tags "
+            "team, tags, user_id, cost_actual_usd "
             "FROM usage_events WHERE timestamp >= $1 AND timestamp <= $2"
         )
         args = [start_dt, end_dt]
@@ -673,9 +673,9 @@ async def usage_export(request: Request):
             ts = record.get("timestamp")
             if ts is not None and hasattr(ts, "isoformat"):
                 record["timestamp"] = ts.isoformat()
-            cost = record.get("cost_saved_usd")
-            if cost is not None:
-                record["cost_saved_usd"] = float(cost)
+            for money in ("cost_saved_usd", "cost_actual_usd"):
+                if record.get(money) is not None:
+                    record[money] = float(record[money])
             # JSONB comes back from asyncpg as text: export the usage tags as an object.
             if isinstance(record.get("tags"), str):
                 record["tags"] = json.loads(record["tags"])
@@ -838,7 +838,7 @@ async def batch_results(request_id: str, request: Request):
         # owner on record only an admin may read it: G13 records the owner before it queues
         # a request, so no caller can claim a result that has none.
         owner = await get_batch_result_owner(request_id)
-        if not is_admin_key(tenant_metadata) and owner != _caller_tenant_id(tenant_metadata):
+        if not is_platform_admin(tenant_metadata) and owner != _caller_tenant_id(tenant_metadata):
             return JSONResponse(status_code=404, content={"status": "not_found", "request_id": request_id})
         key = f"tok_opt:batch_result:{request_id}"
         raw = await r.get(key)
@@ -896,7 +896,7 @@ async def list_group_enablement(request: Request):
         headers,
         key_tenant_id=_caller_tenant_id(tenant_metadata),
         key_tier=md.get("tier", "free"),
-        key_is_admin=is_admin_key(tenant_metadata),
+        key_is_admin=is_platform_admin(tenant_metadata),
         api_key_hash=hashlib.sha256((api_key or "").encode("utf-8")).hexdigest(),
     )
     groups = await _pipeline.effective_group_enablement(tenant.tenant_id)
@@ -2339,7 +2339,7 @@ async def _serve_request_core(
     meta = tenant_metadata if isinstance(tenant_metadata, dict) else {}
     params["_auth_tenant_id"] = meta.get("tenant_id")
     params["_auth_tier"] = meta.get("tier", "free")
-    params["_auth_admin"] = bool(meta.get("admin", False))
+    params["_auth_admin"] = is_platform_admin(tenant_metadata)
     params["_auth_gateway"] = is_gateway_key(tenant_metadata)
     # The team the key is bound to (ST-1), "" for none: it outranks a gateway's X-Team.
     params["_auth_team"] = key_team(tenant_metadata) or ""
@@ -3268,6 +3268,15 @@ def _require_admin(tenant_metadata: Optional[dict], action: str) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Admin scope required for {action}",
+        )
+
+
+def _require_platform_admin(tenant_metadata: Optional[dict], action: str) -> None:
+    """``_require_admin`` for cross-tenant actions: a team-bound admin key is refused."""
+    if not is_platform_admin(tenant_metadata):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"An admin key with no team binding is required for {action}",
         )
 
 

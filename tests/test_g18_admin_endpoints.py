@@ -268,6 +268,26 @@ class TestUsageExport:
         assert json.loads(response.text.splitlines()[0])["team"] == "payments"
 
     @pytest.mark.asyncio
+    async def test_usage_export_selects_user_and_actual_cost(self, client, monkeypatch):
+        """#173: chargeback needs who spent and what it cost, not only what was saved."""
+        from decimal import Decimal
+        monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
+        pool = _FakePool([{"request_id": "req-1", "user_id": "alice",
+                           "cost_actual_usd": Decimal("0.004200")}])
+
+        async def _fake_get_pool(_dsn):
+            return pool
+
+        with patch("cache.pg_pool.get_pg_pool", _fake_get_pool):
+            response = await client.post("/admin/usage-export", json={},
+                                         headers={"Authorization": "Bearer admin-key"})
+        assert response.status_code == 200
+        columns = pool.conn.fetched_args[0].split("FROM")[0]
+        assert "user_id" in columns and "cost_actual_usd" in columns
+        record = json.loads(response.text.splitlines()[0])
+        assert record["user_id"] == "alice" and record["cost_actual_usd"] == 0.0042
+
+    @pytest.mark.asyncio
     async def test_usage_export_includes_the_tags_as_an_object(self, client, monkeypatch):
         """ST-2: asyncpg returns JSONB as text; the record carries it as an object."""
         monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")

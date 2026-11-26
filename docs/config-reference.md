@@ -148,13 +148,19 @@ A proxy key can be bound to a **team** of its tenant at issuance (`create_key(te
 `scripts/issue-key.sh issue --team NAME`; 1–64 characters of `A-Z a-z 0-9 . _ -`, not
 `default`). A request's team is, in order: the key's team binding; else, for a key issued
 with `gateway: true`, its `X-Team` header; else `default` (no team). The binding wins over
-any header. The team is written to `usage_events.team` and returned by `/admin/usage-export`,
+any header. The team is written to `usage_events.team` and returned by `/admin/usage-export`
+(whose records also carry `user_id` and `cost_actual_usd`, a config-priced estimate),
 used as the `team` metric label (bounded by `G18_observability.label_values.team`), and
 selects `rate_limit.per_team` limits. A team-bound key's `/admin/usage-export` returns **only
 its own team's rows** of its own tenant, whatever the body or query string asks for, and with no
 user identity in them (the `billing.metering.tags.tenant_only_keys` tags — default `user` — are
 removed and any `user_id` is blanked); a key with
 no team binding keeps the whole-tenant view (an admin key, its cross-tenant view).
+A team-bound key is **refused (403)** on every route that covers the whole tenant or more: the
+portal, billing, GDPR, webhooks and document upload routes, the operator console,
+`/admin/tool-governance` and `/admin/alert-webhook`. A team-bound **admin** key is not a platform
+admin: `X-Tenant-ID` and `x_rag_collection` are ignored and another tenant's batch results are
+"not found". It still manages its own team's keys and routing (see "/admin/keys").
 
 Rotating keys: `rotate_tenant_keys_per_binding(tenant)` issues **one new key per binding** — the
 tenant's unbound keys and each team, and within either each bound user (see "/admin/keys") — each keeping its team, user, tier, trust flags and extra metadata
