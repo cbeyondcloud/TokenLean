@@ -23,6 +23,13 @@ date changes.
 
 ## 2026-11-26
 
+### Set up webhooks from the portal, and email trial warnings — Enhancement [Enterprise]
+**[Enterprise]** A new **Webhooks** tab lets a tenant add signed HTTPS endpoints, choose events,
+send a test, disable or delete, without calling the API. The test now says whether the endpoint
+accepted the delivery (it reported success either way), and enabling or disabling is audited. The
+operator can also email a tenant's owners when a free trial nears its end or ends (configurable,
+off by default; sent only while the tenant is still calling). <https://tokenlean.cbeyond.cloud/>
+
 ### A team-restricted key could reach beyond its team — Bug fix
 Only the usage export and the key and routing admin APIs honoured a key's team binding. A
 team-restricted **admin** key could use `X-Tenant-ID` on traffic, the cross-tenant admin routes and
